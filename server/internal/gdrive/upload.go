@@ -254,6 +254,11 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 	return c.Call(ctx, http.MethodDelete, apiBase+"/files/"+url.PathEscape(id), nil, nil)
 }
 
+// Trash moves a file to the Drive trash, where it can be restored for 30 days.
+func (c *Client) Trash(ctx context.Context, id string) error {
+	return c.Call(ctx, http.MethodPatch, apiBase+"/files/"+url.PathEscape(id)+"?fields=id", map[string]bool{"trashed": true}, nil)
+}
+
 // OpenRange streams bytes [start, end] (end < 0 means to the end of the file).
 func (c *Client) OpenRange(ctx context.Context, id string, start, end int64) (*http.Response, error) {
 	h := http.Header{}

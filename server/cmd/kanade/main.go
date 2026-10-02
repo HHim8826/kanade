@@ -25,6 +25,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/downloader"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
+	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/stream"
@@ -105,6 +106,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	authSvc := auth.New(d)
 	drive := gdrive.New(d, strings.TrimRight(cfg.PublicURL, "/")+"/oauth/google/callback")
 	lib := library.New(d)
+	if err := lib.EnsureSearchIndex(ctx); err != nil {
+		return err
+	}
 	imp := importer.New(d, lib, drive, cfg.Path(config.DirStaging), log)
 	cache, err := stream.NewCache(drive, cfg.Path(config.DirCache), *cacheMiB<<20, log)
 	if err != nil {
@@ -128,8 +132,11 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 			}
 		}
 	}
+	mb := identify.New(strings.TrimRight(cfg.PublicURL, "/") + "/")
+	mb.Log = log
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
-		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log})
+		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log,
+		Identify: mb})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()

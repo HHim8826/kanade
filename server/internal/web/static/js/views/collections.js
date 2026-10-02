@@ -5,6 +5,7 @@ import { enqueue, fromTrack, playNext, playQueue, shuffled } from '../player.js'
 import { go, href } from '../router.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
+import { useLibRev } from './organize.js';
 
 // Playlists, favorites and play history (P2-1).
 
@@ -65,7 +66,8 @@ export function FavoritesTab({ data }) {
 }
 
 export function Playlist({ id }) {
-  const pl = useLoad(() => get('/playlists/' + id), [id]);
+  const rev = useLibRev();
+  const pl = useLoad(() => get('/playlists/' + id), [id], rev);
   const [order, setOrder] = useState(null); // optimistic item order while a reorder is saved
   if (pl.loading && !pl.data) return html`<${Spinner} />`;
   if (pl.error) return html`<${ErrorBox} error=${pl.error} onRetry=${pl.reload} />`;
@@ -162,9 +164,10 @@ const dayLabel = (ms) => {
 const clock = (ms) => new Date(ms).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
 
 export function History() {
-  const top = useLoad(() => get('/history/top?days=30'), []);
+  const rev = useLibRev();
+  const top = useLoad(() => get('/history/top?days=30'), [], rev);
   const [pages, setPages] = useState([]);
-  const first = useLoad(() => get('/history?limit=50'), []);
+  const first = useLoad(() => get('/history?limit=50'), [], rev);
   const [more, setMore] = useState({ busy: false, done: false });
   const list = [...(first.data || []), ...pages.flat()];
 
@@ -187,7 +190,7 @@ export function History() {
     ${topItems.length > 0 && html`<h2 class="section-title">最近 30 天最常播放</h2>
       <${TrackList} items=${topItems} showAlbum meta=${(it) => html`<span>${it.plays} 次</span>`} />`}
     <h2 class="section-title">最近播放</h2>
-    ${first.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${first.error} onRetry=${first.reload} />`}
+    ${first.loading && !first.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${first.error} onRetry=${first.reload} />`}
     ${first.data && !list.length && html`<${Empty} icon="history">還沒有播放記錄。<//>`}
     <ul class="list">${list.map((h) => {
       const day = dayLabel(h.updated_at);

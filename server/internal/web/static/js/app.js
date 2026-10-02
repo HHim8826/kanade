@@ -8,6 +8,7 @@ import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './u
 import { History, Playlist } from './views/collections.js';
 import { Album, Artist, Home, Library, Search } from './views/library.js';
 import { Login } from './views/login.js';
+import { Edits } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
 import { Settings } from './views/settings.js';
 import { Tasks } from './views/tasks.js';
@@ -31,6 +32,7 @@ function Page({ route, onLogout }) {
     case 'artist': return html`<${Artist} id=${arg} name=${route.query.get('name')} />`;
     case 'playlist': return html`<${Playlist} id=${arg} />`;
     case 'history': return html`<${History} />`;
+    case 'edits': return html`<${Edits} />`;
     case 'tasks': return html`<${Tasks} />`;
     case 'upload': return html`<${Upload} />`;
     case 'settings': return html`<${Settings} onLogout=${onLogout} />`;
@@ -53,7 +55,7 @@ function App() {
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist'].includes(section))
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist', 'edits'].includes(section))
     || (key === 'tasks' && section === 'upload') || (key === '' && section === 'history');
   return html`
     <nav class="nav" aria-label="主要">

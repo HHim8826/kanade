@@ -236,3 +236,43 @@ func TestHomeAndPlaysEndpoints(t *testing.T) {
 		t.Fatalf("random album in an empty library: %d", r.Code)
 	}
 }
+
+func TestEditUndoEndpoints(t *testing.T) {
+	s, h := newTestServer(t)
+	token := loginToken(t, s, h)
+	ctx := context.Background()
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "aa", Size: 1, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "drive-aa")
+	r, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "Old", Artist: "A", Album: "Al", AlbumArtist: "A"})
+	path := fmt.Sprintf("/api/v1/tracks/%d", r.TrackID)
+
+	rec := do(t, h, "PATCH", path, token, map[string]any{"title": "New", "aliases": []string{"alias"}})
+	var res struct{ Group int64 }
+	json.Unmarshal(rec.Body.Bytes(), &res)
+	if rec.Code != http.StatusOK || res.Group == 0 {
+		t.Fatalf("patch: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "PATCH", path, token, map[string]any{"title": ""}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("blank title: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", "/api/v1/edits", token, nil); rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("編輯歌曲「Old」")) {
+		t.Fatalf("edits: %d %s", rec.Code, rec.Body)
+	}
+	undo := fmt.Sprintf("/api/v1/edits/%d/undo", res.Group)
+	if rec := do(t, h, "POST", undo, token, nil); rec.Code != http.StatusOK {
+		t.Fatalf("undo: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", undo, token, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("second undo: %d", rec.Code)
+	}
+	rec = do(t, h, "GET", path, token, nil)
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"title":"Old"`)) {
+		t.Fatalf("track after undo: %s", rec.Body)
+	}
+	if rec := do(t, h, "GET", "/api/v1/artists/1", token, nil); !bytes.Contains(rec.Body.Bytes(), []byte(`"items":[`)) {
+		t.Fatalf("artist: %s", rec.Body)
+	}
+	if rec := do(t, h, "POST", "/api/v1/albums/1/merge", token, map[string]int{"into": 1}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("self merge: %d", rec.Code)
+	}
+}

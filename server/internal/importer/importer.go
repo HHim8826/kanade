@@ -560,3 +560,36 @@ func (im *Importer) removeStaged(p string) {
 		}
 	}
 }
+
+// Original reads a track back from its first import record: the saved tags, interpreted the way
+// that import did (P2-2 "restore original tags"). It returns nil when the track has no record.
+// The album artist is whatever the tags said; an album artist decided from sibling files is kept
+// in the album's origin instead.
+func (im *Importer) Original(ctx context.Context, trackID int64) (*library.EntryInput, error) {
+	var rel, raw string
+	err := im.db.QueryRowContext(ctx, `SELECT rel_path, info FROM import_items WHERE track_id = ? AND info IS NOT NULL
+		ORDER BY id LIMIT 1`, trackID).Scan(&rel, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var info media.Info
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		return nil, fmt.Errorf("import record of track %d: %w", trackID, err)
+	}
+	in := entryInput(rel, &info)
+	return &in, nil
+}
+
+// StoreCover keeps an image (JPEG or PNG) as a cover, uploading it once per content.
+func (im *Importer) StoreCover(ctx context.Context, data []byte) (int64, error) {
+	if len(data) > maxCoverFile {
+		return 0, errors.New("the image is larger than 16 MB")
+	}
+	if id := im.storeCover(ctx, data); id != 0 {
+		return id, nil
+	}
+	return 0, errors.New("not a JPEG or PNG image, or the upload to Drive failed")
+}

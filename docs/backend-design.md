@@ -64,6 +64,8 @@ DIR/
 | `favorite_tracks`、`favorite_albums` | 收藏 |
 | `playlists`、`playlist_items` | 歌單；條目有獨立 ID、歌曲、可選專輯與音檔版本、位置，允許重複 |
 | `lyrics` | 每首歌曲一份歌詞：來源（內嵌／LRC／手動）、是否有時間軸 |
+| `aliases` | 歌手、專輯、歌曲的其他名稱，建入搜尋索引 |
+| `edit_groups`、`edits` | 修改紀錄：每個操作一組，逐欄記舊值與新值，供撤回 |
 
 精確去重鍵是 `sha256`＋`size`（唯一約束），上傳完成以 Drive 回傳的 `sha256Checksum` 驗證（P0 第 1 節）。
 
@@ -83,7 +85,7 @@ DIR/
 | `GET /drive`、`POST /drive/client` | Drive 帳號與容量；載入 OAuth client JSON |
 | `POST /drive/auth`、`POST /drive/auth/paste` | 產生授權網址（回呼 `GET /oauth/google/callback`，公開但只接受本服務產生的 state）；貼上回呼網址完成授權 |
 | `GET /albums`、`GET /albums/{id}` | 專輯清單（`limit`、`offset`）與收錄 |
-| `GET /tracks`、`GET /artists`、`GET /artists/{id}`、`GET /search?q=` | 歌曲、歌手、搜尋 |
+| `GET /tracks`、`GET /artists`、`GET /search?q=` | 歌曲、歌手（只列有歌曲的）、搜尋 |
 | `GET`／`HEAD /stream/{asset_id}` | 播放（Range、D7 快取）。驗證：`Authorization` header，或 `POST /stream/{id}/url` 取得的 12 小時簽名網址 |
 | `GET /covers/{id}?size=N` | 封面縮圖（預設 300，`size=0` 為原圖） |
 | `POST /imports` | `{"path": "..."}` 匯入伺服器上 `imports/`、`downloads/`、`staging/` 內的資料夾；或 `{"upload_group": "..."}` 匯入一組客戶端上傳 |
@@ -107,6 +109,15 @@ DIR/
 | `PUT /playlists/{id}/order` | `{"items": [條目 ID...]}`，必須剛好是歌單現有的全部條目 |
 | `GET`／`PUT`／`DELETE /tracks/{id}/lyrics` | 歌詞；手動輸入或刪除 |
 | `GET /history?limit&before`、`GET /history/top?days` | 播放記錄（略過不到 10 秒的跳過）；最常播放 |
+| `GET`／`PATCH`／`DELETE /tracks/{id}` | 歌曲資訊（含別名、收錄於哪些專輯）；編輯（`title`、`artist`、`version`、`kind`、`aliases`）；永久刪除（音檔移到 Drive 垃圾桶） |
+| `POST /tracks/{id}/restore`、`POST /albums/{id}/restore` | 恢復原標籤 |
+| `PATCH /albums/{id}` | 編輯專輯與其收錄（`title`、`album_artist`、`date`、`catalog`、`edition`、`kind`、`aliases`、`entries`） |
+| `PUT /albums/{id}/cover` | 以 JPEG／PNG 本體更換封面 |
+| `POST /albums/{id}/merge`、`/split`、`/remove` | 合併到 `into`；拆分 `entries` 為 `title`；移除收錄 |
+| `DELETE /albums/{id}[?tracks=1]` | 移除專輯（可撤回）；`tracks=1` 另永久刪除只在這張專輯的歌曲 |
+| `GET /albums/{id}/identify`、`GET`／`POST /albums/{id}/identify/{release}` | MusicBrainz 候選；差異；套用勾選的 `keys` |
+| `GET`／`PATCH /artists/{id}` | 歌手與歌曲、別名；改名（`name`）、別名（`aliases`） |
+| `GET /edits?limit&before`、`GET /edits/{id}`、`POST /edits/{id}/undo` | 修改紀錄、單筆明細、撤回（部分欄位保留時回傳 `conflicts`；全部無法撤回為 409） |
 
 ## 階段
 
@@ -154,6 +165,19 @@ DIR/
 - 歌詞來源與優先序：手動 > 有時間軸的匯入 > 純文字的匯入；匯入不會覆蓋手動輸入，手動清空即刪除。內嵌歌詞取自 Vorbis `LYRICS`／`UNSYNCEDLYRICS`、ID3 `USLT`、MP4 `©lyr`；之後找同主檔名的 `.lrc`（≤ 256 KB，編碼依 D2 第 4 點）。遷移時從 `import_items.info` 回填已入庫歌曲的內嵌歌詞（現有曲庫沒有）。
 - 網頁端：歌曲列「更多」選單（下一首播放、加入佇列、加入歌單、收藏、前往專輯）；專輯頁收藏與整張加入歌單；曲庫新增「歌單」「收藏」分頁；歌單頁可改名、刪除、拖曳或用選單排序；正在播放頁可收藏、切換「播放佇列／歌詞」，有時間軸的歌詞逐行同步、點一行跳到該處；播放記錄頁（近 30 天最常播放、依日期分組的最近播放）。網頁上傳會一併送出 `.lrc`、`.cue`、`.log`。
 - 實測（Chrome，桌面與手機寬度）：上述操作逐一走過，重新整理後排序保留，無主控台錯誤；測試資料與測試帳號已刪除。
+
+### P2-2 整理（2026-10-02）
+
+- 遷移 7：修改紀錄、別名、專輯與收錄的匯入身分（origin）、型號、版本、MusicBrainz ID。部署前備份到 `var/backups/db-20261002-pre-0007.sqlite`；在資料庫副本先試過遷移與索引重建。
+- 新套件 `internal/identify`（MusicBrainz 用戶端與差異比對）；`gdrive.Client.Trash`。
+- 網頁端：歌曲「更多」選單的「編輯資訊…」（含恢復原標籤、永久刪除）；專輯頁「更多」選單的編輯專輯資訊（含各曲曲名、歌手、碟號、曲序）、從 MusicBrainz 辨識、更換封面、合併、拆分、恢復原標籤、移除專輯；歌曲列「從專輯移除」；歌手頁改名與別名；曲庫頁的「修改紀錄」（#/edits）可展開明細與撤回。每次修改的提示都有「撤回」按鈕。
+- 實測（Chrome，桌面與 390 寬手機）：上述操作逐一走過；MusicBrainz 實際查詢「Aria The Natural Op - Euforia」，經歌手別名找到「ユーフォリア」（VICL-35986），套用 17 個欄位後撤回；永久刪除用 ffmpeg 產生的測試檔，確認 Drive 檔案進了垃圾桶。測試後曲庫的歌曲、專輯、收錄、音檔、播放記錄與測試前備份逐表比對一致，測試留下的空專輯、歌手、別名、修改紀錄與測試帳號已刪除。
+- 實測中修正：
+  - MusicBrainz 以整句片語搜尋時，翻錄檔常見的標籤（「Aria The Natural Op - Euforia」）完全找不到，改為逐字比對，並加上「經歌手別名」的查詢；
+  - 歌手改名後別名留在舊歌手、搜尋不到；
+  - 編輯對話框在窄欄時輸入框超出邊界；
+  - 修改後重新載入時整頁閃成載入中，捲動位置跑掉（`useLoad` 的重新整理改為保留目前資料）。
+- 已知限制：歌手字串不拆分多人（「A feat. B」是一位歌手）；羅馬字與假名之間的自動互通只靠別名；AcoustID 未實作。
 
 ## 使用方式（開發環境）
 

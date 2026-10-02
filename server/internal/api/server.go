@@ -20,6 +20,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/downloader"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
+	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/stream"
@@ -42,6 +43,7 @@ type Deps struct {
 	Downloads *downloader.Service
 	Aria2     *downloader.Aria2
 	Uploads   *uploads.Store
+	Identify  *identify.MusicBrainz
 	StreamKey []byte // HMAC key for signed stream URLs
 	Log       *slog.Logger
 }
@@ -57,6 +59,7 @@ type Server struct {
 	downloads *downloader.Service
 	aria2     *downloader.Aria2
 	uploads   *uploads.Store
+	mb        *identify.MusicBrainz
 	streamKey []byte
 	log       *slog.Logger
 	started   time.Time
@@ -64,7 +67,7 @@ type Server struct {
 
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
 }
 
 type ctxKey int
@@ -118,6 +121,25 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/tracks/{id}/lyrics", s.authed(s.setLyrics))
 	mux.Handle("GET /api/v1/history", s.authed(s.history))
 	mux.Handle("GET /api/v1/history/top", s.authed(s.topTracks))
+
+	mux.Handle("GET /api/v1/tracks/{id}", s.authed(s.track))
+	mux.Handle("PATCH /api/v1/tracks/{id}", s.authed(s.editTrack))
+	mux.Handle("DELETE /api/v1/tracks/{id}", s.authed(s.deleteTrack))
+	mux.Handle("POST /api/v1/tracks/{id}/restore", s.authed(s.restoreTrack))
+	mux.Handle("PATCH /api/v1/albums/{id}", s.authed(s.editAlbum))
+	mux.Handle("DELETE /api/v1/albums/{id}", s.authed(s.deleteAlbum))
+	mux.Handle("PUT /api/v1/albums/{id}/cover", s.authed(s.setAlbumCover))
+	mux.Handle("POST /api/v1/albums/{id}/merge", s.authed(s.mergeAlbum))
+	mux.Handle("POST /api/v1/albums/{id}/split", s.authed(s.splitAlbum))
+	mux.Handle("POST /api/v1/albums/{id}/remove", s.authed(s.removeEntries))
+	mux.Handle("POST /api/v1/albums/{id}/restore", s.authed(s.restoreAlbum))
+	mux.Handle("GET /api/v1/albums/{id}/identify", s.authed(s.identifySearch))
+	mux.Handle("GET /api/v1/albums/{id}/identify/{release}", s.authed(s.identifyPropose))
+	mux.Handle("POST /api/v1/albums/{id}/identify/{release}", s.authed(s.identifyApply))
+	mux.Handle("PATCH /api/v1/artists/{id}", s.authed(s.editArtist))
+	mux.Handle("GET /api/v1/edits", s.authed(s.editGroups))
+	mux.Handle("GET /api/v1/edits/{id}", s.authed(s.editGroup))
+	mux.Handle("POST /api/v1/edits/{id}/undo", s.authed(s.undo))
 	mux.Handle("GET /api/v1/covers/{id}", s.authed(s.cover))
 	mux.Handle("POST /api/v1/stream/{id}/url", s.authed(s.streamURL))
 	mux.HandleFunc("GET /api/v1/stream/{id}", s.stream) // header token or signed URL, checked inside

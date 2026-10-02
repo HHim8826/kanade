@@ -215,7 +215,7 @@ func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSum
 		return []AlbumSummary{}, nil
 	}
 	list, err := scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id IN (`+
-		strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`) GROUP BY al.id`, ids...))
+		strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")+`) GROUP BY al.id `+listed, ids...))
 	if err != nil {
 		return nil, err
 	}

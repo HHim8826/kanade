@@ -94,7 +94,7 @@ func (s *Store) Favorites(ctx context.Context) (*Favorites, error) {
 		return nil, err
 	}
 	f.Albums, err = scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` JOIN favorite_albums f ON f.album_id = al.id
-		GROUP BY al.id ORDER BY f.created_at DESC`))
+		GROUP BY al.id `+listed+` ORDER BY f.created_at DESC`))
 	return f, err
 }
 

@@ -41,6 +41,10 @@ const albumSummarySQL = `SELECT al.id, al.title, al.album_artist, al.date, coale
 	LEFT JOIN album_entries e ON e.album_id = al.id
 	LEFT JOIN assets a ON a.id = e.asset_id AND a.state = 'verified'`
 
+// listed keeps albums that were merged away or emptied out of lists; they still exist, so undo
+// can fill them again and their page can point to where the songs went.
+const listed = `HAVING count(e.id) > 0`
+
 func scanAlbums(rows *sql.Rows, err error) ([]AlbumSummary, error) {
 	if err != nil {
 		return nil, err
@@ -63,7 +67,7 @@ func (s *Store) Albums(ctx context.Context, limit, offset int, recent bool) ([]A
 	if recent {
 		order = `al.id DESC`
 	}
-	return scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` GROUP BY al.id ORDER BY `+order+` LIMIT ? OFFSET ?`, limit, offset))
+	return scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` GROUP BY al.id `+listed+` ORDER BY `+order+` LIMIT ? OFFSET ?`, limit, offset))
 }
 
 type Entry struct {
@@ -73,13 +77,20 @@ type Entry struct {
 	TrackID int64      `json:"track_id"`
 	Title   string     `json:"title"`
 	Artist  string     `json:"artist"`
+	Version string     `json:"version,omitempty"`
 	Kind    string     `json:"kind"`
 	Asset   AssetBrief `json:"asset"`
 }
 
 type AlbumDetail struct {
 	AlbumSummary
-	Entries []Entry `json:"entries"`
+	Catalog    string   `json:"catalog"`
+	Edition    string   `json:"edition"`
+	MBRelease  string   `json:"mb_release,omitempty"`
+	MergedInto int64    `json:"merged_into,omitempty"` // emptied by a merge into this album
+	Original   bool     `json:"original"`              // made by an import, so its tags can be restored
+	Aliases    []string `json:"aliases"`
+	Entries    []Entry  `json:"entries"`
 }
 
 func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
@@ -88,7 +99,16 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		return nil, err
 	}
 	d := &AlbumDetail{AlbumSummary: list[0], Entries: []Entry{}}
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.kind, `+briefCols+`
+	var merged sql.NullInt64
+	if err := s.db.QueryRowContext(ctx, `SELECT catalog, edition, mb_release, merged_into, origin IS NOT NULL FROM albums WHERE id = ?`, id).
+		Scan(&d.Catalog, &d.Edition, &d.MBRelease, &merged, &d.Original); err != nil {
+		return nil, err
+	}
+	d.MergedInto = merged.Int64
+	if d.Aliases, err = aliasNames(ctx, s.db, "album", id); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.version, t.kind, `+briefCols+`
 		FROM album_entries e JOIN tracks t ON t.id = e.track_id JOIN assets a ON a.id = e.asset_id
 		WHERE e.album_id = ? AND a.state = 'verified' ORDER BY e.disc_no, e.track_no, t.title`, id)
 	if err != nil {
@@ -97,7 +117,7 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist, &e.Kind}, e.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist, &e.Version, &e.Kind}, e.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		d.Entries = append(d.Entries, e)
@@ -153,7 +173,7 @@ type Artist struct {
 
 func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, count(ta.track_id) FROM artists ar
-		LEFT JOIN track_artists ta ON ta.artist_id = ar.id GROUP BY ar.id ORDER BY ar.name LIMIT ? OFFSET ?`, limit, offset)
+		JOIN track_artists ta ON ta.artist_id = ar.id GROUP BY ar.id ORDER BY ar.name LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -169,9 +189,84 @@ func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error
 	return out, rows.Err()
 }
 
-func (s *Store) ArtistTracks(ctx context.Context, artistID int64) ([]TrackItem, error) {
-	return scanTracks(s.db.QueryContext(ctx, trackSQL+` JOIN track_artists ta2 ON ta2.track_id = t.id
-		WHERE ta2.artist_id = ? ORDER BY t.title`, artistID))
+type ArtistDetail struct {
+	Artist
+	Aliases []string    `json:"aliases"`
+	Items   []TrackItem `json:"items"`
+}
+
+// ArtistDetail is an artist with its other names and songs; nil when there is no such artist.
+func (s *Store) ArtistDetail(ctx context.Context, id int64) (*ArtistDetail, error) {
+	d := &ArtistDetail{}
+	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM artists WHERE id = ?`, id).Scan(&d.ID, &d.Name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if d.Aliases, err = aliasNames(ctx, s.db, "artist", id); err != nil {
+		return nil, err
+	}
+	d.Items, err = scanTracks(s.db.QueryContext(ctx, trackSQL+` JOIN track_artists ta2 ON ta2.track_id = t.id
+		WHERE ta2.artist_id = ? ORDER BY t.title`, id))
+	d.Tracks = len(d.Items)
+	return d, err
+}
+
+// ArtistByName is the ID of the artist with exactly this name, or 0.
+func (s *Store) ArtistByName(ctx context.Context, name string) (int64, error) {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM artists WHERE name = ?`, strings.TrimSpace(name)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
+}
+
+type TrackEntry struct {
+	EntryID int64  `json:"entry_id"`
+	AlbumID int64  `json:"album_id"`
+	Album   string `json:"album"`
+	DiscNo  int    `json:"disc_no"`
+	TrackNo int    `json:"track_no"`
+}
+
+type TrackDetail struct {
+	TrackItem
+	Version     string       `json:"version"`
+	MBRecording string       `json:"mb_recording,omitempty"`
+	Aliases     []string     `json:"aliases"`
+	Entries     []TrackEntry `json:"entries"` // every album the track is on
+}
+
+// Track is one track with what its edit dialog shows; nil when there is no such track.
+func (s *Store) Track(ctx context.Context, id int64) (*TrackDetail, error) {
+	items, err := scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id = ?`, id))
+	if err != nil || len(items) == 0 {
+		return nil, err
+	}
+	d := &TrackDetail{TrackItem: items[0], Entries: []TrackEntry{}}
+	if err := s.db.QueryRowContext(ctx, `SELECT version, mb_recording FROM tracks WHERE id = ?`, id).Scan(&d.Version, &d.MBRecording); err != nil {
+		return nil, err
+	}
+	if d.Aliases, err = aliasNames(ctx, s.db, "track", id); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, al.id, al.title, e.disc_no, e.track_no FROM album_entries e
+		JOIN albums al ON al.id = e.album_id WHERE e.track_id = ? ORDER BY e.id`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var e TrackEntry
+		if err := rows.Scan(&e.EntryID, &e.AlbumID, &e.Album, &e.DiscNo, &e.TrackNo); err != nil {
+			return nil, err
+		}
+		d.Entries = append(d.Entries, e)
+	}
+	return d, rows.Err()
 }
 
 type SearchResult struct {
@@ -184,9 +279,11 @@ type SearchResult struct {
 // or more characters; shorter ones (common in Japanese) scan the index table, which is small.
 func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult, error) {
 	res := &SearchResult{Tracks: []TrackItem{}, Albums: []AlbumSummary{}, Artists: []Artist{}}
-	q = Normalize(q)
-	if q == "" {
-		return res, nil
+	q, raw := Normalize(q), q
+	if q == "" { // only symbols, like "%" or "△": match them as written
+		if q = fold(raw, false); strings.TrimSpace(q) == "" {
+			return res, nil
+		}
 	}
 	pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
 	ids := map[string][]any{}
@@ -213,13 +310,13 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 		}
 	}
 	if v := ids["album"]; len(v) > 0 {
-		if res.Albums, err = scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id IN (`+in(len(v))+`) GROUP BY al.id ORDER BY al.title`, v...)); err != nil {
+		if res.Albums, err = scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id IN (`+in(len(v))+`) GROUP BY al.id `+listed+` ORDER BY al.title`, v...)); err != nil {
 			return nil, err
 		}
 	}
 	if v := ids["artist"]; len(v) > 0 {
 		rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, count(ta.track_id) FROM artists ar
-			LEFT JOIN track_artists ta ON ta.artist_id = ar.id WHERE ar.id IN (`+in(len(v))+`) GROUP BY ar.id ORDER BY ar.name`, v...)
+			JOIN track_artists ta ON ta.artist_id = ar.id WHERE ar.id IN (`+in(len(v))+`) GROUP BY ar.id ORDER BY ar.name`, v...)
 		if err != nil {
 			return nil, err
 		}

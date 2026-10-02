@@ -4,6 +4,7 @@ import { enqueue, playNext } from './player.js';
 import { go } from './router.js';
 import { createStore, useStore } from './store.js';
 import { Cover, Dialog, ErrorBox, Spinner, html, openMenu, showDialog, toast, useLoad } from './ui.js';
+import { editTrack } from './views/organize.js';
 
 // Actions shared by every list of songs: favorites, the track menu, adding to playlists.
 
@@ -48,6 +49,7 @@ export function trackMenu(e, item, extra = []) {
     item.trackId && { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist([item]) },
     item.trackId && { icon: fav ? 'favorite' : 'favoriteOff', label: fav ? '取消收藏' : '收藏', onClick: () => toggleFav('track', item.trackId) },
     item.albumId && { icon: 'album', label: '前往專輯', onClick: () => go('album/' + item.albumId) },
+    item.trackId && { icon: 'edit', label: '編輯資訊…', onClick: () => editTrack(item.trackId) },
     ...extra,
   ]);
 }

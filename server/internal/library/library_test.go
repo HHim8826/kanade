@@ -119,13 +119,17 @@ func TestSearchNormalizesWidthAndCase(t *testing.T) {
 	s.Publish(ctx, verifiedAsset(t, s, "gg"), EntryInput{Title: "100% Love", Artist: "x"})
 
 	cases := map[string]struct{ tracks, albums, artists int }{
-		"ｳﾝﾃﾞｨｰﾈ": {1, 0, 0}, // half-width katakana query
-		"aria":    {0, 1, 0}, // full-width letters in the album title
-		"牧野":      {1, 0, 1}, // two characters: below the trigram length
-		"100%":    {1, 0, 0}, // % must be literal
-		"0%":      {1, 0, 0},
-		"%":       {1, 0, 0},
-		"zzz":     {0, 0, 0},
+		"ｳﾝﾃﾞｨｰﾈ":  {1, 0, 0}, // half-width katakana query
+		"aria":     {0, 1, 0}, // full-width letters in the album title
+		"牧野":       {1, 0, 1}, // two characters: below the trigram length
+		"100%":     {1, 0, 0}, // % must be literal
+		"0%":       {1, 0, 0},
+		"%":        {1, 0, 0},
+		"zzz":      {0, 0, 0},
+		"うんでぃ":     {1, 0, 0}, // hiragana finds katakana
+		"牧野 由依":    {1, 0, 1}, // spaces do not matter
+		"the orig": {0, 1, 0},
+		"diーne":    {0, 0, 0},
 	}
 	for q, want := range cases {
 		r, err := s.Search(ctx, q, 50)

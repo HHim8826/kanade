@@ -42,6 +42,12 @@ const icons = {
   drag: 'M20 9H4v2h16V9zM4 15h16v-2H4v2z',
   up: 'M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z',
   down: 'M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z',
+  merge: 'M17 20.41L18.41 19 15 15.59 13.59 17 17 20.41zM7.5 8H11v5.59L5.59 19 7 20.41l6-6V8h3.5L12 3.5 7.5 8z',
+  split: 'M14 4l2.29 2.29-2.88 2.88 1.42 1.42 2.88-2.88L20 10V4h-6zm-4 0H4v6l2.29-2.29 4.71 4.7V20h2v-8.41l-5.29-5.3L10 4z',
+  restore: 'M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18z',
+  identify: 'M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z',
+  image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
+  undo: 'M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62A7.95 7.95 0 0 1 12.5 10c3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 10.53 17.15 8 12.5 8z',
 };
 
 export function Icon({ name, size = 24, label }) {
@@ -101,8 +107,9 @@ export function ErrorBox({ error, onRetry }) {
 
 // useLoad runs an async loader and keeps loading / error / data together. Data loaded for other
 // deps (another tab, another album) is never returned: rendering one tab's rows with another
-// tab's component crashed the library page.
-export function useLoad(loader, deps) {
+// tab's component crashed the library page. A change of refresh (the library revision after an
+// edit) loads again but keeps showing the current data meanwhile.
+export function useLoad(loader, deps, refresh) {
   const key = JSON.stringify(deps);
   const [state, setState] = useState({ key: null, loading: true, error: null, data: null });
   const [tick, setTick] = useState(0);
@@ -114,7 +121,7 @@ export function useLoad(loader, deps) {
       (error) => alive && setState({ key, loading: false, error, data: null }),
     );
     return () => { alive = false; };
-  }, [key, tick]);
+  }, [key, tick, refresh]);
   const fresh = state.key === key;
   return {
     loading: !fresh || state.loading,
@@ -138,16 +145,21 @@ export function Boundary({ children }) {
 
 export const toasts = createStore({ list: [] });
 let toastSeq = 0;
-export function toast(message, kind = 'info') {
+const dropToast = (id) => toasts.set((s) => ({ list: s.list.filter((t) => t.id !== id) }));
+
+// toast shows a message; action { label, onClick } adds a button (for example "undo") and keeps
+// the toast up longer.
+export function toast(message, kind = 'info', action = null) {
   const id = ++toastSeq;
-  toasts.set((s) => ({ list: [...s.list, { id, message, kind }] }));
-  setTimeout(() => toasts.set((s) => ({ list: s.list.filter((t) => t.id !== id) })), kind === 'error' ? 6000 : 3500);
+  toasts.set((s) => ({ list: [...s.list, { id, message, kind, action }] }));
+  setTimeout(() => dropToast(id), action ? 8000 : kind === 'error' ? 6000 : 3500);
 }
 
 export function Toasts() {
   const { list } = useStore(toasts);
   return html`<div class="toasts" aria-live="polite">
-    ${list.map((t) => html`<div key=${t.id} class=${'toast ' + t.kind}>${t.message}</div>`)}
+    ${list.map((t) => html`<div key=${t.id} class=${'toast ' + t.kind}><span>${t.message}</span>
+      ${t.action && html`<button class="toast-action" onClick=${() => { dropToast(t.id); t.action.onClick(); }}>${t.action.label}</button>`}</div>`)}
   </div>`;
 }
 
@@ -207,14 +219,14 @@ export function DialogHost() {
   return render ? render(() => dialogs.set({ render: null })) : null;
 }
 
-export function Dialog({ title, onClose, children, actions }) {
+export function Dialog({ title, onClose, children, actions, wide }) {
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
   }, [onClose]);
   return html`<div class="scrim" onClick=${(e) => e.target === e.currentTarget && onClose()}>
-    <div class="dialog" role="dialog" aria-modal="true" aria-label=${title}>
+    <div class=${'dialog' + (wide ? ' wide' : '')} role="dialog" aria-modal="true" aria-label=${title}>
       <h2>${title}</h2>
       <div class="dialog-body">${children}</div>
       ${actions && html`<div class="dialog-actions">${actions}</div>`}

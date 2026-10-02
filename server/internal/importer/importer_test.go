@@ -308,3 +308,40 @@ func TestLyricsFromLRCFile(t *testing.T) {
 		t.Fatalf("lyrics %+v %v", l, err)
 	}
 }
+
+func TestOriginalTagsRestoreAfterEdit(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	src := filepath.Join(t.TempDir(), "Album")
+	os.MkdirAll(src, 0o755)
+	taggedMP3(t, filepath.Join(src, "03 x.mp3"), map[string]string{"TIT2": "Song", "TPE1": "A", "TALB": "Al", "TRCK": "3"})
+	batch, _, _ := im.CreateBatch(ctx, "local", "", src)
+	runUntilDone(t, im, batch)
+	albums, _ := lib.Albums(ctx, 10, 0, false)
+	if len(albums) != 1 {
+		t.Fatalf("albums %+v", albums)
+	}
+	d, _ := lib.Album(ctx, albums[0].ID)
+	e := d.Entries[0]
+	if !d.Original {
+		t.Fatal("imported album not marked original")
+	}
+	lib.EditAlbum(ctx, d.ID, library.AlbumEdit{Title: library.Str("Renamed"),
+		Entries: []library.EntryEdit{{EntryID: e.EntryID, TrackEdit: library.TrackEdit{Title: library.Str("Changed"), Artist: library.Str("B")}}}})
+	o, err := im.Original(ctx, e.TrackID)
+	if err != nil || o == nil || o.Title != "Song" || o.Artist != "A" || o.Album != "Al" || o.TrackNo != 3 {
+		t.Fatalf("original = %+v %v", o, err)
+	}
+	if _, err := lib.RestoreAlbum(ctx, d.ID, im.Original); err != nil {
+		t.Fatal(err)
+	}
+	d, _ = lib.Album(ctx, d.ID)
+	if d.Title != "Al" || d.Entries[0].Title != "Song" || d.Entries[0].Artist != "A" {
+		t.Fatalf("restored %+v", d)
+	}
+	// Importing the folder again finds the same entry.
+	batch, _, _ = im.CreateBatch(ctx, "local", "", src)
+	if b := runUntilDone(t, im, batch); b.Items[0].State != StateDuplicate {
+		t.Fatalf("re-import %+v", b.Items)
+	}
+}

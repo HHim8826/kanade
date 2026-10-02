@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"unicode"
 
 	"golang.org/x/text/unicode/norm"
 
@@ -77,19 +78,82 @@ func (s *Store) MarkVerified(ctx context.Context, assetID int64, driveFileID str
 	return err
 }
 
-// Normalize prepares text for the search index and for queries: NFKC folds full-width
-// letters and half-width katakana; lowercasing makes Latin matching case-insensitive.
-func Normalize(s string) string {
-	return strings.ToLower(norm.NFKC.String(strings.TrimSpace(s)))
+// Normalize prepares text for the search index and for queries (P2-2): NFKC folds full-width
+// letters and half-width katakana, lowercasing makes Latin case-insensitive, katakana is folded
+// to hiragana, and spaces, punctuation and symbols are dropped, so 「ハレ晴レ ユカイ」 finds
+// 「ハレ晴レユカイ」 and 「かなで」 finds 「カナデ」. The long vowel mark ー stays.
+func Normalize(s string) string { return fold(s, true) }
+
+// fold is Normalize; with strip false it keeps spaces and symbols, for queries made only of them.
+func fold(s string, strip bool) string {
+	s = strings.ToLower(norm.NFKC.String(strings.TrimSpace(s)))
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'ァ' && r <= 'ヶ', r == 'ヽ', r == 'ヾ':
+			r -= 0x60
+		case strip && (unicode.IsSpace(r) || unicode.IsPunct(r) || unicode.IsSymbol(r)):
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
+// indexVersion changes whenever Normalize does; EnsureSearchIndex then rebuilds the index.
+const indexVersion = "3"
+
+// index stores the search text of one object. Parts are normalized one by one and kept on separate
+// lines, so a query never matches across the end of a title and the start of a name.
 func index(ctx context.Context, tx *sql.Tx, kind string, id int64, parts ...string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM search_index WHERE kind = ? AND ref_id = ?`, kind, id); err != nil {
 		return err
 	}
+	var lines []string
+	for _, p := range parts {
+		if n := Normalize(p); n != "" {
+			lines = append(lines, n)
+		}
+		if l := fold(p, false); l != Normalize(p) && strings.TrimSpace(l) != "" {
+			lines = append(lines, l) // keeps symbols: see Search
+		}
+	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO search_index (kind, ref_id, text) VALUES (?, ?, ?)`,
-		kind, id, Normalize(strings.Join(parts, " ")))
+		kind, id, strings.Join(lines, "\n"))
 	return err
+}
+
+// EnsureSearchIndex rebuilds the search index when it was built by an older Normalize.
+func (s *Store) EnsureSearchIndex(ctx context.Context) error {
+	var v string
+	s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'search_index'`).Scan(&v)
+	if v == indexVersion {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM search_index`); err != nil {
+		return err
+	}
+	for kind, table := range map[string]string{"track": "tracks", "album": "albums", "artist": "artists"} {
+		ids, err := idsTx(ctx, tx, `SELECT id FROM `+table)
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if err := reindex(ctx, tx, kind, id); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES ('search_index', ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value`, indexVersion); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // EntryInput is what one imported file contributes to the library.
@@ -156,14 +220,25 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 	}
 
 	if in.Album != "" {
+		disc := max(in.DiscNo, 1)
+		origin := entryOrigin(albumOrigin(in.Album, in.AlbumArtist), disc, in.TrackNo)
+		// The same file imported with the same tags is the entry made last time, wherever it has
+		// been moved or renumbered since (P2-2).
+		err := tx.QueryRowContext(ctx, `SELECT id FROM album_entries WHERE asset_id = ? AND origin = ? ORDER BY id LIMIT 1`,
+			assetID, origin).Scan(&res.EntryID)
+		if err == nil {
+			return res, tx.Commit()
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return res, err
+		}
 		albumID, err := upsertAlbum(ctx, tx, in, now)
 		if err != nil {
 			return res, err
 		}
-		disc := max(in.DiscNo, 1)
-		r, err := tx.ExecContext(ctx, `INSERT INTO album_entries (album_id, track_id, asset_id, disc_no, track_no, created_at)
-			VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (album_id, disc_no, track_no, asset_id) DO NOTHING`,
-			albumID, res.TrackID, assetID, disc, in.TrackNo, now)
+		r, err := tx.ExecContext(ctx, `INSERT INTO album_entries (album_id, track_id, asset_id, disc_no, track_no, created_at, origin)
+			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (album_id, disc_no, track_no, asset_id) DO NOTHING`,
+			albumID, res.TrackID, assetID, disc, in.TrackNo, now, origin)
 		if err != nil {
 			return res, err
 		}
@@ -195,14 +270,23 @@ func upsertArtist(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
 	return id, index(ctx, tx, "artist", id, name)
 }
 
-// upsertAlbum matches an existing album by exact title and album artist. P1 accepts that two
-// different releases with identical names would merge; the P2 import preview lets users split them.
+// upsertAlbum finds the album first made from this title and album artist, even if it was renamed
+// since, and follows it when it was merged into another. Two different releases with identical tags
+// still meet here; the P2 import preview lets users keep them apart.
 func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, now int64) (int64, error) {
+	key := albumOrigin(in.Album, in.AlbumArtist)
 	var id, cover int64
-	err := tx.QueryRowContext(ctx, `SELECT id, coalesce(cover_id, 0) FROM albums WHERE title = ? AND album_artist = ?`,
-		in.Album, in.AlbumArtist).Scan(&id, &cover)
+	var merged sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT id, coalesce(cover_id, 0), merged_into FROM albums WHERE origin = ? ORDER BY id LIMIT 1`,
+		key).Scan(&id, &cover, &merged)
 	switch {
 	case err == nil:
+		for hops := 0; merged.Valid && hops < 10; hops++ {
+			id = merged.Int64
+			if err := tx.QueryRowContext(ctx, `SELECT coalesce(cover_id, 0), merged_into FROM albums WHERE id = ?`, id).Scan(&cover, &merged); err != nil {
+				return 0, err
+			}
+		}
 		if cover == 0 && in.CoverID != 0 {
 			_, err = tx.ExecContext(ctx, `UPDATE albums SET cover_id = ?, updated_at = ? WHERE id = ?`, in.CoverID, now, id)
 		}
@@ -214,8 +298,8 @@ func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, now int64) (int
 	if in.CoverID != 0 {
 		coverArg = in.CoverID
 	}
-	r, err := tx.ExecContext(ctx, `INSERT INTO albums (title, album_artist, date, cover_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?)`, in.Album, in.AlbumArtist, in.Date, coverArg, now, now)
+	r, err := tx.ExecContext(ctx, `INSERT INTO albums (title, album_artist, date, cover_id, origin, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, in.Album, in.AlbumArtist, in.Date, coverArg, key, now, now)
 	if err != nil {
 		return 0, err
 	}

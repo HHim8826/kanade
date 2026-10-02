@@ -89,20 +89,6 @@ func (s *Server) artists(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
-func (s *Server) artist(w http.ResponseWriter, r *http.Request) {
-	id, err := pathID(r)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	list, err := s.lib.ArtistTracks(r.Context(), id)
-	if err != nil {
-		s.internal(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
-}
-
 func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 	res, err := s.lib.Search(r.Context(), r.URL.Query().Get("q"), 50)
 	if err != nil {
