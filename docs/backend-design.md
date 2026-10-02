@@ -83,7 +83,9 @@ DIR/
 
 ## 匯入狀態
 
-`import_items.state`：`pending → parsing → hashing → uploading → verifying → published`，另有 `duplicate`（音檔已存在，只建立收錄）、`failed`、`skipped`（不支援的格式）、`excluded`（預覽中排除）、`expanded`（已展開的 ZIP）。每一步完成即寫入資料庫；重啟後從最後完成的步驟繼續，上傳以保存的 session 續傳。
+`import_items.state`：`pending → parsing → hashing → uploading → verifying → published`，另有 `duplicate`（音檔已存在，只建立收錄）、`failed`、`skipped`（不支援的格式）、`excluded`（預覽中排除）、`expanded`（已展開的 ZIP）、`split`（已依 CUE 分軌的整軌）、`discarded`（使用者捨棄的未保存檔案）。每一步完成即寫入資料庫；重啟後從最後完成的步驟繼續，上傳以保存的 session 續傳。
+
+來源清理（審查 #1、#2）：只有結果已寫入資料庫、且狀態為 `published`／`duplicate`（Drive 上有已驗證的副本）的檔案才刪除其暫存來源；`failed`、被略過的音檔與 ZIP 保留來源（上傳暫存、下載檔案、工作資料夾中解出或轉出的檔案），直到重試成功或使用者「捨棄」。預覽中排除的檔案視為使用者已決定，不保留。重試（#18）讓批次重新經過分析：重新取得收件匣檔案、展開 ZIP、轉檔、依（修正後的）CUE 分軌；已有計畫的檔案保留計畫（含預覽修改），新產生的歌曲用新的分組編號。
 
 `import_batches.state`（P2-3）：`analyzing → review → running → done`，另有 `canceled`。分析（展開 ZIP、讀標籤、定計畫）完成後，要預覽的批次停在 `review`，其餘直接 `running`；工作程序只處理 `running` 批次的檔案。
 
@@ -106,10 +108,11 @@ DIR/
 | `GET /imports/{id}/preview`、`POST /imports/{id}/plan` | 預覽（各組、單曲、其他檔案、偵測到的編碼）；修改計畫（`op`：`group`、`items`、`move`、`standalone`、`folders`、`encoding`、`exclude`、`include`），回傳新的預覽 |
 | `POST /imports/{id}/start`、`POST /imports/{id}/cancel` | 開始執行；取消（只限等待確認或分析中） |
 | `GET /sidecars/{id}` | 下載與專輯一起保存的 CUE／LOG |
-| `GET /imports`、`GET /imports/{id}`、`POST /imports/{id}/retry` | 匯入批次、逐檔狀態與上傳進度、重試失敗項目 |
+| `GET /imports`、`GET /imports/{id}`、`POST /imports/{id}/retry` | 匯入批次、逐檔狀態與上傳進度（完成的批次另有 `unsaved`：沒存進曲庫、來源保留中的檔案數）、重試失敗項目 |
+| `POST /imports/{id}/discard` | 捨棄完成批次中沒存進曲庫的檔案（失敗、被略過的音檔），讓來源可以清理：`{"discarded": n}` |
 | `POST /downloads` | `{"uri": "magnet:..."}`／`{"uri": "https://.../x.torrent"}`，或以 `Content-Type: application/x-bittorrent` 直接送 .torrent |
 | `GET /downloads`、`GET /downloads/{id}` | 下載清單；單一下載含檔案清單與預設勾選（`suggested`） |
-| `POST /downloads/{id}/select` | `{"files": [索引...]}`；省略則採預設勾選 |
+| `POST /downloads/{id}/select` | `{"files": [索引...]}`；省略則採預設勾選。總量超過暫存預算也接受，分批下載（審查 #28）；下載回應含 `round`、`rounds`、`left`（還沒輪到的檔案數）、`waiting_space`、`budget` |
 | `POST /downloads/{id}/pause`、`/resume`、`/cancel` | 控制 |
 | `POST /uploads` | `{"group", "path", "size", "sha256"}` 建立或續接上傳 |
 | `PUT /uploads/{id}?offset=N` | 送一個分塊（最多 32 MB）；位移不符回 409 與伺服器已收到的位元組數 |
@@ -234,6 +237,16 @@ DIR/
 - 測試：變更與完整對帳、基準對帳（首次與位置過期）、完整與增量對帳交錯時保留較新的觀測、同 ID 內容改寫不被信任；收件匣就地歸檔、重複移出、等待新檔案、上限只算可匯入的新檔案、掃描後被替換的檔案以新內容匯入、整理到 `inbox/已處理`；磁碟保護（快取足夠、暫停、邊界、重啟後維持）、暫停寫入失敗時回報且不啟動下載；快取硬性上限、轉送、Forget、並行使用（`-race`）。
 - 實測與重啟恢復結果見 `p2-design.md` P2-6。
 - 審查 issue #3、#33–#39 的修正包含在本階段。
+
+### 審查修正：匯入、暫存與分批下載（2026-10-02）
+
+- 遷移 12：`import_sources.piece`、`import_items.source_piece`。來源去重（#19）改為「每個預期產物（轉檔為 0、分軌為各 CUE 軌號）都還是被歌曲使用的已驗證檔案」才跳過；部分匯入、產物被刪或在 Drive 遺失時重新處理，曲庫已有的歌曲以 checksum 判為已存在。分軌寫入的標籤改為固定順序，同一來源每次切出相同位元組。
+- 遷移 13：`downloads.round`、`round_bytes`、`done_before`、`note`；下載狀態多了 `importing`。
+- 共用暫存預算 `internal/staging`（#4）：上傳、下載、匯入工作資料夾共用一把鎖，「是否放得下」與「記錄預留」在同一步完成，並一併檢查磁碟保留空間。上傳建立時預留整個檔案；下載每一批開始時預留該批；匯入在寫入工作資料夾前（解 ZIP、取收件匣檔案、FFmpeg 輸出）先 hold 上界，寫完後由實際檔案計入。FFmpeg 輸出的上界為原始 PCM 大小加 1/64、每個檔案 256 KB 與內嵌圖片，並以 `-fs` 截斷超出的輸出（截斷後 PCM 驗證失敗，不會入庫）。下載資料夾以實際配置的區塊計算（aria2 留下的未選檔案片段是稀疏檔）。
+- 分批下載（#28）：選取不再因總量超過預算被拒。排程器在下載輪到時依剩餘的暫存空間規劃一批：整個資料夾優先（first-fit），資料夾太大時先帶它的小附件（CUE、LOG、歌詞、封面）再盡量放音檔；單一檔案大於整個預算時，在暫存幾乎淨空（≤ 預算 1/4）且磁碟足夠時單獨一批。每批下載完移除 aria2 任務（批與批之間不做種），匯入該批；匯入完成後清掉已入庫的檔案與其他片段，保留後續批次需要的附件與沒存進曲庫的檔案；下一批從保存的 `task.torrent` 重新加入，並以 `check-integrity` 驗證既有資料。最後一批照常做種。沒有空間時任務留在排隊並顯示「等待暫存空間」，有空間就自動開始。
+- 上傳完成（#5）：`Complete` 可重送；若 rename 後、寫入資料庫前中斷，已就位的檔案以大小與 SHA-256 檢查後完成；內容不符則重新上傳。啟動時 `Recover` 自動完成這類上傳。
+- 測試：上傳略過檔案保留、ZIP 內略過檔案保留工作資料夾、結果寫入失敗保留來源且重啟後不重複入庫、重試轉檔與修正後的 CUE 與收件匣 LOG、部分分軌補齊與遺失的轉檔重新匯入、並行預留不超額（staging 與 uploads）、分軌的上界與預算不足時失敗、上傳 rename 後恢復、分批規劃（含資料夾拆分與附件）、真的 aria2 分三批下載（含大於預算的單檔）。
+- 實測：暫存預算暫設 50 MB，以本機 web seed 的 76 MB 測試 torrent（兩個資料夾）下載：第 1 批（38 MB）下載、匯入、清除後才開始第 2 批，兩張專輯都入庫；測試資料已刪除。
 
 ## 使用方式（開發環境）
 

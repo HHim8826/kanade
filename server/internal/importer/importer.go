@@ -27,6 +27,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/media"
+	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
 // Item states.
@@ -60,12 +61,14 @@ type Importer struct {
 	inboxWaiting atomic.Int64             // new inbox files the last scan left for later
 	albumArtists map[string]string        // batch|album folder|album -> decided album artist
 
-	// OnBatchDone runs once when a batch has no pending items left, or is canceled; failed counts
-	// items that need a retry. Client uploads use it to clear their staging folder.
-	OnBatchDone func(ctx context.Context, kind, source string, failed int)
-	// Space checks that need more bytes fit the shared staging budget and the disk reserve
-	// (extracting archives, converting); nil means no limit.
-	Space func(ctx context.Context, need int64) error
+	// OnBatchDone runs when a batch has no pending items left, is canceled, or has its unsaved files
+	// discarded; unsaved counts the items whose source must be kept (KeepsSource). Client uploads
+	// use it to clear their staging folder.
+	OnBatchDone func(ctx context.Context, kind, source string, unsaved int)
+	// Budget is the staging budget shared with downloads and uploads (plan §6); data about to be
+	// written to the work folder (unpacked archives, FFmpeg output, inbox fetches) is held on it
+	// first. nil means no limit.
+	Budget *staging.Budget
 	// FFmpeg converts and splits (P2-4); nil when the server has none.
 	FFmpeg *ffmpeg.Tool
 }
@@ -172,20 +175,40 @@ func (im *Importer) Wake() {
 	}
 }
 
-// Retry puts a batch's failed items back in the queue.
+// Retry puts a batch's failed items back in the queue (review #18). The batch goes through
+// analysis again, so a file that failed there is fetched, unpacked, converted or cut as it should
+// be (a CUE sheet that was fixed is read again); files that already have a plan keep it, preview
+// edits included, and new songs get groups of their own. Sidecars that found no album are tried
+// again with the rest. An upload that failed resumes where it stopped.
 func (im *Importer) Retry(ctx context.Context, batchID int64) (int, error) {
-	// A broken archive would only fail again; files that could not be read get a fresh look.
-	r, err := im.db.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
-		WHERE batch_id = ? AND state = 'failed' AND role != ? AND batch_id IN (SELECT id FROM import_batches WHERE state = ?)`,
-		db.Now(), batchID, RoleZip, BatchDone)
+	tx, err := im.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	n, _ := r.RowsAffected()
-	if n > 0 {
-		im.db.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = NULL WHERE id = ?`, BatchRunning, batchID)
-		im.Wake()
+	defer tx.Rollback()
+	now := db.Now()
+	r, err := tx.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
+		WHERE batch_id = ? AND state = 'failed' AND batch_id IN (SELECT id FROM import_batches WHERE state = ?)`,
+		now, batchID, BatchDone)
+	if err != nil {
+		return 0, err
 	}
+	n, err := r.RowsAffected()
+	if err != nil || n == 0 {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
+		WHERE batch_id = ? AND role = ? AND state = ?`, now, batchID, RoleSidecar, StateSkipped); err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = NULL,
+		options = json_set(coalesce(nullif(options, ''), '{}'), '$.rerun', json('true')) WHERE id = ?`, BatchAnalyzing, batchID); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	im.Wake()
 	return int(n), nil
 }
 
@@ -234,6 +257,7 @@ type item struct {
 	// Made by FFmpeg from another file (P2-4).
 	sourcePath, sourceKind, sourceSHA string
 	sourceSize                        int64
+	sourcePiece                       int // the CUE track number of a cut song
 	// In the Drive inbox (P2-6, D6); sha is Drive's own checksum.
 	driveID, driveParent, sha string
 	driveSize                 int64
@@ -245,12 +269,12 @@ func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
 	var plan string
 	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp,
-		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.drive_id, i.drive_parent, i.sha256, i.drive_size
+		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.source_piece, i.drive_id, i.drive_parent, i.sha256, i.drive_size
 		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
 		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
 		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
 		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp,
-			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.driveID, &it.driveParent, &it.sha, &it.driveSize)
+			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.sourcePiece, &it.driveID, &it.driveParent, &it.sha, &it.driveSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -293,18 +317,30 @@ func (im *Importer) handle(ctx context.Context, it *item) {
 		}
 		return v
 	}
-	if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, info = coalesce(?, info), sha256 = ?,
-		asset_id = ?, track_id = ?, entry_id = ?, updated_at = ? WHERE id = ?`,
-		out.state, out.msg, infoJSON, out.sha, nullable(out.assetID), nullable(out.trackID), nullable(out.entry), db.Now(), it.id); err != nil {
-		im.log.Error("record import result", "item", it.id, "err", err)
+	// Nothing is cleaned up until the result is recorded (review #2): if it cannot be, the source
+	// stays and the item is done again after a restart (the library side is idempotent).
+	var err2 error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 && !sleepCtx(ctx, time.Duration(attempt)*time.Second) {
+			return
+		}
+		if _, err2 = im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, info = coalesce(?, info), sha256 = ?,
+			asset_id = ?, track_id = ?, entry_id = ?, updated_at = ? WHERE id = ?`,
+			out.state, out.msg, infoJSON, out.sha, nullable(out.assetID), nullable(out.trackID), nullable(out.entry), db.Now(), it.id); err2 == nil {
+			break
+		}
 	}
 	im.mu.Lock()
 	delete(im.progress, it.id)
 	im.mu.Unlock()
-	if out.state != StateFailed { // failed ones stay for a retry
+	if err2 != nil {
+		im.log.Error("record import result; the source is kept", "item", it.id, "err", err2)
+		return
+	}
+	if saved(out.state) { // only what is safely in the library; everything else stays for a retry or a decision (review #1)
 		switch {
 		case it.temp:
-			im.removeUnder(im.workDir(it.batchID), it.path) // extracted from an archive
+			im.removeUnder(im.workDir(it.batchID), it.path) // extracted from an archive, or made by FFmpeg
 		case it.kind == "upload":
 			im.removeStaged(it.path) // client uploads are copies
 		}
@@ -312,15 +348,92 @@ func (im *Importer) handle(ctx context.Context, it *item) {
 	im.finishIfIdle(ctx, it.batchID)
 }
 
-// batchDone runs once a batch has nothing left to do: archives extracted for it are deleted when
-// nothing failed, and OnBatchDone lets client uploads clear their staging folder.
+// saved is an item state whose file is in the library, verified in Drive.
+func saved(state string) bool { return state == StatePublished || state == StateDuplicate }
+
+// hold reserves need bytes of staging for data about to be written to the work folder; release
+// once it is there (where WorkCommitted counts it) or gone.
+func (im *Importer) hold(ctx context.Context, need int64) (release func(), err error) {
+	if im.Budget == nil {
+		return func() {}, nil
+	}
+	return im.Budget.Hold(ctx, need)
+}
+
+// StateDiscarded is an unsaved file the user chose to let go of, so its source can be cleaned up.
+const StateDiscarded = "discarded"
+
+// KeepsSource is the SQL condition (on import_items aliased as alias) for items whose source must
+// be kept: not finished, failed, or audio (and archives) that never made it into the library, until
+// the user discards them (review #1). Files the user excluded in the preview do not count.
+func KeepsSource(alias string) string {
+	return fmt.Sprintf(`(%[1]s.state IN ('pending', 'uploading', 'failed') OR (%[1]s.role IN ('audio', 'zip') AND %[1]s.state = 'skipped'))`, alias)
+}
+
+// Unsaved counts a batch's items whose source must be kept.
+func (im *Importer) Unsaved(ctx context.Context, batchID int64) (int, error) {
+	var n int
+	err := im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i WHERE i.batch_id = ? AND `+KeepsSource("i"), batchID).Scan(&n)
+	return n, err
+}
+
+// Discard lets go of a finished batch's unsaved files (failed, or skipped audio): they are marked
+// discarded and the batch's sources are cleaned up as if they had been imported.
+func (im *Importer) Discard(ctx context.Context, batchID int64) (int, error) {
+	r, err := im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, updated_at = ? WHERE batch_id = ?
+		AND state IN ('failed', 'skipped') AND role IN ('audio', 'zip')
+		AND batch_id IN (SELECT id FROM import_batches WHERE state = ?)`, StateDiscarded, db.Now(), batchID, BatchDone)
+	if err != nil {
+		return 0, err
+	}
+	n, err := r.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	// Failed sidecars go with them: there is nothing left to attach them to.
+	if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, updated_at = ? WHERE batch_id = ? AND state = 'failed'`,
+		StateDiscarded, db.Now(), batchID); err != nil {
+		return int(n), err
+	}
+	if n > 0 {
+		im.batchDone(ctx, batchID)
+	}
+	return int(n), nil
+}
+
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// batchDone runs once a batch has nothing left to do: its work folder (unpacked archives, FFmpeg
+// output) is deleted when every file is saved or let go of, and OnBatchDone lets client uploads
+// clear their staging folder.
 func (im *Importer) batchDone(ctx context.Context, batchID int64) {
 	var kind, source string
-	var failed int
-	im.db.QueryRowContext(ctx, `SELECT b.kind, b.source, (SELECT count(*) FROM import_items WHERE batch_id = b.id AND state = 'failed')
-		FROM import_batches b WHERE b.id = ?`, batchID).Scan(&kind, &source, &failed)
-	if failed == 0 {
-		os.RemoveAll(im.workDir(batchID))
+	if err := im.db.QueryRowContext(ctx, `SELECT kind, source FROM import_batches WHERE id = ?`, batchID).Scan(&kind, &source); err != nil {
+		im.log.Warn("finished batch", "batch", batchID, "err", err)
+		return
+	}
+	unsaved, err := im.Unsaved(ctx, batchID)
+	if err != nil {
+		im.log.Warn("finished batch", "batch", batchID, "err", err)
+		return
+	}
+	// The work folder goes unless an unsaved file lives there (unpacked from an archive, made by
+	// FFmpeg, or fetched from the inbox) or was made from one that does.
+	work := im.workDir(batchID)
+	var inWork int
+	if err := im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i WHERE i.batch_id = ?1 AND `+KeepsSource("i")+`
+		AND (substr(i.local_path, 1, length(?2)) = ?2 OR substr(i.source_path, 1, length(?2)) = ?2)`,
+		batchID, work+string(filepath.Separator)).Scan(&inWork); err != nil {
+		im.log.Warn("finished batch", "batch", batchID, "err", err)
+	} else if inWork == 0 {
+		os.RemoveAll(work)
 	}
 	im.mu.Lock()
 	clear(im.driveDirs) // the next inbox batch lists folders afresh
@@ -331,7 +444,7 @@ func (im *Importer) batchDone(ctx context.Context, batchID int64) {
 		}
 	}
 	if im.OnBatchDone != nil {
-		im.OnBatchDone(ctx, kind, source, failed)
+		im.OnBatchDone(ctx, kind, source, unsaved)
 	}
 }
 

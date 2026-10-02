@@ -214,17 +214,33 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 	if err != nil {
 		return fail(err.Error())
 	}
-	if known, err := im.lib.SourceImported(ctx, sha, size); err != nil {
+	numbers := make([]int, len(pieces))
+	for i, p := range pieces {
+		numbers[i] = p.Number
+	}
+	if done, err := im.lib.SourceComplete(ctx, sha, size, numbers); err != nil {
 		return err
-	} else if known {
-		im.itemFailed(ctx, img.id, StateDuplicate, "this disc image was imported before")
+	} else if done { // every song of it is in the library; otherwise cut again, and songs the library has are duplicates
+		im.itemFailed(ctx, img.id, StateDuplicate, "every song of this disc image is in the library already")
 		return nil
 	}
-	if im.Space != nil {
-		if err := im.Space(ctx, size); err != nil {
-			return fail("not enough staging space to split it: " + err.Error())
+	// Staging is held for what the songs can take at most (raw PCM, plus each song's tags and copy
+	// of the cover), not the compressed image's size, and FFmpeg stops each file at its share.
+	var need int64
+	limits := make([]int64, len(pieces))
+	for i, p := range pieces {
+		end := p.End
+		if end == 0 {
+			end = s.Samples
 		}
+		limits[i] = ffmpeg.MaxFLAC(s, max(end-p.Start, 1), size)
+		need += limits[i]
 	}
+	release, err := im.hold(ctx, need)
+	if err != nil {
+		return fail("not enough staging space to split it: " + err.Error())
+	}
+	defer release()
 	dir := filepath.Join(im.workDir(batchID), "split", strconv.FormatInt(img.id, 10))
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -266,7 +282,7 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 		if disc > 0 {
 			tags["disc"] = strconv.Itoa(disc)
 		}
-		cuts[i] = ffmpeg.Cut{Start: p.Start, End: p.End, Dst: dst, Tags: tags}
+		cuts[i] = ffmpeg.Cut{Start: p.Start, End: p.End, Dst: dst, Tags: tags, Limit: limits[i]}
 		dsts = append(dsts, dst)
 	}
 	if err := im.FFmpeg.Split(ctx, img.path, cuts, s); err != nil {
@@ -301,11 +317,12 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 	}
 	defer tx.Rollback()
 	now := db.Now()
-	for _, d := range dsts {
+	for i, d := range dsts {
 		rel := path.Join(path.Dir(img.rel), filepath.Base(d))
 		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp,
-			source_path, source_kind, source_sha256, source_size, drive_parent, updated_at) VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?)`,
-			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, img.driveParent, now); err != nil {
+			source_path, source_kind, source_sha256, source_size, source_piece, drive_parent, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, pieces[i].Number, img.driveParent, now); err != nil {
 			return err
 		}
 	}
@@ -356,24 +373,25 @@ func (im *Importer) convert(ctx context.Context, batchID int64, a audioItem) err
 	if err != nil {
 		return fail(err.Error())
 	}
-	if known, err := im.lib.SourceImported(ctx, sha, size); err != nil {
+	if done, err := im.lib.SourceComplete(ctx, sha, size, []int{0}); err != nil {
 		return err
-	} else if known {
+	} else if done {
 		im.itemFailed(ctx, a.id, StateDuplicate, "this file was converted and imported before")
 		return nil
 	}
-	if im.Space != nil {
-		if err := im.Space(ctx, size); err != nil {
-			return fail("not enough staging space to convert it: " + err.Error())
-		}
+	limit := ffmpeg.MaxFLAC(s, 0, size)
+	release, err := im.hold(ctx, limit)
+	if err != nil {
+		return fail("not enough staging space to convert it: " + err.Error())
 	}
+	defer release()
 	dir := filepath.Join(im.workDir(batchID), "conv", strconv.FormatInt(a.id, 10))
 	os.RemoveAll(dir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
 	dst := filepath.Join(dir, strings.TrimSuffix(filepath.Base(a.path), filepath.Ext(a.path))+".flac")
-	if err := im.FFmpeg.ToFLAC(ctx, a.path, dst, s); err != nil {
+	if err := im.FFmpeg.ToFLAC(ctx, a.path, dst, s, limit); err != nil {
 		os.RemoveAll(dir)
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -404,7 +422,7 @@ func (im *Importer) sourceOf(ctx context.Context, it *item, assetID int64) {
 	if it.sourceSHA == "" || assetID == 0 {
 		return
 	}
-	if err := im.lib.AddSource(ctx, it.sourceSHA, it.sourceSize, assetID, it.sourceKind); err != nil {
+	if err := im.lib.AddSource(ctx, it.sourceSHA, it.sourceSize, assetID, it.sourceKind, it.sourcePiece); err != nil {
 		im.log.Warn("record import source", "item", it.id, "err", err)
 	}
 }

@@ -426,6 +426,22 @@ func (s *Server) sidecar(w http.ResponseWriter, r *http.Request) {
 	io.Copy(w, io.LimitReader(resp.Body, c.Size))
 }
 
+// discardImport lets go of a finished batch's files that are not in the library, so their
+// sources can be cleaned up (review #1).
+func (s *Server) discardImport(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	n, err := s.importer.Discard(r.Context(), id)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"discarded": n})
+}
+
 func (s *Server) retryImport(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {

@@ -133,7 +133,7 @@ function Confirm({ title, children, action, danger, onConfirm, close }) {
   <//>`;
 }
 
-const confirmDialog = (props) => showDialog((close) => html`<${Confirm} ...${props} close=${close} />`);
+export const confirmDialog = (props) => showDialog((close) => html`<${Confirm} ...${props} close=${close} />`);
 
 // ---- tracks ----
 

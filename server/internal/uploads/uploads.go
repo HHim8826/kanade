@@ -20,6 +20,7 @@ import (
 	"sync/atomic"
 
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
 // ChunkSize is the largest chunk accepted; it stays under Cloudflare's 100 MB request limit.
@@ -52,17 +53,24 @@ type Upload struct {
 type Store struct {
 	lowDisk atomic.Bool // set by the disk guard
 	db      *sql.DB
-	root    string // staging/uploads
-	budget  int64
-	// Other returns staging space held elsewhere (downloads), so both share one budget (plan §6).
-	Other func(context.Context) int64
+	root    string          // staging/uploads
+	budget  *staging.Budget // shared with downloads and the importer (plan §6)
 
 	mu    sync.Mutex
 	locks map[int64]*sync.Mutex
 }
 
+// New makes a store with a budget of its own; ShareBudget puts it on the shared one.
 func New(d *sql.DB, root string, budget int64) *Store {
-	return &Store{db: d, root: root, budget: budget, locks: map[int64]*sync.Mutex{}}
+	s := &Store{db: d, root: root, locks: map[int64]*sync.Mutex{}}
+	s.ShareBudget(&staging.Budget{Limit: budget})
+	return s
+}
+
+// ShareBudget counts this store's uploads against b, and checks new ones against it.
+func (s *Store) ShareBudget(b *staging.Budget) {
+	s.budget = b
+	b.Use(s.Committed)
 }
 
 func (s *Store) GroupDir(group string) string { return filepath.Join(s.root, group) }
@@ -165,20 +173,25 @@ func (s *Store) Create(ctx context.Context, group, p string, size int64, sha str
 	if s.lowDisk.Load() { // started uploads may finish; new ones wait
 		return nil, ErrLowDisk
 	}
-	used := s.Committed(ctx)
-	if s.Other != nil {
-		used += s.Other(ctx)
+	// The check and the reservation (the row, counted by Committed) are one step on the shared
+	// budget, which also keeps the disk's free-space reserve (review #4).
+	var id int64
+	err = s.budget.Take(ctx, staging.Request{Need: size, Record: func() error {
+		now := db.Now()
+		r, err := s.db.ExecContext(ctx, `INSERT INTO uploads (grp, path, size, sha256, state, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)`, group, clean, size, strings.ToLower(sha), StateReceiving, now, now)
+		if err != nil {
+			return err
+		}
+		id, err = r.LastInsertId()
+		return err
+	}})
+	if errors.Is(err, staging.ErrOverBudget) || errors.Is(err, staging.ErrReserve) {
+		return nil, fmt.Errorf("%w: %w", ErrOverBudget, err)
 	}
-	if used+size > s.budget {
-		return nil, fmt.Errorf("%w: %d MB in use or reserved, %d MB more needed, budget %d MB", ErrOverBudget, used>>20, size>>20, s.budget>>20)
-	}
-	now := db.Now()
-	r, err := s.db.ExecContext(ctx, `INSERT INTO uploads (grp, path, size, sha256, state, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, group, clean, size, strings.ToLower(sha), StateReceiving, now, now)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := r.LastInsertId()
 	u := &Upload{ID: id, Group: group, Path: clean, Size: size, State: StateReceiving, sha256: strings.ToLower(sha)}
 	if err := os.MkdirAll(filepath.Dir(s.partPath(u)), 0o700); err != nil {
 		return nil, err
@@ -234,6 +247,8 @@ func (s *Store) Append(ctx context.Context, id, offset int64, body io.Reader, n 
 }
 
 // Complete checks the length (and SHA-256 when the client gave one) and moves the file into place.
+// It can be sent again: if the server stopped between moving the file and recording it (review
+// #5), the file already in place is checked the same way and the upload completes.
 func (s *Store) Complete(ctx context.Context, id int64) (*Upload, error) {
 	defer s.lock(id)()
 	u, err := s.Get(ctx, id)
@@ -247,8 +262,20 @@ func (s *Store) Complete(ctx context.Context, id int64) (*Upload, error) {
 		return u, fmt.Errorf("received %d of %d bytes", u.Received, u.Size)
 	}
 	part := s.partPath(u)
+	final := strings.TrimSuffix(part, ".part")
+	src := part
+	if _, err := os.Stat(part); errors.Is(err, fs.ErrNotExist) {
+		if st, err := os.Stat(final); err == nil && st.Mode().IsRegular() && st.Size() == u.Size {
+			src = final // moved into place before a restart
+		} else {
+			return u, s.reset(ctx, u, "the uploaded data is gone")
+		}
+	}
+	if st, err := os.Stat(src); err != nil || st.Size() != u.Size {
+		return u, s.reset(ctx, u, "the uploaded file has the wrong length")
+	}
 	if u.sha256 != "" {
-		f, err := os.Open(part)
+		f, err := os.Open(src)
 		if err != nil {
 			return u, err
 		}
@@ -259,18 +286,64 @@ func (s *Store) Complete(ctx context.Context, id int64) (*Upload, error) {
 			return u, err
 		}
 		if got := hex.EncodeToString(h.Sum(nil)); got != u.sha256 {
-			// Start over: the bytes are wrong somewhere.
-			os.Truncate(part, 0)
-			s.db.ExecContext(ctx, `UPDATE uploads SET received = 0, updated_at = ? WHERE id = ?`, db.Now(), id)
-			return u, fmt.Errorf("sha256 mismatch (got %s); the upload was reset", got)
+			return u, s.reset(ctx, u, fmt.Sprintf("sha256 mismatch (got %s)", got)) // the bytes are wrong somewhere
 		}
 	}
-	if err := os.Rename(part, strings.TrimSuffix(part, ".part")); err != nil {
-		return u, err
+	if src == part {
+		if err := os.Rename(part, final); err != nil {
+			return u, err
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE uploads SET state = ?, updated_at = ? WHERE id = ?`, StateComplete, db.Now(), id); err != nil {
+		return u, err // the file is in place: sending Complete again finishes
 	}
 	u.State = StateComplete
-	_, err = s.db.ExecContext(ctx, `UPDATE uploads SET state = ?, updated_at = ? WHERE id = ?`, StateComplete, db.Now(), id)
-	return u, err
+	return u, nil
+}
+
+// reset starts an upload over from the first byte.
+func (s *Store) reset(ctx context.Context, u *Upload, why string) error {
+	part := s.partPath(u)
+	os.Remove(strings.TrimSuffix(part, ".part"))
+	if f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+		f.Close()
+	}
+	s.db.ExecContext(ctx, `UPDATE uploads SET received = 0, updated_at = ? WHERE id = ?`, db.Now(), u.ID)
+	u.Received = 0
+	return fmt.Errorf("%s; the upload was reset", why)
+}
+
+// Recover finishes, at start-up, uploads whose file was moved into place just before the server
+// stopped, so their group can be imported without the client sending Complete again.
+func (s *Store) Recover(ctx context.Context) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM uploads WHERE state = ? AND received = size`, StateReceiving)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	n := 0
+	for _, id := range ids {
+		u, err := s.Get(ctx, id)
+		if err != nil {
+			return n, err
+		}
+		if _, err := os.Stat(s.partPath(u)); !errors.Is(err, fs.ErrNotExist) {
+			continue // still waiting for the client's Complete
+		}
+		if u, err := s.Complete(ctx, id); err == nil && u.State == StateComplete {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // ReadyForImport reports whether every upload of a group is complete.

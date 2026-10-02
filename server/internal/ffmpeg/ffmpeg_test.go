@@ -44,7 +44,7 @@ func TestConvertVerifiesAndKeepsBitDepth(t *testing.T) {
 		t.Fatalf("probe %+v %v", s, err)
 	}
 	dst := filepath.Join(dir, "hires.flac")
-	if err := tl.ToFLAC(ctx, src, dst, s); err != nil {
+	if err := tl.ToFLAC(ctx, src, dst, s, MaxFLAC(s, 0, 0)); err != nil {
 		t.Fatal(err)
 	}
 	out, _ := tl.Probe(ctx, dst)
@@ -60,7 +60,7 @@ func TestConvertVerifiesAndKeepsBitDepth(t *testing.T) {
 	f := filepath.Join(dir, "float.wav")
 	tl.run(ctx, "-f", "lavfi", "-i", "sine=duration=1", "-c:a", "pcm_f32le", f)
 	fs, _ := tl.Probe(ctx, f)
-	if err := tl.ToFLAC(ctx, f, filepath.Join(dir, "float.flac"), fs); !errors.Is(err, ErrFloat) {
+	if err := tl.ToFLAC(ctx, f, filepath.Join(dir, "float.flac"), fs, 0); !errors.Is(err, ErrFloat) {
 		t.Fatalf("float: %v", err)
 	}
 }

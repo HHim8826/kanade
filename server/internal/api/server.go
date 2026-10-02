@@ -162,6 +162,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/imports", s.authed(s.imports))
 	mux.Handle("GET /api/v1/imports/{id}", s.authed(s.importBatch))
 	mux.Handle("POST /api/v1/imports/{id}/retry", s.authed(s.retryImport))
+	mux.Handle("POST /api/v1/imports/{id}/discard", s.authed(s.discardImport))
 	mux.Handle("GET /api/v1/imports/{id}/preview", s.authed(s.importPreview))
 	mux.Handle("POST /api/v1/imports/{id}/plan", s.authed(s.editImportPlan))
 	mux.Handle("POST /api/v1/imports/{id}/start", s.authed(s.startImport))

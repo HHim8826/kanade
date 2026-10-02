@@ -131,10 +131,13 @@ func (im *Importer) analyze(ctx context.Context, batchID int64) error {
 	if err := im.probeAll(ctx, batchID); err != nil {
 		return err
 	}
-	if err := im.replan(ctx, batchID); err != nil {
+	if err := im.planNew(ctx, batchID); err != nil {
 		return err
 	}
-	if _, err := im.db.ExecContext(ctx, `UPDATE import_batches SET state = CASE preview WHEN 1 THEN ? ELSE ? END
+	// A batch analyzed again for a retry was reviewed already: it runs.
+	if _, err := im.db.ExecContext(ctx, `UPDATE import_batches
+		SET state = CASE WHEN preview = 1 AND coalesce(json_extract(options, '$.rerun'), 0) = 0 THEN ? ELSE ? END,
+		options = json_remove(coalesce(nullif(options, ''), '{}'), '$.rerun')
 		WHERE id = ? AND state = ?`, BatchReview, BatchRunning, batchID, BatchAnalyzing); err != nil {
 		return err
 	}
@@ -330,6 +333,59 @@ func (im *Importer) loadProbed(ctx context.Context, batchID int64) ([]probed, er
 		out = append(out, p)
 	}
 	return out, rows.Err()
+}
+
+// planNew plans the files of the batch that have no plan yet: all of them the first time; after a
+// retry, only songs that are new (cut from a disc image, say), whose groups are numbered after the
+// batch's existing ones so they never join an album another group made.
+func (im *Importer) planNew(ctx context.Context, batchID int64) error {
+	list, err := im.loadProbed(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	rows, err := im.db.QueryContext(ctx, `SELECT id, coalesce(json_extract(plan, '$.group'), '') FROM import_items
+		WHERE batch_id = ? AND plan IS NOT NULL`, batchID)
+	if err != nil {
+		return err
+	}
+	planned := map[int64]bool{}
+	last := 0
+	for rows.Next() {
+		var id int64
+		var g string
+		if err := rows.Scan(&id, &g); err != nil {
+			rows.Close()
+			return err
+		}
+		planned[id] = true
+		if n, err := strconv.Atoi(strings.TrimPrefix(g, "g")); err == nil && n > last {
+			last = n
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	fresh := list[:0]
+	for _, p := range list {
+		if !planned[p.id] {
+			fresh = append(fresh, p)
+		}
+	}
+	if len(fresh) == 0 {
+		return nil
+	}
+	plans := defaultPlans(fresh)
+	if last > 0 {
+		for i := range plans {
+			if g := plans[i].plan.Group; g != "" {
+				n, _ := strconv.Atoi(strings.TrimPrefix(g, "g"))
+				plans[i].plan.Group = "g" + strconv.Itoa(last+n)
+			}
+		}
+	}
+	settle(plans)
+	return im.savePlans(ctx, plans)
 }
 
 // replan gives every file of the batch the plan its tags suggest, dropping preview edits.

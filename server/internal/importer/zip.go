@@ -77,11 +77,11 @@ func (im *Importer) expandZip(ctx context.Context, zipPath, dir string) ([]strin
 	if len(want) == 0 {
 		return nil, errors.New("the ZIP has no audio, cue, log, lyrics or image files")
 	}
-	if im.Space != nil {
-		if err := im.Space(ctx, total); err != nil {
-			return nil, fmt.Errorf("the ZIP expands to %d MB: %w", total>>20, err)
-		}
+	release, err := im.hold(ctx, total)
+	if err != nil {
+		return nil, fmt.Errorf("the ZIP expands to %d MB: %w", total>>20, err)
 	}
+	defer release()
 	var out []string
 	for _, e := range want {
 		if err := ctx.Err(); err != nil {

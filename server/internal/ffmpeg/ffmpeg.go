@@ -12,9 +12,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -107,6 +109,7 @@ type Stream struct {
 	Float      bool  // floating-point samples, which FLAC cannot hold
 	Samples    int64 // length in samples, 0 when unknown
 	Tags       map[string]string
+	Pictures   int64 // bytes of embedded pictures, which conversion and splitting copy
 }
 
 var ErrFloat = errors.New("floating-point audio cannot be stored losslessly in FLAC")
@@ -167,7 +170,32 @@ func (t *Tool) Probe(ctx context.Context, path string) (*Stream, error) {
 			s.Tags[strings.ToLower(k)] = v
 		}
 	}
+	// An embedded picture is one packet of a video stream.
+	if out, err := t.command(ctx, t.ffprobe, "-v", "error", "-select_streams", "v", "-show_entries", "packet=size",
+		"-of", "csv=p=0", path).Output(); err == nil {
+		for _, line := range strings.Fields(string(out)) {
+			if n, err := strconv.ParseInt(strings.Trim(line, ","), 10, 64); err == nil {
+				s.Pictures += n
+			}
+		}
+	}
 	return s, nil
+}
+
+// MaxFLAC bounds the size of a FLAC file holding samples of s (all of them when samples is 0)
+// with its tags and embedded pictures: FLAC never stores audio in more than a sliver over its raw
+// PCM size. srcSize is the fallback when the length is unknown. Staging space is reserved by it,
+// and the output is cut off at it (review #4).
+func MaxFLAC(s *Stream, samples, srcSize int64) int64 {
+	if samples == 0 {
+		samples = s.Samples
+	}
+	const overhead = 256 << 10
+	if samples <= 0 || s.Channels <= 0 {
+		return 4*srcSize + overhead + s.Pictures
+	}
+	pcm := samples * int64(s.Channels) * int64((s.Bits+7)/8)
+	return pcm + pcm/64 + overhead + s.Pictures
 }
 
 // pcm is the little-endian PCM codec and raw format that hold samples of this many bits exactly;
@@ -184,21 +212,28 @@ func pcm(bits int) (codec, format string) {
 
 // ToFLAC converts the first audio stream of src to FLAC at the same sample rate, bit depth and
 // channels, copying the tags and an embedded cover.
-func (t *Tool) ToFLAC(ctx context.Context, src, dst string, s *Stream) error {
+// The output stops at limit bytes (0: no limit); a cut-off file then fails the PCM check.
+func (t *Tool) ToFLAC(ctx context.Context, src, dst string, s *Stream, limit int64) error {
 	if s.Float {
 		return ErrFloat
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.run(ctx, "-i", src, "-map", "0:a:0", "-map", "0:v?", "-c:a", "flac", "-c:v", "copy",
-		"-disposition:v", "attached_pic", "-map_metadata", "0", dst)
+	args := []string{"-i", src, "-map", "0:a:0", "-map", "0:v?", "-c:a", "flac", "-c:v", "copy",
+		"-disposition:v", "attached_pic", "-map_metadata", "0"}
+	if limit > 0 {
+		args = append(args, "-fs", strconv.FormatInt(limit, 10))
+	}
+	return t.run(ctx, append(args, dst)...)
 }
 
-// Cut is one piece of a split: samples [Start, End) of the source, End 0 meaning its end.
+// Cut is one piece of a split: samples [Start, End) of the source, End 0 meaning its end. Its
+// output stops at Limit bytes when Limit is set.
 type Cut struct {
 	Start, End int64
 	Dst        string
 	Tags       map[string]string
+	Limit      int64
 }
 
 // Split cuts src into pieces in one decoding pass, sample-exact, each to FLAC with its tags and
@@ -226,10 +261,15 @@ func (t *Tool) Split(ctx context.Context, src string, cuts []Cut, s *Stream) err
 	for i, c := range cuts {
 		args = append(args, "-map", fmt.Sprintf("[o%d]", i), "-map", "0:v?", "-c:a", "flac", "-c:v", "copy",
 			"-disposition:v", "attached_pic", "-map_metadata", "-1")
-		for k, v := range c.Tags {
-			if v != "" {
+		// In a fixed order: the same cut of the same image is then the same bytes, so a later import
+		// recognizes it by its checksum.
+		for _, k := range slices.Sorted(maps.Keys(c.Tags)) {
+			if v := c.Tags[k]; v != "" {
 				args = append(args, "-metadata", k+"="+v)
 			}
+		}
+		if c.Limit > 0 {
+			args = append(args, "-fs", strconv.FormatInt(c.Limit, 10))
 		}
 		args = append(args, c.Dst)
 	}

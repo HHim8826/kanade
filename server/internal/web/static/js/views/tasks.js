@@ -2,14 +2,15 @@ import { useCallback, useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { href } from '../router.js';
 import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, toast } from '../ui.js';
+import { confirmDialog } from './organize.js';
 
 const downloadStates = {
   metadata: '取得檔案清單', selecting: '等待選擇檔案', queued: '排隊中', downloading: '下載中', paused: '已暫停',
-  seeding: '做種中', completed: '完成', failed: '失敗', canceled: '已取消',
+  importing: '匯入這一批', seeding: '做種中', completed: '完成', failed: '失敗', canceled: '已取消',
 };
 const itemStates = {
   pending: '等待中', uploading: '上傳中', published: '已入庫', duplicate: '已存在', skipped: '略過', failed: '失敗',
-  excluded: '已排除', expanded: '已展開', split: '已分軌',
+  excluded: '已排除', expanded: '已展開', split: '已分軌', discarded: '已捨棄',
 };
 const batchStates = { analyzing: '分析中', review: '等待確認', running: '進行中', done: '完成', canceled: '已取消' };
 const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳', inbox: 'Drive 收件匣' };
@@ -85,7 +86,10 @@ function DownloadCard({ d, onSelect, onChange }) {
           onClick=${() => confirm(d.state === 'seeding' ? '停止做種？檔案已匯入，會在之後清除。' : '取消這個下載？') && act('cancel')} />`}
       </div>
     </div>
-    ${(d.state === 'downloading' || d.state === 'paused' || d.state === 'queued') && html`<${Progress} value=${progress} />`}
+    ${(d.state === 'downloading' || d.state === 'paused' || d.state === 'queued' || d.state === 'importing') && html`<${Progress} value=${progress} />`}
+    ${(d.rounds > 1 || d.left > 0) && !['selecting', 'metadata'].includes(d.state) && html`<div class="sub">
+      分批下載：${d.state === 'importing' ? `第 ${d.round} 批已下載，匯入並清掉後再下載下一批` : d.round > 0 ? `第 ${d.round} 批` : '尚未開始'}${d.left > 0 && d.state !== 'importing' ? `，還有 ${d.left} 個檔案等下一批` : ''}</div>`}
+    ${d.waiting_space && html`<div class="sub">等待暫存空間：其他下載、上傳或匯入釋出空間後自動開始。</div>`}
     ${d.error && html`<div class="task-error">${d.error}</div>`}
   </article>`;
 }
@@ -150,12 +154,14 @@ function SelectFiles({ id, onClose, onDone }) {
       setBusy(false);
     }
   };
-  return html`<${Dialog} title="選擇要下載的檔案" onClose=${onClose} actions=${html`
-    <span class="grow sub">已選 ${chosen.size} 個，${fmtBytes(total)}</span>
+  const rounds = d && d.budget && total > d.budget;
+  return html`<${Dialog} title="選擇要下載的檔案" wide onClose=${onClose} actions=${html`
+    <span class="grow sub">已選 ${chosen.size} 個，${fmtBytes(total)}${rounds ? `，超過暫存空間 ${fmtBytes(d.budget)}，會分批下載` : ''}</span>
     <button class="btn text" onClick=${onClose}>取消</button>
     <button class="btn filled" disabled=${busy || !chosen.size} onClick=${submit}>${busy ? '處理中…' : '下載'}</button>`}>
     ${!d && !error && html`<${Spinner} />`}
     ${d && html`<div class="sub">${d.name}</div>
+      ${rounds && html`<p class="hint">選取的總量超過伺服器的暫存空間，會自動分批：每批下載、匯入曲庫、清掉後再下載下一批，同一個資料夾的 CUE、LOG、封面會跟著它的音檔。不用減少選取。</p>`}
       <div class="file-tools">
         <button class="btn text" onClick=${() => setChosen(new Set(d.files.filter((f) => f.suggested).map((f) => f.index)))}>建議項目</button>
         <button class="btn text" onClick=${() => setChosen(new Set(d.files.map((f) => f.index)))}>全選</button>
@@ -185,6 +191,16 @@ function ImportCard({ b, onChange }) {
   const total = Object.values(c).reduce((a, n) => a + n, 0);
   const done = total - (c.pending || 0) - (c.uploading || 0);
   const retry = () => post(`/imports/${b.id}/retry`).then((r) => { toast(`重新排入 ${r.requeued} 個檔案`); onChange(); }, (e) => toast(e.message, 'error'));
+  const kept = { upload: '原始檔留在伺服器的暫存空間', download: '下載的檔案會保留', inbox: '檔案留在 Drive 收件匣' }[b.kind] || '';
+  const discard = () => confirmDialog({
+    title: '捨棄未存進曲庫的檔案', action: '捨棄', danger: true,
+    children: html`<p>這次匯入有 ${b.unsaved} 個檔案沒有存進曲庫（原因見下方各檔案）。捨棄後就不再重試，${b.kind === 'upload' ? '伺服器上的上傳暫存會刪除' : b.kind === 'download' ? '做種結束後下載的檔案會刪除' : '不會刪除任何檔案'}。</p>`,
+    onConfirm: async () => {
+      const r = await post(`/imports/${b.id}/discard`);
+      toast(`已捨棄 ${r.discarded} 個檔案`);
+      onChange();
+    },
+  });
   return html`<article class="task">
     <button class="task-head plain" onClick=${() => setOpen(!open)} aria-expanded=${open}>
       <div class="grow">
@@ -200,7 +216,10 @@ function ImportCard({ b, onChange }) {
     ${b.state === 'running' && html`<${Progress} value=${total ? done / total : 0} />`}
     ${(b.state === 'review' || b.state === 'analyzing') && html`<div class="task-actions">
       <a class="btn filled" href=${href('import/' + b.id)}>${b.state === 'review' ? '確認並開始匯入' : '查看'}</a></div>`}
-    ${c.failed > 0 && html`<div class="task-actions"><button class="btn text" onClick=${retry}><${Icon} name="refresh" />重試失敗項目</button></div>`}
+    ${b.unsaved > 0 && html`<div class="sub state-failed">${b.unsaved} 個檔案沒有存進曲庫${kept ? `；${kept}，等你重試或捨棄` : ''}。</div>`}
+    ${(c.failed > 0 || b.unsaved > 0) && html`<div class="task-actions">
+      ${c.failed > 0 && html`<button class="btn text" onClick=${retry}><${Icon} name="refresh" />重試失敗項目</button>`}
+      ${b.unsaved > 0 && html`<button class="btn text danger-text" onClick=${discard}><${Icon} name="delete" />捨棄…</button>`}</div>`}
     ${open && detail && html`<ul class="items">
       ${detail.items.map((it) => html`<li key=${it.id}>
         <span class="grow path">${it.path}</span>

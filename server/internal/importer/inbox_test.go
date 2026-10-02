@@ -27,6 +27,8 @@ type inboxDrive struct {
 	ranges int                    // range requests served
 	moves  int
 	nextID int
+	// failRange makes the first range request for these files fail.
+	failRange map[string]bool
 }
 
 func newInboxDrive() *inboxDrive {
@@ -78,6 +80,10 @@ func (d *inboxDrive) Move(_ context.Context, id, to string, from []string) error
 func (d *inboxDrive) OpenRange(_ context.Context, id string, start, end int64) (*http.Response, error) {
 	d.mu2.Lock()
 	defer d.mu2.Unlock()
+	if d.failRange[id] {
+		delete(d.failRange, id)
+		return nil, fmt.Errorf("drive is unavailable")
+	}
 	data := d.files[id]
 	if end < 0 || end >= int64(len(data)) {
 		end = int64(len(data)) - 1

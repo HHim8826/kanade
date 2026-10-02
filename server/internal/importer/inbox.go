@@ -283,11 +283,11 @@ func (im *Importer) fetchDrive(ctx context.Context, batchID, itemID int64, drive
 	if !ok {
 		return "", errors.New("drive is not available")
 	}
-	if im.Space != nil {
-		if err := im.Space(ctx, size); err != nil {
-			return "", fmt.Errorf("not enough staging space to fetch it from Drive: %w", err)
-		}
+	release, err := im.hold(ctx, size)
+	if err != nil {
+		return "", fmt.Errorf("not enough staging space to fetch it from Drive: %w", err)
 	}
+	defer release()
 	dir := filepath.Join(im.workDir(batchID), "inbox", strconv.FormatInt(itemID, 10))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err

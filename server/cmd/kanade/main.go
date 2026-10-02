@@ -34,6 +34,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/logfile"
 	"github.com/HHim8826/kanade/server/internal/rss"
+	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
 )
@@ -149,21 +150,20 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	downloads := downloader.NewService(d, aria, imp, cfg.Path(config.DirDownloads), *stagingMiB<<20, *reserveGiB<<30, log)
 	ups := uploads.New(d, cfg.Path(config.DirStaging, "uploads"), *stagingMiB<<20)
-	// One shared staging budget (plan §6): downloads, client uploads and extracted archives.
-	downloads.Other = func(ctx context.Context) int64 { return ups.Committed(ctx) + imp.WorkCommitted(ctx) }
-	ups.Other = func(ctx context.Context) int64 { return downloads.Committed(ctx) + imp.WorkCommitted(ctx) }
-	imp.Space = func(ctx context.Context, need int64) error {
-		used := downloads.Committed(ctx) + ups.Committed(ctx) + imp.WorkCommitted(ctx)
-		if used+need > *stagingMiB<<20 {
-			return fmt.Errorf("staging holds %d MB, the budget is %d MB", used>>20, *stagingMiB)
-		}
-		if free := downloader.FreeSpace(cfg.DataDir); free >= 0 && free-need < *reserveGiB<<30 {
-			return fmt.Errorf("the disk would drop below the %d GB free-space reserve", *reserveGiB)
-		}
-		return nil
+	if n, err := ups.Recover(ctx); err != nil {
+		log.Warn("recovering uploads", "err", err)
+	} else if n > 0 {
+		log.Info("uploads completed after a restart", "count", n)
 	}
-	imp.OnBatchDone = func(ctx context.Context, kind, source string, failed int) {
-		if kind == "upload" && failed == 0 {
+	// One shared staging budget (plan §6) for downloads, client uploads and the importer's work
+	// folder, with the free-space reserve; checks and reservations are atomic across them (review #4).
+	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}
+	downloads.ShareBudget(budget)
+	ups.ShareBudget(budget)
+	budget.Use(imp.WorkCommitted)
+	imp.Budget = budget
+	imp.OnBatchDone = func(ctx context.Context, kind, source string, unsaved int) {
+		if kind == "upload" && unsaved == 0 { // files not in the library stay until imported or discarded
 			if err := ups.RemoveGroup(ctx, source); err != nil {
 				log.Warn("clear upload staging", "group", source, "err", err)
 			}

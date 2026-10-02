@@ -73,21 +73,46 @@ func nullID(id int64) any {
 	return id
 }
 
-// SourceImported reports whether files were already made from this source (decision D2 §2–3: an
-// APE file or a disc image imported once is skipped the next time).
-func (s *Store) SourceImported(ctx context.Context, sha string, size int64) (bool, error) {
-	var one int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM import_sources WHERE sha256 = ? AND size = ? LIMIT 1`, sha, size).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
+// SourceComplete reports whether a source was imported in full and still is (decision D2 §2–3,
+// review #19): every output it should give (pieces: the CUE track numbers of a disc image, or 0
+// for a converted file) is a verified library file that a song uses. Then the source is skipped;
+// a partial import, or an output since deleted or missing from Drive, makes it import again.
+func (s *Store) SourceComplete(ctx context.Context, sha string, size int64, pieces []int) (bool, error) {
+	if len(pieces) == 0 {
 		return false, nil
 	}
-	return err == nil, err
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT src.piece FROM import_sources src JOIN assets a ON a.id = src.asset_id
+		WHERE src.sha256 = ? AND src.size = ? AND a.state = ? AND EXISTS (SELECT 1 FROM track_assets ta WHERE ta.asset_id = a.id)`,
+		sha, size, AssetVerified)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	have := map[int]bool{}
+	for rows.Next() {
+		var p int
+		if err := rows.Scan(&p); err != nil {
+			return false, err
+		}
+		have[p] = true
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, p := range pieces {
+		if !have[p] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
-// AddSource records that an asset was made from a source file.
-func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, kind string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO import_sources (sha256, size, asset_id, kind, created_at)
-		VALUES (?, ?, ?, ?, ?)`, sha, size, assetID, kind, db.Now())
+// AddSource records that an asset was made from a source file: piece is the CUE track number, or 0
+// for a conversion.
+func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, kind string, piece int) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO import_sources (sha256, size, asset_id, kind, piece, created_at)
+		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (sha256, size, asset_id) DO UPDATE SET piece = excluded.piece`,
+		sha, size, assetID, kind, piece, db.Now())
 	return err
 }
 

@@ -6,7 +6,6 @@ import (
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -68,7 +68,11 @@ func makeTorrent(t *testing.T, dir, name, webseed string, files []string) []byte
 			t.Fatal(err)
 		}
 		all.Write(data)
-		list = append(list, map[string]any{"length": len(data), "path": []any{f}})
+		var parts []any
+		for _, p := range strings.Split(f, "/") {
+			parts = append(parts, p)
+		}
+		list = append(list, map[string]any{"length": len(data), "path": parts})
 	}
 	var pieces bytes.Buffer
 	for b := all.Bytes(); len(b) > 0; {
@@ -189,11 +193,6 @@ func TestTorrentToLibrary(t *testing.T) {
 		}
 	}
 
-	svc.budget = 1 << 10 // a 1 KiB budget cannot hold the selection
-	if err := svc.Select(ctx, id, pick); !errors.Is(err, ErrOverBudget) {
-		t.Fatalf("over budget: err = %v", err)
-	}
-	svc.budget = 2 << 30
 	if err := svc.Select(ctx, id, pick); err != nil {
 		t.Fatal(err)
 	}
@@ -402,4 +401,92 @@ func TestDiskPauseWriteFailure(t *testing.T) {
 	if n, err := svc.ResumeAfterDisk(ctx); err != nil || n != 1 {
 		t.Fatalf("resume: %d %v", n, err)
 	}
+}
+
+// A selection larger than the staging budget downloads in rounds: each is fetched, imported and
+// cleared before the next; a file larger than the whole budget gets a round of its own (review #28).
+func TestLargeSelectionDownloadsInRounds(t *testing.T) {
+	bin := aria2Path(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tmp := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	content := filepath.Join(tmp, "web")
+	files := map[string]string{"A/01 tone.flac": "tone.flac", "A/02 tone.mp3": "tone-cbr.mp3", "A/cover.png": "cover.png",
+		"B/03 hires.flac": "tone-hires.flac", "C/04 tone.ogg": "tone.ogg"}
+	var names []string
+	for dst, src := range files {
+		data, _ := os.ReadFile(filepath.Join("../media/testdata", src))
+		os.MkdirAll(filepath.Dir(filepath.Join(content, "Box", dst)), 0o755)
+		os.WriteFile(filepath.Join(content, "Box", dst), data, 0o644)
+		names = append(names, dst)
+	}
+	sort.Strings(names)
+	web := httptest.NewServer(http.FileServer(http.Dir(content)))
+	defer web.Close()
+	torrent := makeTorrent(t, content, "Box", web.URL+"/", names)
+
+	d, _ := db.Open(ctx, filepath.Join(tmp, "db.sqlite"))
+	defer d.Close()
+	lib := library.New(d)
+	for _, sub := range []string{"aria2", "downloads", "staging"} {
+		os.MkdirAll(filepath.Join(tmp, sub), 0o700)
+	}
+	imp := importer.New(d, lib, &localDrive{}, filepath.Join(tmp, "staging"), log)
+	aria, _ := NewAria2(bin, filepath.Join(tmp, "aria2"), filepath.Join(tmp, "downloads"), log)
+	svc := NewService(d, aria, imp, filepath.Join(tmp, "downloads"), 105_000, 0, log) // A fits (beside the saved torrents); A and C do not; B is bigger than the budget
+	go imp.Run(ctx)
+	ariaDone := make(chan struct{})
+	go func() { aria.Run(ctx); close(ariaDone) }()
+	defer func() { cancel(); <-ariaDone }()
+	go svc.Run(ctx)
+	waitFor(t, "aria2", 10*time.Second, aria.Ready)
+
+	id, err := svc.Add(ctx, "", torrent, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "file list", 20*time.Second, func() bool { v, _ := svc.Get(ctx, id); return v.State == StateSelecting })
+	v, _ := svc.Get(ctx, id)
+	var all []int
+	for _, f := range v.Files {
+		all = append(all, f.Index)
+	}
+	if err := svc.Select(ctx, id, all); err != nil {
+		t.Fatalf("a selection over the budget was refused: %v", err)
+	}
+	dir := filepath.Join(tmp, "downloads", fmt.Sprint(id), "Box")
+	var sawRound1Cleared bool
+	waitFor(t, "every round", 90*time.Second, func() bool {
+		v, _ = svc.Get(ctx, id)
+		if v.State == StateFailed {
+			t.Fatalf("failed: %s", v.Error)
+		}
+		if v.Round >= 2 {
+			if _, err := os.Stat(filepath.Join(dir, "A/01 tone.flac")); os.IsNotExist(err) {
+				sawRound1Cleared = true
+			}
+		}
+		return (v.State == StateSeeding || v.State == StateCompleted) && v.ImportBatchID != 0 && func() bool {
+			b, _ := imp.Batch(ctx, v.ImportBatchID)
+			return b != nil && b.State == "done"
+		}()
+	})
+	if v.Round != 3 {
+		t.Fatalf("rounds = %d, files %+v", v.Round, v.Files)
+	}
+	if !sawRound1Cleared {
+		t.Fatal("the first round's files were not cleared before the last round")
+	}
+	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 4 {
+		t.Fatalf("library tracks = %d, want 4", len(tracks))
+	}
+	albums, _ := lib.Albums(ctx, 10, 0, false)
+	for _, a := range albums {
+		if a.Title == "" {
+			continue
+		}
+	}
+	svc.Cancel(ctx, id)
+	waitFor(t, "files removed", 10*time.Second, func() bool { v, _ = svc.Get(ctx, id); return v.FilesRemoved })
 }

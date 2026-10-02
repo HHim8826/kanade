@@ -23,6 +23,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/importer"
+	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
 // Download states.
@@ -32,6 +33,7 @@ const (
 	StateQueued      = "queued"      // chosen; waits for the one download slot
 	StateDownloading = "downloading" //
 	StatePaused      = "paused"      //
+	StateImporting   = "importing"   // a round is fetched and being imported; the next one waits (review #28)
 	StateSeeding     = "seeding"     // data complete, imported, still seeding (D5)
 	StateCompleted   = "completed"   // seeding finished
 	StateFailed      = "failed"
@@ -50,7 +52,9 @@ type FileView struct {
 	Path      string `json:"path"`  // relative to the download folder
 	Length    int64  `json:"length"`
 	Selected  bool   `json:"selected"`
-	Suggested bool   `json:"suggested"` // default choice by the D2 table
+	Suggested bool   `json:"suggested"`       // default choice by the D2 table
+	Round     int    `json:"round,omitempty"` // the round that fetches it (review #28); 0: not yet
+	Batch     int64  `json:"batch,omitempty"` // the import batch its round made
 }
 
 type View struct {
@@ -71,6 +75,12 @@ type View struct {
 	CreatedAt     int64      `json:"created_at"`
 	CompletedAt   int64      `json:"completed_at,omitempty"`
 	AutoSelect    bool       `json:"auto_select,omitempty"` // started by an RSS rule: takes the suggested files itself
+	Round         int        `json:"round,omitempty"`       // the round running or last finished (review #28)
+	Rounds        int        `json:"rounds,omitempty"`      // rounds so far, plus one when files are left
+	Note          string     `json:"note,omitempty"`        // what it waits for
+	Left          int        `json:"left,omitempty"`        // selected files no round has fetched yet
+	WaitingSpace  bool       `json:"waiting_space,omitempty"`
+	Budget        int64      `json:"budget,omitempty"` // the staging budget rounds fit (with the file list)
 	Files         []FileView `json:"files,omitempty"`
 }
 
@@ -79,18 +89,24 @@ type Service struct {
 	db      *sql.DB
 	aria    *Aria2
 	imp     *importer.Importer
-	root    string // downloads directory
-	budget  int64  // staging budget shared by downloads (plan §6: 2 GB)
-	reserve int64  // free space to keep on the filesystem (plan §6: 4 GB)
+	root    string          // downloads directory
+	budget  *staging.Budget // staging budget shared with uploads and the importer (plan §6: 2 GB, 4 GB reserve)
 	log     *slog.Logger
 	mu      sync.Mutex // serializes state changes between API calls and the poll loop
 	kick    chan struct{}
-	// Other returns staging space held elsewhere (client uploads); both share one budget (plan §6).
-	Other func(context.Context) int64
 }
 
+// NewService makes the service with a budget of its own; ShareBudget puts it on the shared one.
 func NewService(d *sql.DB, aria *Aria2, imp *importer.Importer, root string, budget, reserve int64, log *slog.Logger) *Service {
-	return &Service{db: d, aria: aria, imp: imp, root: root, budget: budget, reserve: reserve, log: log, kick: make(chan struct{}, 1)}
+	s := &Service{db: d, aria: aria, imp: imp, root: root, log: log, kick: make(chan struct{}, 1)}
+	s.ShareBudget(&staging.Budget{Limit: budget, Reserve: reserve, Dir: root, Free: freeSpace})
+	return s
+}
+
+// ShareBudget counts the downloads against b, and starts rounds only when they fit it.
+func (s *Service) ShareBudget(b *staging.Budget) {
+	s.budget = b
+	b.Use(s.Committed)
 }
 
 func (s *Service) poke() {
@@ -230,7 +246,7 @@ func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool
 	if magnet {
 		err = s.aria.RPC.Call(ctx, "addUri", &metaGID, []string{uri},
 			map[string]string{"dir": dir, "bt-metadata-only": "true", "bt-save-metadata": "true"})
-	} else {
+	} else if err = saveTorrent(dir, torrent); err == nil {
 		gid, err = s.addTorrent(ctx, torrent, dir)
 	}
 	if err != nil {
@@ -244,10 +260,24 @@ func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool
 
 const maxTorrent = 10 << 20
 
-func (s *Service) addTorrent(ctx context.Context, torrent []byte, dir string) (string, error) {
+// taskTorrent is the torrent kept in a download's folder, from which later rounds add the task
+// again (review #28).
+const taskTorrent = "task.torrent"
+
+func saveTorrent(dir string, torrent []byte) error {
+	return os.WriteFile(filepath.Join(dir, taskTorrent), torrent, 0o600)
+}
+
+// addTorrent adds a paused task. With check, aria2 first checks what is already on disk against
+// the piece hashes: a later round finds files and fragments left by earlier ones, and only pieces
+// that verify count as fetched.
+func (s *Service) addTorrent(ctx context.Context, torrent []byte, dir string, check ...bool) (string, error) {
+	opts := map[string]string{"dir": dir, "pause": "true"}
+	if len(check) > 0 && check[0] {
+		opts["check-integrity"] = "true"
+	}
 	var gid string
-	err := s.aria.RPC.Call(ctx, "addTorrent", &gid, base64.StdEncoding.EncodeToString(torrent), []string{},
-		map[string]string{"dir": dir, "pause": "true"})
+	err := s.aria.RPC.Call(ctx, "addTorrent", &gid, base64.StdEncoding.EncodeToString(torrent), []string{}, opts)
 	return gid, err
 }
 
@@ -272,23 +302,33 @@ func fetchTorrent(ctx context.Context, uri string) ([]byte, error) {
 
 type row struct {
 	View
-	metaGID, gid, dir string
-	files             []FileView
+	metaGID, gid, dir      string
+	files                  []FileView
+	roundBytes, doneBefore int64
 }
 
 const rowCols = `id, source, name, info_hash, meta_gid, gid, state, dir, files, total_bytes, done_bytes, uploaded_bytes,
-	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select`
+	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select,
+	round, round_bytes, done_before, note`
 
 func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	var r row
 	var files string
 	err := sc.Scan(&r.ID, &r.Source, &r.Name, &r.InfoHash, &r.metaGID, &r.gid, &r.State, &r.dir, &files, &r.TotalBytes,
 		&r.DoneBytes, &r.UploadedBytes, &r.DownSpeed, &r.UpSpeed, &r.Peers, &r.Error, &r.ImportBatchID, &r.FilesRemoved,
-		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect)
+		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.doneBefore, &r.Note)
 	if err != nil {
 		return nil, err
 	}
 	json.Unmarshal([]byte(files), &r.files)
+	r.Rounds = r.Round
+	switch r.State { // rounds left only matter while it is under way (downloads from before rounds have none)
+	case StateQueued, StateDownloading, StatePaused, StateImporting:
+		if r.Left = len(remaining(r.files)); r.Left > 0 {
+			r.Rounds++
+		}
+	}
+	r.WaitingSpace = r.State == StateQueued && strings.HasPrefix(r.Note, notePrefixSpace)
 	return &r, nil
 }
 
@@ -307,6 +347,7 @@ func (s *Service) Get(ctx context.Context, id int64) (*View, error) {
 	}
 	v := r.View
 	v.Files = r.files
+	v.Budget = s.budget.Limit
 	if v.Files == nil {
 		v.Files = []FileView{}
 	}
@@ -337,12 +378,18 @@ func (s *Service) setState(ctx context.Context, id int64, state, msg string) {
 
 // ---- selection and budget ----
 
+// dirSize is the disk space the files under dir take: aria2 leaves sparse fragments of unselected
+// files (pieces shared with selected neighbours), which take far less than their length.
 func dirSize(dir string) int64 {
 	var n int64
 	filepath.WalkDir(dir, func(_ string, d fs.DirEntry, err error) error {
 		if err == nil && d.Type().IsRegular() {
 			if info, err := d.Info(); err == nil {
-				n += info.Size()
+				if st, ok := info.Sys().(*syscall.Stat_t); ok {
+					n += min(int64(st.Blocks)*512, info.Size()+4096)
+				} else {
+					n += info.Size()
+				}
 			}
 		}
 		return nil
@@ -361,9 +408,9 @@ func freeSpace(dir string) int64 {
 	return int64(st.Bavail) * st.Bsize
 }
 
-// Select chooses files (aria2 indexes, 1-based) and queues the download. It enforces the
-// staging budget, first stopping finished seeds whose import succeeded (D5), and keeps the
-// filesystem reserve free.
+// Select chooses files (aria2 indexes, 1-based) and queues the download. Nothing is reserved yet:
+// the scheduler takes staging space round by round, so a selection larger than the budget is
+// accepted and downloads in rounds (review #28).
 func (s *Service) Select(ctx context.Context, id int64, indexes []int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -389,77 +436,103 @@ func (s *Service) selectLocked(ctx context.Context, id int64, indexes []int) err
 		want[i] = true
 	}
 	var selected int64
-	var list []string
+	n := 0
 	for i := range r.files {
 		f := &r.files[i]
 		f.Selected = want[f.Index]
+		f.Round, f.Batch = 0, 0
 		if f.Selected {
 			selected += f.Length
-			list = append(list, strconv.Itoa(f.Index))
+			n++
 			delete(want, f.Index)
 		}
 	}
-	if len(list) == 0 || len(want) > 0 {
+	if n == 0 || len(want) > 0 {
 		return errors.New("choose at least one file, using indexes from the file list")
 	}
-	if err := s.makeRoom(ctx, selected); err != nil {
-		return err
-	}
-	if free := freeSpace(s.root); free >= 0 && free-selected < s.reserve {
-		return fmt.Errorf("%w: the disk would drop below the %d GB free-space reserve", ErrOverBudget, s.reserve>>30)
-	}
-	if err := s.aria.RPC.Call(ctx, "changeOption", nil, r.gid, map[string]string{"select-file": strings.Join(list, ",")}); err != nil {
-		return err
+	note := ""
+	if selected > s.budget.Limit {
+		note = fmt.Sprintf("%d MB selected, more than the %d MB staging budget: it downloads in rounds, each imported and cleared before the next",
+			selected>>20, s.budget.Limit>>20)
 	}
 	files, _ := json.Marshal(r.files)
-	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, total_bytes = ?, state = ?, updated_at = ? WHERE id = ?`,
-		string(files), selected, StateQueued, db.Now(), id)
+	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, total_bytes = ?, done_bytes = 0, done_before = 0, round = 0,
+		round_bytes = 0, note = ?, state = ?, updated_at = ? WHERE id = ?`, string(files), selected, note, StateQueued, db.Now(), id)
 	s.poke()
 	return err
 }
 
-// Committed is what the downloads hold or have promised: files on disk plus what queued
-// and running downloads still have to fetch.
+// Committed is what the downloads hold or have promised: files on disk plus what running rounds
+// still have to fetch. Rounds not started promise nothing.
 func (s *Service) Committed(ctx context.Context) int64 {
 	var pending int64
-	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(total_bytes - done_bytes), 0) FROM downloads WHERE state IN (?, ?, ?)`,
-		StateQueued, StateDownloading, StatePaused).Scan(&pending)
+	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(round_bytes - (done_bytes - done_before), 0)), 0) FROM downloads
+		WHERE state IN (?, ?, ?)`, StateQueued, StateDownloading, StatePaused).Scan(&pending)
 	return dirSize(s.root) + pending
 }
 
-func (s *Service) committed(ctx context.Context) int64 {
-	n := s.Committed(ctx)
-	if s.Other != nil {
-		n += s.Other(ctx)
+// stopOldestSeed frees staging space for a round: it stops the oldest seed whose files are all in
+// the library, and removes them (D5). It reports whether it stopped one.
+func (s *Service) stopOldestSeed(ctx context.Context) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM downloads WHERE state = ? AND files_removed = 0 ORDER BY completed_at`, StateSeeding)
+	if err != nil {
+		return false, err
 	}
-	return n
-}
-
-func (s *Service) makeRoom(ctx context.Context, need int64) error {
-	if need > s.budget {
-		return fmt.Errorf("%w: %d MB selected, the staging budget is %d MB; choose fewer files", ErrOverBudget, need>>20, s.budget>>20)
-	}
-	for s.committed(ctx)+need > s.budget {
-		// Oldest seed whose files are fully imported: stop it and free its space.
+	var ids []int64
+	for rows.Next() {
 		var id int64
-		err := s.db.QueryRowContext(ctx, `SELECT d.id FROM downloads d JOIN import_batches b ON b.id = d.import_batch_id
-			WHERE d.state = ? AND d.files_removed = 0 AND b.state = 'done'
-			AND NOT EXISTS (SELECT 1 FROM import_items i WHERE i.batch_id = b.id AND i.state = 'failed')
-			ORDER BY d.completed_at LIMIT 1`, StateSeeding).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("%w: %d MB in use or reserved, %d MB selected, budget %d MB", ErrOverBudget,
-				s.committed(ctx)>>20, need>>20, s.budget>>20)
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
 		}
-		if err != nil {
-			return err
+	}
+	rows.Close()
+	for _, id := range ids {
+		r, err := s.load(ctx, id)
+		if err != nil || r == nil || !s.importsSaved(ctx, r) {
+			continue
 		}
-		r, _ := s.load(ctx, id)
 		s.aria.RPC.Call(ctx, "forceRemove", nil, r.gid)
 		s.setState(ctx, id, StateCompleted, "seeding stopped early to make room")
 		s.cleanup(ctx, r)
 		s.log.Info("stopped seeding to free space", "download", id)
+		return true, nil
 	}
-	return nil
+	return false, nil
+}
+
+// batches are the import batches a download's rounds made.
+func (r *row) batches() []int64 {
+	seen := map[int64]bool{}
+	var out []int64
+	add := func(id int64) {
+		if id != 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	for _, f := range r.files {
+		add(f.Batch)
+	}
+	add(r.ImportBatchID)
+	return out
+}
+
+// importsSaved reports whether every import of a download is done and its files are in the library,
+// excluded, or discarded: nothing needs its files any more (review #1).
+func (s *Service) importsSaved(ctx context.Context, r *row) bool {
+	for _, b := range r.batches() {
+		var state string
+		var keep int
+		if err := s.db.QueryRowContext(ctx, `SELECT b.state,
+			(SELECT count(*) FROM import_items i WHERE i.batch_id = b.id AND `+importer.KeepsSource("i")+`)
+			FROM import_batches b WHERE b.id = ?`, b).Scan(&state, &keep); err != nil {
+			return false
+		}
+		if state != "done" || keep > 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- control ----
@@ -474,7 +547,7 @@ func (s *Service) Pause(ctx context.Context, id int64) error {
 	if r.State != StateDownloading && r.State != StateQueued && r.State != StateSeeding {
 		return ErrBadState
 	}
-	if r.State != StateQueued {
+	if r.State != StateQueued && r.gid != "" {
 		if err := s.aria.RPC.Call(ctx, "forcePause", nil, r.gid); err != nil {
 			return err
 		}
@@ -530,22 +603,15 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 	return nil
 }
 
-// cleanup removes a finished download's files once nothing needs them: no import, or an import
-// that finished without failures (failed items keep their files so the import can be retried).
+// cleanup removes a finished download's files once nothing needs them: no import, or imports in
+// which every file is in the library, was excluded, or was discarded by the user. Failed and
+// skipped audio keep the files, so the import can be retried (review #1).
 func (s *Service) cleanup(ctx context.Context, r *row) {
 	if r.FilesRemoved || r.dir == "" {
 		return
 	}
-	if r.ImportBatchID != 0 {
-		var state string
-		var failed, open int
-		s.db.QueryRowContext(ctx, `SELECT b.state,
-			(SELECT count(*) FROM import_items WHERE batch_id = b.id AND state = 'failed'),
-			(SELECT count(*) FROM import_items WHERE batch_id = b.id AND state IN ('pending', 'uploading'))
-			FROM import_batches b WHERE b.id = ?`, r.ImportBatchID).Scan(&state, &failed, &open)
-		if state != "done" || failed > 0 || open > 0 {
-			return
-		}
+	if !s.importsSaved(ctx, r) {
+		return // files not in the library yet stay, for a retry or until the user discards them
 	}
 	for _, g := range []string{r.metaGID, r.gid} {
 		if g != "" {

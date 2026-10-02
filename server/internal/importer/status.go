@@ -26,7 +26,10 @@ type BatchView struct {
 	CreatedAt  int64          `json:"created_at"`
 	FinishedAt int64          `json:"finished_at,omitempty"`
 	Counts     map[string]int `json:"counts"`
-	Items      []ItemView     `json:"items,omitempty"`
+	// Unsaved counts files of a finished batch that are not in the library (failed, or audio that
+	// was skipped): their sources are kept until they are retried or discarded.
+	Unsaved int        `json:"unsaved"`
+	Items   []ItemView `json:"items,omitempty"`
 }
 
 func (im *Importer) counts(ctx context.Context, batchID int64) (map[string]int, error) {
@@ -62,6 +65,11 @@ func (im *Importer) Batch(ctx context.Context, id int64) (*BatchView, error) {
 	b.FinishedAt = finished.Int64
 	if b.Counts, err = im.counts(ctx, id); err != nil {
 		return nil, err
+	}
+	if b.State == BatchDone {
+		if b.Unsaved, err = im.Unsaved(ctx, id); err != nil {
+			return nil, err
+		}
 	}
 	rows, err := im.db.QueryContext(ctx, `SELECT id, rel_path, state, error, coalesce(asset_id, 0), coalesce(track_id, 0),
 		coalesce(entry_id, 0) FROM import_items WHERE batch_id = ? ORDER BY rel_path`, id)
@@ -106,6 +114,11 @@ func (im *Importer) Batches(ctx context.Context, limit int) ([]BatchView, error)
 		var err error
 		if out[i].Counts, err = im.counts(ctx, out[i].ID); err != nil {
 			return nil, err
+		}
+		if out[i].State == BatchDone {
+			if out[i].Unsaved, err = im.Unsaved(ctx, out[i].ID); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if out == nil {

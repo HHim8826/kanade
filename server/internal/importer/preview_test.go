@@ -13,6 +13,8 @@ import (
 
 	"golang.org/x/text/encoding/japanese"
 	"golang.org/x/text/encoding/simplifiedchinese"
+
+	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
 // waitState waits for the worker to move a batch to state.
@@ -348,17 +350,12 @@ func TestZipChecks(t *testing.T) {
 	im, _, _ := setup(t)
 	dir := t.TempDir()
 	cases := map[string][]zipEntry{
-		"outside it":  {{name: "../evil.mp3", data: []byte("x"), utf8: true}},
-		"expands":     {{name: "bomb.flac", data: make([]byte, 1<<20), utf8: true, method: zip.Deflate}},
-		"no audio":    {{name: "readme.txt", data: []byte("hi"), utf8: true}},
-		"budget is 1": {{name: "a.mp3", data: []byte("0123456789"), utf8: true}},
+		"outside it":    {{name: "../evil.mp3", data: []byte("x"), utf8: true}},
+		"expands":       {{name: "bomb.flac", data: make([]byte, 1<<20), utf8: true, method: zip.Deflate}},
+		"no audio":      {{name: "readme.txt", data: []byte("hi"), utf8: true}},
+		"staging space": {{name: "a.mp3", data: []byte("0123456789"), utf8: true}},
 	}
-	im.Space = func(_ context.Context, need int64) error {
-		if need > 5 {
-			return errors.New("budget is 1 MB")
-		}
-		return nil
-	}
+	im.Budget = &staging.Budget{Limit: 5}
 	for want, entries := range cases {
 		zp := filepath.Join(dir, strings.ReplaceAll(want, " ", "_")+".zip")
 		writeZip(t, zp, entries)

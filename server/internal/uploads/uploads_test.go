@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/HHim8826/kanade/server/internal/db"
@@ -118,7 +121,7 @@ func TestBudgetIsShared(t *testing.T) {
 	if _, err := s.Create(ctx, "group-0003", "a.flac", 2000, ""); !errors.Is(err, ErrOverBudget) {
 		t.Fatalf("over budget: %v", err)
 	}
-	s.Other = func(context.Context) int64 { return 900 } // downloads hold 900 bytes
+	s.budget.Use(func(context.Context) int64 { return 900 }) // downloads hold 900 bytes
 	if _, err := s.Create(ctx, "group-0003", "b.flac", 200, ""); !errors.Is(err, ErrOverBudget) {
 		t.Fatalf("shared budget ignored: %v", err)
 	}
@@ -147,5 +150,71 @@ func TestRemoveGroupClearsStagingAndRecords(t *testing.T) {
 	}
 	if err := s.RemoveGroup(ctx, "../../etc"); err == nil {
 		t.Fatal("path-like group accepted")
+	}
+}
+
+// A stop between moving the finished file into place and recording it: Complete sent again (or the
+// start-up recovery) finishes the same upload with the same bytes (review #5).
+func TestCompleteRecoversAfterRename(t *testing.T) {
+	ctx := context.Background()
+	for _, viaRecover := range []bool{false, true} {
+		s := newStore(t, 1<<30)
+		sum := sha256.Sum256([]byte("hello"))
+		u, _ := s.Create(ctx, "group-0009", "a.mp3", 5, hex.EncodeToString(sum[:]))
+		s.Append(ctx, u.ID, 0, bytes.NewReader([]byte("hello")), 5)
+		part := s.partPath(u)
+		if err := os.Rename(part, part[:len(part)-len(".part")]); err != nil { // the crash point
+			t.Fatal(err)
+		}
+		again := New(s.db, s.root, 1<<30) // a restart
+		if viaRecover {
+			if n, err := again.Recover(ctx); err != nil || n != 1 {
+				t.Fatalf("recover %d %v", n, err)
+			}
+		} else if got, err := again.Complete(ctx, u.ID); err != nil || got.State != StateComplete {
+			t.Fatalf("complete again: %+v %v", got, err)
+		}
+		if n, err := again.ReadyForImport(ctx, "group-0009"); err != nil || n != 1 {
+			t.Fatalf("ready %d %v", n, err)
+		}
+		data, _ := os.ReadFile(filepath.Join(again.GroupDir("group-0009"), "a.mp3"))
+		if string(data) != "hello" {
+			t.Fatalf("bytes %q", data)
+		}
+	}
+	// A file in place with other bytes is not trusted: the upload starts over.
+	s := newStore(t, 1<<30)
+	sum := sha256.Sum256([]byte("hello"))
+	u, _ := s.Create(ctx, "group-0010", "b.mp3", 5, hex.EncodeToString(sum[:]))
+	s.Append(ctx, u.ID, 0, bytes.NewReader([]byte("hello")), 5)
+	part := s.partPath(u)
+	os.Remove(part)
+	os.WriteFile(part[:len(part)-len(".part")], []byte("jello"), 0o600)
+	if _, err := s.Complete(ctx, u.ID); err == nil {
+		t.Fatal("wrong bytes accepted")
+	}
+	if cur, _ := s.Get(ctx, u.ID); cur.Received != 0 || cur.State != StateReceiving {
+		t.Fatalf("after mismatch %+v", cur)
+	}
+}
+
+// Two uploads that each fit, started at once, do not both get in (review #4).
+func TestConcurrentCreatesStayWithinBudget(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, 1000)
+	var wg sync.WaitGroup
+	var ok atomic.Int32
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			if _, err := s.Create(ctx, "group-0011", fmt.Sprintf("f%d.flac", i), 700, ""); err == nil {
+				ok.Add(1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if ok.Load() != 1 || s.Committed(ctx) != 700 {
+		t.Fatalf("granted %d, committed %d", ok.Load(), s.Committed(ctx))
 	}
 }
