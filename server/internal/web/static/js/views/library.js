@@ -2,7 +2,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { enqueue, fromEntry, fromTrack, playNext, playQueue, player, shuffled, toggle } from '../player.js';
-import { href } from '../router.js';
+import { go, href } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
 import { FavoritesTab, PlaylistsTab } from './collections.js';
@@ -59,8 +59,8 @@ async function playRandomAlbum() {
   try {
     const { id } = await get('/albums/random');
     const a = await get('/albums/' + id);
-    playQueue(a.entries.map((e) => fromEntry(e, a)), 0);
-    location.hash = href('album/' + id);
+    playQueue(a.entries.map((e) => fromEntry(e, a)), 0); // stay on this page; the album is a tap away in the player
+    toast(`正在播放：${a.title}`, 'info', { label: '前往專輯', onClick: () => go('album/' + id) });
   } catch (e) {
     toast(e.status === 404 ? '曲庫還沒有專輯' : e.message, 'error');
   }
@@ -190,7 +190,7 @@ export function Album({ id }) {
     </header>
     ${discs.map((d) => html`<div key=${d}>
       ${discs.length > 1 && html`<h2 class="section-title">Disc ${d}</h2>`}
-      <${TrackList} items=${items.filter((i) => i.disc === d)} showNumber
+      <${TrackList} items=${items.filter((i) => i.disc === d)} queue=${items} showNumber
         menuExtra=${(it) => [{ icon: 'delete', label: '從專輯移除', onClick: () => removeFromAlbum(a, it) }]} />
     </div>`)}
     ${a.sidecars.length > 0 && html`<h2 class="section-title">附屬檔案</h2>

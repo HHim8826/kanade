@@ -48,6 +48,10 @@ const icons = {
   identify: 'M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14zm2.5-4h-2v2H9v-2H7V9h2V7h1v2h2v1z',
   image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
   undo: 'M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62A7.95 7.95 0 0 1 12.5 10c3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 10.53 17.15 8 12.5 8z',
+  repeat: 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z',
+  repeatOne: 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z',
+  volume: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
+  volumeOff: 'M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z',
 };
 
 export function Icon({ name, size = 24, label }) {
@@ -60,13 +64,15 @@ export function IconButton({ icon, label, onClick, disabled, filled, size = 24, 
     aria-label=${label} aria-pressed=${pressed} onClick=${onClick} disabled=${disabled}><${Icon} name=${icon} size=${size} /></button>`;
 }
 
+// Cover shows a cover, or a placeholder when there is none or it fails to load. A failure belongs to
+// that image: a reused Cover given another one tries it (review #12).
 export function Cover({ id, size = 300, alt = '', className = '' }) {
-  const [failed, setFailed] = useState(false);
+  const [failedSrc, setFailedSrc] = useState(null);
   const src = coverURL(id, size);
-  if (!src || failed) {
+  if (!src || failedSrc === src) {
     return html`<div class=${'cover placeholder ' + className} role="img" aria-label=${alt}><${Icon} name="album" size=${40} /></div>`;
   }
-  return html`<img class=${'cover ' + className} src=${src} alt=${alt} loading="lazy" onError=${() => setFailed(true)} />`;
+  return html`<img key=${src} class=${'cover ' + className} src=${src} alt=${alt} loading="lazy" onError=${() => setFailedSrc(src)} />`;
 }
 
 export function fmtTime(ms) {

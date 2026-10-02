@@ -2,7 +2,21 @@ import { coverURL, get, post, streamURL } from './api.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
-// Queue item: { assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? }
+// Queue item: { qid, assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? };
+// qid tells apart the same song queued twice.
+const PREFS = 'kanade.player';
+function loadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem(PREFS) || '{}');
+    return {
+      volume: typeof p.volume === 'number' ? Math.min(Math.max(p.volume, 0), 1) : 1, muted: !!p.muted,
+      shuffle: !!p.shuffle, repeat: ['off', 'all', 'one'].includes(p.repeat) ? p.repeat : 'off',
+    };
+  } catch {
+    return { volume: 1, muted: false, shuffle: false, repeat: 'off' };
+  }
+}
+
 export const player = createStore({
   queue: [],
   index: -1,
@@ -11,10 +25,28 @@ export const player = createStore({
   time: 0, // seconds
   duration: 0, // seconds
   nowPlayingOpen: false,
+  original: null, // the queue in its own order while shuffle is on
+  ...loadPrefs(), // volume 0–1, muted, shuffle, repeat: off | all | one
 });
+
+function savePrefs() {
+  const { volume, muted, shuffle, repeat } = player.get();
+  try {
+    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, shuffle, repeat }));
+  } catch { /* private mode: the choice lasts for this page */ }
+}
 
 const audio = new Audio();
 audio.preload = 'auto';
+const applyVolume = () => {
+  const s = player.get();
+  audio.volume = s.volume;
+  audio.muted = s.muted;
+};
+applyVolume();
+
+let qseq = 0;
+const tag = (items) => items.map((it) => ({ ...it, qid: ++qseq }));
 
 export const current = () => {
   const s = player.get();
@@ -97,9 +129,18 @@ setInterval(() => !audio.paused && report(), 15000);
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && report(false, true));
 addEventListener('pagehide', () => report(false, true));
 
+// playQueue plays a list from index. With shuffle on, the chosen song plays first and the rest
+// follow in random order; turning shuffle off goes back to the list's own order.
 export function playQueue(items, index = 0) {
   if (!items.length) return;
-  player.set({ queue: items, index });
+  const list = tag(items);
+  if (player.get().shuffle) {
+    const first = list[index];
+    player.set({ original: list, queue: [first, ...shuffled(list.filter((q) => q !== first))], index: 0 });
+    load(0);
+    return;
+  }
+  player.set({ queue: list, index, original: null });
   load(index);
 }
 
@@ -114,24 +155,132 @@ export function shuffled(items) {
 
 // enqueue adds one item or a list at the end of the queue.
 export function enqueue(items) {
-  const list = Array.isArray(items) ? items : [items];
+  const raw = Array.isArray(items) ? items : [items];
   const s = player.get();
-  if (!list.length) return;
-  if (s.index < 0) return playQueue(list);
-  player.set({ queue: [...s.queue, ...list] });
+  if (!raw.length) return;
+  if (s.index < 0) return playQueue(raw);
+  const list = tag(raw);
+  player.set({ queue: [...s.queue, ...list], original: s.original && [...s.original, ...list] });
   toast(list.length > 1 ? `已將 ${list.length} 首加入佇列` : `已加入佇列：${list[0].title}`);
 }
 
 // playNext puts items right after the current track.
 export function playNext(items) {
-  const list = Array.isArray(items) ? items : [items];
+  const raw = Array.isArray(items) ? items : [items];
   const s = player.get();
-  if (!list.length) return;
-  if (s.index < 0) return playQueue(list);
+  if (!raw.length) return;
+  if (s.index < 0) return playQueue(raw);
+  const list = tag(raw);
   const queue = [...s.queue];
   queue.splice(s.index + 1, 0, ...list);
-  player.set({ queue });
+  let original = s.original;
+  if (original) { // also right after the current song in the unshuffled order
+    original = [...original];
+    original.splice(original.findIndex((q) => q.qid === queue[s.index].qid) + 1, 0, ...list);
+  }
+  player.set({ queue, original });
   toast(list.length > 1 ? `接下來播放 ${list.length} 首` : `下一首播放：${list[0].title}`);
+}
+
+// ---- modes and the queue (review #16) ----
+
+export function setVolume(v) {
+  player.set({ volume: Math.min(Math.max(v, 0), 1), muted: v <= 0 });
+  applyVolume();
+  savePrefs();
+}
+
+// toggleMute silences and brings back the volume it had.
+export function toggleMute() {
+  const s = player.get();
+  player.set({ muted: !s.muted, volume: s.muted && s.volume === 0 ? 0.5 : s.volume });
+  applyVolume();
+  savePrefs();
+}
+
+// toggleShuffle keeps the current song playing: on, the rest of the queue follows in random order;
+// off, the queue is back in its own order around it.
+export function toggleShuffle() {
+  const s = player.get();
+  const cur = s.queue[s.index];
+  if (s.shuffle) {
+    const queue = s.original || s.queue;
+    player.set({ shuffle: false, original: null, queue, index: cur ? Math.max(queue.findIndex((q) => q.qid === cur.qid), 0) : -1 });
+  } else if (cur) {
+    player.set({ shuffle: true, original: s.queue, queue: [cur, ...shuffled(s.queue.filter((q) => q !== cur))], index: 0 });
+  } else {
+    player.set({ shuffle: true });
+  }
+  savePrefs();
+}
+
+// cycleRepeat goes off → the whole queue → this song → off.
+export function cycleRepeat() {
+  player.set((s) => ({ repeat: { off: 'all', all: 'one', one: 'off' }[s.repeat] }));
+  savePrefs();
+}
+
+const without = (list, gone) => list && list.filter((q) => !gone.has(q.qid));
+
+// removeAt takes a song out of the queue. Removing the one playing moves on to the next (paused if
+// it was paused); removing the last one left stops and clears the player.
+export function removeAt(i) {
+  const s = player.get();
+  const item = s.queue[i];
+  if (!item) return;
+  if (s.queue.length === 1) return resetPlayer();
+  const gone = new Set([item.qid]);
+  const queue = without(s.queue, gone), original = without(s.original, gone);
+  if (i !== s.index) {
+    player.set({ queue, original, index: i < s.index ? s.index - 1 : s.index });
+    return;
+  }
+  const wasPlaying = !audio.paused;
+  let index = i < queue.length ? i : 0;
+  if (i >= queue.length && s.repeat !== 'all') { // it was the last: stop at the start of the queue
+    player.set({ queue, original });
+    load(queue.length - 1, false);
+    return;
+  }
+  player.set({ queue, original });
+  load(index, wasPlaying);
+}
+
+// clearUpcoming keeps the songs up to the current one.
+export function clearUpcoming() {
+  const s = player.get();
+  if (s.index < 0) return;
+  const gone = new Set(s.queue.slice(s.index + 1).map((q) => q.qid));
+  player.set({ queue: s.queue.slice(0, s.index + 1), original: without(s.original, gone) });
+}
+
+// moveItem changes the play order; the current song keeps playing wherever it ends up.
+export function moveItem(from, to) {
+  const s = player.get();
+  if (from === to || !s.queue[from] || to < 0 || to >= s.queue.length) return;
+  const cur = s.queue[s.index];
+  const queue = [...s.queue];
+  queue.splice(to, 0, ...queue.splice(from, 1));
+  player.set({ queue, index: queue.findIndex((q) => q.qid === cur.qid) });
+}
+
+// playAfterCurrent moves a queued song to right after the one playing.
+export function playAfterCurrent(i) {
+  const s = player.get();
+  moveItem(i, i < s.index ? s.index : s.index + 1);
+}
+
+// resetPlayer stops playback and forgets the queue (logging out, clearing the queue). With report,
+// the playback so far is reported first.
+export function resetPlayer(withReport = true) {
+  if (withReport) report(false, true);
+  session = null;
+  pendingSeek = null;
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, duration: 0, nowPlayingOpen: false });
+  if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
 }
 
 export function toggle() {
@@ -140,9 +289,11 @@ export function toggle() {
   else audio.pause();
 }
 
+// next moves on; past the end it goes round with repeat all, else it stops.
 export function next() {
   const s = player.get();
   if (s.index + 1 < s.queue.length) load(s.index + 1);
+  else if (s.repeat === 'all' && s.queue.length) load(0);
   else {
     audio.pause();
     player.set({ playing: false });
@@ -151,8 +302,8 @@ export function next() {
 
 export function prev() {
   const s = player.get();
-  if (audio.currentTime > 3 || s.index === 0) audio.currentTime = 0;
-  else load(s.index - 1);
+  if (audio.currentTime > 3 || (s.index === 0 && s.repeat !== 'all')) audio.currentTime = 0;
+  else load(s.index > 0 ? s.index - 1 : s.queue.length - 1);
 }
 
 export const playAt = (i) => load(i);
@@ -163,7 +314,7 @@ export const seek = (sec) => {
 // Warm the server's stream cache for the next track (plan §5: preload at most the next one).
 function prefetchNext() {
   const s = player.get();
-  const n = s.queue[s.index + 1];
+  const n = s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' ? s.queue[0] : null);
   if (n) fetch(streamURL(n.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' }).catch(() => {});
 }
 
@@ -188,9 +339,11 @@ audio.addEventListener('playing', () => {
 audio.addEventListener('ended', () => {
   report(true);
   session = null;
-  next();
+  if (player.get().repeat === 'one') load(player.get().index);
+  else next();
 });
 audio.addEventListener('error', () => {
+  if (!audio.getAttribute('src')) return; // emptied on purpose
   const item = current();
   player.set({ buffering: false, playing: false });
   if (item) toast(`無法播放「${item.title}」`, 'error');

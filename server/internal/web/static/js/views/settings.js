@@ -1,5 +1,6 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get, post } from '../api.js';
+import { resetPlayer } from '../player.js';
 import { href } from '../router.js';
 import { ErrorBox, Icon, Spinner, fmtBytes, html, toast, useLoad } from '../ui.js';
 
@@ -63,6 +64,7 @@ export function Settings({ onLogout }) {
     }
   };
   const logout = async () => {
+    resetPlayer(); // stop and report the playback while the login still works (review #14)
     await post('/logout').catch(() => {});
     onLogout();
   };

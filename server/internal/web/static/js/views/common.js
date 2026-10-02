@@ -27,9 +27,10 @@ const moved = (list, from, to) => {
   return out;
 };
 
-// TrackList plays the whole list starting from the row that was tapped. menuExtra(item, i) adds
-// entries to a row's menu; onReorder(from, to) turns on drag handles.
-export function TrackList({ items, showNumber, showAlbum, menuExtra, onReorder, meta }) {
+// TrackList plays the whole list starting from the row that was tapped; with queue (the whole
+// album when this list is one disc of it) that list plays instead, from the tapped song. menuExtra(item,
+// i) adds entries to a row's menu; onReorder(from, to) turns on drag handles.
+export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onReorder, meta }) {
   const playingId = useStore(player, (s) => s.queue[s.index]?.assetId);
   const favTracks = useStore(favs, (s) => s.tracks);
   const [drag, setDrag] = useState(null); // { from, to } while a row is being dragged
@@ -66,7 +67,7 @@ export function TrackList({ items, showNumber, showAlbum, menuExtra, onReorder, 
       <div class=${'track' + (it.assetId === playingId ? ' current' : '')}>
         ${onReorder && html`<span class="drag-handle" role="button" aria-label="拖曳排序" title="拖曳排序"
           onPointerDown=${(e) => startDrag(e, i)}><${Icon} name="drag" /></span>`}
-        <button class="track-main" onClick=${() => playQueue(items, i)}>
+        <button class="track-main" onClick=${() => (queue ? playQueue(queue, Math.max(queue.indexOf(it), 0)) : playQueue(items, i))}>
           ${showNumber ? html`<span class="num">${it.number || ''}</span>` : html`<${Cover} id=${it.coverId} size=${96} className="thumb" />`}
           <span class="track-text">
             <span class="title">${it.title}</span>

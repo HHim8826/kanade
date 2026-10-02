@@ -1,34 +1,76 @@
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
-import { current, next, playAt, player, prev, seek, toggle } from '../player.js';
+import {
+  clearUpcoming, current, cycleRepeat, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, seek, setVolume,
+  toggle, toggleMute, toggleShuffle,
+} from '../player.js';
 import { go, href } from '../router.js';
 import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 
 const open = (v) => player.set({ nowPlayingOpen: v });
 
+// The queue / lyrics choice survives closing the full-screen player.
+const panel = createStore({ tab: 'queue' });
+const openTab = (tab) => {
+  panel.set({ tab });
+  open(true);
+};
+
+// Seek is the playing position as a slider; the filled part follows it.
+function Seek({ s, className }) {
+  const pct = s.duration ? Math.min(s.time / s.duration, 1) * 100 : 0;
+  return html`<input class=${'seek ' + className} type="range" min="0" max=${s.duration || 0} step="0.1" value=${s.time}
+    style=${{ '--p': pct + '%' }} onInput=${(e) => seek(parseFloat(e.target.value))} aria-label="播放位置"
+    aria-valuetext=${`${fmtTime(s.time * 1000)} / ${fmtTime(s.duration * 1000)}`} />`;
+}
+
+const repeatLabels = { off: '循環播放：關閉', all: '循環播放：整個佇列', one: '循環播放：單曲' };
+
+function Modes({ s, which, size }) {
+  return which === 'shuffle'
+    ? html`<${IconButton} icon="shuffle" label=${s.shuffle ? '隨機播放：開啟' : '隨機播放：關閉'} pressed=${s.shuffle} size=${size}
+        className=${'mode' + (s.shuffle ? ' on' : '')} onClick=${toggleShuffle} />`
+    : html`<${IconButton} icon=${s.repeat === 'one' ? 'repeatOne' : 'repeat'} label=${repeatLabels[s.repeat]} pressed=${s.repeat !== 'off'}
+        size=${size} className=${'mode' + (s.repeat !== 'off' ? ' on' : '')} onClick=${cycleRepeat} />`;
+}
+
+function Volume({ s }) {
+  const level = s.muted ? 0 : s.volume;
+  return html`<div class="volume">
+    <${IconButton} icon=${level === 0 ? 'volumeOff' : 'volume'} label=${s.muted ? '取消靜音' : '靜音'} pressed=${s.muted} onClick=${toggleMute} />
+    <input type="range" min="0" max="1" step="0.01" value=${level} style=${{ '--p': level * 100 + '%' }} aria-label="音量"
+      aria-valuetext=${Math.round(level * 100) + '%'} onInput=${(e) => setVolume(parseFloat(e.target.value))} />
+  </div>`;
+}
+
 export function PlayerBar() {
   const s = useStore(player);
   const item = s.queue[s.index];
   if (!item) return null;
-  const pct = s.duration ? (s.time / s.duration) * 100 : 0;
   return html`<div class="player-bar">
-    <div class="bar-progress"><div style=${{ width: pct + '%' }}></div></div>
+    <${Seek} s=${s} className="bar-seek" />
     <button class="now" onClick=${() => open(true)} aria-label="開啟正在播放">
       <${Cover} id=${item.coverId} size=${96} className="thumb" />
       <span class="track-text"><span class="title">${item.title}</span><span class="sub">${item.artist || '未知歌手'}</span></span>
     </button>
     <div class="controls">
+      <span class="wide-only"><${Modes} s=${s} which="shuffle" /></span>
       <${IconButton} icon="prev" label="上一首" onClick=${prev} />
       <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled />
       <${IconButton} icon="next" label="下一首" onClick=${next} />
+      <span class="wide-only"><${Modes} s=${s} which="repeat" /></span>
+    </div>
+    <div class="bar-extra">
+      <span class="bar-time wide-only">${fmtTime(s.time * 1000)} / ${fmtTime(s.duration * 1000)}</span>
+      <span class="wide-only">${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}</span>
+      <span class="wide-only"><${IconButton} icon="lyrics" label="歌詞" onClick=${() => openTab('lyrics')} /></span>
+      <${IconButton} icon="queue" label="播放佇列" onClick=${() => openTab('queue')} />
+      <span class="wide-only"><${Volume} s=${s} /></span>
     </div>
   </div>`;
 }
-
-// The queue / lyrics choice survives closing the full-screen player.
-const panel = createStore({ tab: 'queue' });
 
 function FavButton({ trackId }) {
   const on = useFav('track', trackId);
@@ -67,14 +109,16 @@ export function NowPlaying() {
           ${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}
         </div>
         <div class="quality">${fmtQuality(item.asset)}</div>
-        <input class="seek" type="range" min="0" max=${s.duration || 0} step="0.1" value=${s.time}
-          onInput=${(e) => seek(parseFloat(e.target.value))} aria-label="播放位置" />
+        <${Seek} s=${s} className="np-seek" />
         <div class="times"><span>${fmtTime(s.time * 1000)}</span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
         <div class="np-controls">
+          <${Modes} s=${s} which="shuffle" />
           <${IconButton} icon="prev" label="上一首" onClick=${prev} size=${32} />
           <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled size=${40} />
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
+          <${Modes} s=${s} which="repeat" />
         </div>
+        <${Volume} s=${s} />
       </div>
     </div>
     <div class="np-panel">
@@ -82,15 +126,37 @@ export function NowPlaying() {
         ${[['queue', '播放佇列'], ['lyrics', '歌詞']].map(([k, label]) => html`<button role="tab" aria-selected=${k === tab}
           class=${k === tab ? 'active' : ''} onClick=${() => panel.set({ tab: k })}>${label}</button>`)}
       </nav>
-      ${tab === 'queue'
-        ? html`<ol class="tracks">${s.queue.map((q, i) => html`<li key=${i}>
-            <button class=${'track' + (i === s.index ? ' current' : '')} onClick=${() => playAt(i)}>
-              <span class="num">${i + 1}</span>
-              <span class="track-text"><span class="title">${q.title}</span><span class="sub">${q.artist}</span></span>
-              <span class="meta">${fmtTime(q.durationMs)}</span>
-            </button></li>`)}</ol>`
-        : html`<${Lyrics} item=${item} time=${s.time} />`}
+      ${tab === 'queue' ? html`<${Queue} s=${s} />` : html`<${Lyrics} item=${item} time=${s.time} />`}
     </div>
+  </div>`;
+}
+
+// Queue lists what plays, in play order; songs can be moved, moved up next or taken out.
+function Queue({ s }) {
+  const last = s.queue.length - 1;
+  const menu = (e, i) => openMenu(e, [
+    i !== s.index && i !== s.index + 1 && { icon: 'playNext', label: '移到下一首播放', onClick: () => playAfterCurrent(i) },
+    i > 0 && { icon: 'up', label: '上移', onClick: () => moveItem(i, i - 1) },
+    i < last && { icon: 'down', label: '下移', onClick: () => moveItem(i, i + 1) },
+    { icon: 'close', label: '從佇列移除', onClick: () => removeAt(i) },
+  ]);
+  return html`<div class="queue">
+    <div class="queue-head">
+      <span class="sub grow">${s.queue.length} 首${s.shuffle ? ' · 隨機順序' : ''}${s.repeat !== 'off' ? ' · ' + repeatLabels[s.repeat].slice(5) : ''}</span>
+      <button class="btn text" disabled=${s.index >= last} onClick=${clearUpcoming}>清除待播</button>
+      <button class="btn text" onClick=${() => resetPlayer()}>停止並清空</button>
+    </div>
+    <ol class="tracks">${s.queue.map((q, i) => html`<li key=${q.qid || i}>
+      <div class=${'track' + (i === s.index ? ' current' : '')}>
+        <button class="track-main" onClick=${() => playAt(i)} aria-current=${i === s.index ? 'true' : undefined}>
+          <span class="num">${i + 1}</span>
+          <span class="track-text"><span class="title">${q.title}</span><span class="sub">${q.artist}</span></span>
+          <span class="meta">${fmtTime(q.durationMs)}</span>
+        </button>
+        <${IconButton} icon="more" label=${`「${q.title}」的佇列選項`} className="row-more" onClick=${(e) => menu(e, i)} />
+        <${IconButton} icon="close" label=${`從佇列移除「${q.title}」`} className="row-more" onClick=${() => removeAt(i)} />
+      </div>
+    </li>`)}</ol>
   </div>`;
 }
 

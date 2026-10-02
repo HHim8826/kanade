@@ -2,7 +2,7 @@ import { render } from '../vendor/preact.module.js';
 import { useEffect, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
-import { player } from './player.js';
+import { player, resetPlayer } from './player.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
 import { History, Playlist } from './views/collections.js';
@@ -49,7 +49,10 @@ function App() {
   const [auth, setAuth] = useState('checking');
   const route = useRoute();
   useEffect(() => {
-    setUnauthorizedHandler(() => setAuth('out'));
+    setUnauthorizedHandler(() => { // logged out elsewhere: nothing may keep playing (review #14)
+      resetPlayer(false);
+      setAuth('out');
+    });
     get('/status', { allow401: true }).then(() => setAuth('in'), (e) => setAuth(e.status === 401 ? 'out' : 'in'));
   }, []);
   // Leaving a page closes the full-screen player, so it never hides the page you went to.
