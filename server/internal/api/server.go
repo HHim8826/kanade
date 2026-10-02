@@ -88,6 +88,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/drive/auth", s.authed(s.driveAuth))
 	mux.Handle("POST /api/v1/drive/auth/paste", s.authed(s.driveAuthPaste))
 
+	mux.Handle("GET /api/v1/home", s.authed(s.home))
+	mux.Handle("POST /api/v1/plays", s.authed(s.recordPlay))
+	mux.Handle("GET /api/v1/assets/{id}/resume", s.authed(s.resumePosition))
+	mux.Handle("GET /api/v1/albums/random", s.authed(s.randomAlbum))
 	mux.Handle("GET /api/v1/albums", s.authed(s.albums))
 	mux.Handle("GET /api/v1/albums/{id}", s.authed(s.album))
 	mux.Handle("GET /api/v1/tracks", s.authed(s.tracks))

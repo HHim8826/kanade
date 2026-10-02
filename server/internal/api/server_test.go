@@ -214,3 +214,25 @@ func TestUploadOverHTTPThenImportGroup(t *testing.T) {
 		t.Fatalf("import: %d %s", r.Code, r.Body)
 	}
 }
+
+func TestHomeAndPlaysEndpoints(t *testing.T) {
+	s, h := newTestServer(t)
+	token := loginToken(t, s, h)
+	rec := do(t, h, "GET", "/api/v1/home", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("home: %d %s", rec.Code, rec.Body)
+	}
+	var home map[string]json.RawMessage
+	json.Unmarshal(rec.Body.Bytes(), &home)
+	for _, k := range []string{"continue", "recently_played", "recently_added", "spoken", "tasks", "attention"} {
+		if _, ok := home[k]; !ok {
+			t.Errorf("home has no %q", k)
+		}
+	}
+	if r := do(t, h, "POST", "/api/v1/plays", token, map[string]any{"session": "s1", "asset_id": 42}); r.Code != http.StatusBadRequest {
+		t.Fatalf("play for a missing asset: %d", r.Code)
+	}
+	if r := do(t, h, "GET", "/api/v1/albums/random", token, nil); r.Code != http.StatusNotFound {
+		t.Fatalf("random album in an empty library: %d", r.Code)
+	}
+}

@@ -377,8 +377,18 @@ func entryInput(rel string, info *media.Info) library.EntryInput {
 	if in.AlbumArtist == "" {
 		in.AlbumArtist = in.Artist
 	}
+	if spokenGenre.MatchString(t.Genre) || spokenPath.MatchString(rel) || spokenPath.MatchString(t.Album) {
+		in.Kind = "spoken"
+	}
 	return in
 }
+
+// Drama CDs and radio are 44 % of the surveyed library; they resume where they stopped and stay
+// out of random music picks. Same rules as the backfill in migration 0005.
+var (
+	spokenGenre = regexp.MustCompile(`(?i)^(spoken( word)?|drama|radio|audio ?drama|audiobook)$|朗読|ドラマ`)
+	spokenPath  = regexp.MustCompile(`(?i)drama ?cd|\bradio\b|djcd|ドラマ|ラジオ`) // whole word: not Radiohead
+)
 
 // drivePath is where a file lands in Drive: library/<album artist>/<album>. It is only a
 // convenience for browsing Drive; the database stays the source of truth.

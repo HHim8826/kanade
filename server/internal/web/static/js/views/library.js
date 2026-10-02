@@ -3,7 +3,7 @@ import { get } from '../api.js';
 import { fromEntry, fromTrack, playQueue, player, shuffled } from '../player.js';
 import { href } from '../router.js';
 import { useStore } from '../store.js';
-import { Cover, Empty, ErrorBox, Icon, Spinner, fmtQuality, fmtTime, html, useLoad } from '../ui.js';
+import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, toast, useLoad } from '../ui.js';
 
 function AlbumGrid({ albums }) {
   if (!albums.length) return html`<${Empty} icon="album">還沒有專輯。到「任務」上傳音樂或加入下載。<//>`;
@@ -36,13 +36,103 @@ export function TrackList({ items, showNumber, showAlbum }) {
   </ol>`;
 }
 
+// Albums in one horizontally scrolling row (home page shelves).
+function Shelf({ title, albums }) {
+  if (!albums || !albums.length) return null;
+  return html`<h2 class="section-title">${title}</h2>
+    <div class="shelf">${albums.map((a) => html`<a key=${a.id} class="card album-card" href=${href('album/' + a.id)}>
+      <${Cover} id=${a.cover_id} alt="" />
+      <div class="card-text"><div class="title" title=${a.title}>${a.title}</div><div class="sub">${a.album_artist || '未知歌手'}</div></div>
+    </a>`)}</div>`;
+}
+
+// Resume a half-heard track inside the album it was played from, so the queue continues naturally.
+async function resume(item) {
+  if (item.album_id) {
+    try {
+      const a = await get('/albums/' + item.album_id);
+      const items = a.entries.map((e) => fromEntry(e, a));
+      const i = items.findIndex((q) => q.assetId === item.asset.id);
+      if (i >= 0) {
+        items[i] = { ...items[i], resumeMs: item.position_ms };
+        return playQueue(items, i);
+      }
+    } catch { /* fall back to the single track */ }
+  }
+  playQueue([{ ...fromTrack(item), resumeMs: item.position_ms }], 0);
+}
+
+async function playRandomAlbum() {
+  try {
+    const { id } = await get('/albums/random');
+    const a = await get('/albums/' + id);
+    playQueue(a.entries.map((e) => fromEntry(e, a)), 0);
+    location.hash = href('album/' + id);
+  } catch (e) {
+    toast(e.status === 404 ? '曲庫還沒有專輯' : e.message, 'error');
+  }
+}
+
+function ProgressLine({ position, duration }) {
+  const pct = duration ? Math.min(position / duration, 1) * 100 : 0;
+  return html`<div class="progress thin"><div style=${{ width: pct + '%' }}></div></div>`;
+}
+
+const downloadLabels = { metadata: '取得清單', selecting: '等待選檔', queued: '排隊', downloading: '下載中', paused: '已暫停', seeding: '做種中' };
+
 export function Home() {
-  const albums = useLoad(() => get('/albums?sort=recent&limit=24'), []);
+  const home = useLoad(() => get('/home'), []);
+  const d = home.data;
+  const busy = d && (Object.keys(d.tasks.downloads).length > 0 || d.tasks.importing > 0);
+  const att = d && d.attention;
+  const empty = d && !d.recently_added.length;
+  // The track in the "continue" card is not repeated in the drama list below it.
+  const spoken = d ? d.spoken.filter((t) => !d.continue || t.id !== d.continue.id) : [];
   return html`<section>
-    <h1 class="page-title">首頁</h1>
-    <h2 class="section-title">最近加入</h2>
-    ${albums.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${albums.error} onRetry=${albums.reload} />`}
-    ${albums.data && html`<${AlbumGrid} albums=${albums.data} />`}
+    <div class="page-head">
+      <h1 class="page-title">首頁</h1>
+      <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="shuffle" />隨便聽一張</button>
+    </div>
+    ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
+    ${d && d.continue && html`<div class="card resume-card">
+      <${Cover} id=${d.continue.cover_id} size=${300} className="resume-cover" />
+      <div class="resume-text">
+        <div class="overline">${d.continue.kind === 'spoken' ? '繼續收聽' : '繼續播放'}</div>
+        <div class="title">${d.continue.title}</div>
+        <div class="sub">${[d.continue.artist, d.continue.album].filter(Boolean).join(' · ')}</div>
+        <${ProgressLine} position=${d.continue.position_ms} duration=${d.continue.asset.duration_ms} />
+        <div class="sub">${fmtTime(d.continue.position_ms)} / ${fmtTime(d.continue.asset.duration_ms)}</div>
+      </div>
+      <${IconButton} icon="play" label="繼續播放" filled size=${28} onClick=${() => resume(d.continue)} />
+    </div>`}
+    ${(busy || (att && att.failed_imports > 0)) && html`<a class="card summary-card" href=${href('tasks')}>
+      <${Icon} name="tasks" />
+      <span class="grow">
+        ${Object.entries(d.tasks.downloads).map(([k, n]) => html`<span class="pill">${downloadLabels[k] || k} ${n}</span>`)}
+        ${d.tasks.importing > 0 && html`<span class="pill">匯入中 ${d.tasks.importing}</span>`}
+        ${att.failed_imports > 0 && html`<span class="pill warn">匯入失敗 ${att.failed_imports}</span>`}
+      </span>
+      <span class="sub">任務 ›</span>
+    </a>`}
+    ${empty && html`<${Empty} icon="library">曲庫還是空的。到「任務」新增下載，或上傳音樂。<//>`}
+    ${d && html`<${Shelf} title="最近播放" albums=${d.recently_played} />`}
+    ${spoken.length > 0 && html`<h2 class="section-title">未聽完的廣播劇</h2>
+      <ul class="list">${spoken.map((t) => html`<li key=${t.id}><button class="row plain wide" onClick=${() => resume(t)}>
+        <${Cover} id=${t.cover_id} size=${96} className="thumb" />
+        <span class="grow track-text"><span class="title">${t.title}</span><span class="sub">${t.album || t.artist}</span>
+          <${ProgressLine} position=${t.position_ms} duration=${t.asset.duration_ms} /></span>
+        <span class="sub">剩 ${fmtTime(t.asset.duration_ms - t.position_ms)}</span>
+      </button></li>`)}</ul>`}
+    ${d && html`<${Shelf} title="最近加入" albums=${d.recently_added} />`}
+    ${att && (att.without_album > 0 || att.unknown_artist > 0) && html`<h2 class="section-title">待整理</h2>
+      <a class="card summary-card" href=${href('library/tracks')}>
+        <${Icon} name="note" />
+        <span class="grow">
+          ${att.without_album > 0 && html`<span class="pill">沒有專輯的歌曲 ${att.without_album}</span>`}
+          ${att.unknown_artist > 0 && html`<span class="pill">沒有歌手 ${att.unknown_artist}</span>`}
+        </span>
+        <span class="sub">歌曲 ›</span>
+      </a>`}
   </section>`;
 }
 

@@ -262,3 +262,25 @@ func TestAlbumWithoutAlbumArtistStaysOneAlbum(t *testing.T) {
 		t.Fatalf("albums = %v", got)
 	}
 }
+
+func TestSpokenWordDetection(t *testing.T) {
+	cases := []struct {
+		rel  string
+		tags media.Tags
+		kind string
+	}{
+		{"ARIA/Drama CD/ARIA The NATURAL Drama CD I/01 - Navigation01.flac", media.Tags{Title: "x"}, "spoken"},
+		{"Spice and Wolf - Wolf's Spicy-Radio 1 (Radio Drama DJCD)/CD 1/01.flac", media.Tags{Title: "x"}, "spoken"},
+		{"x/01.flac", media.Tags{Title: "x", Genre: "Spoken"}, "spoken"},
+		{"x/01.flac", media.Tags{Title: "x", Album: "みらくるあどばんすドラマCD 第1話"}, "spoken"},
+		{"ARIA/OST/ARIA The ANIMATION Original Soundtrack/01.flac", media.Tags{Title: "x", Genre: "Anime"}, ""},
+		{"x/01.flac", media.Tags{Title: "Radiohead tribute", Genre: "Rock"}, ""}, // a title is not evidence
+		{"Radiohead/OK Computer/01 Airbag.flac", media.Tags{Title: "Airbag", Album: "OK Computer"}, ""},
+		{"x/01.flac", media.Tags{Title: "x", Album: "Radioactive"}, ""},
+	}
+	for _, c := range cases {
+		if got := entryInput(c.rel, &media.Info{Tags: c.tags}).Kind; got != c.kind {
+			t.Errorf("%s (%+v): kind %q, want %q", c.rel, c.tags, got, c.kind)
+		}
+	}
+}

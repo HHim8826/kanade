@@ -1,8 +1,8 @@
-import { coverURL, streamURL } from './api.js';
+import { coverURL, get, post, streamURL } from './api.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
-// Queue item: { assetId, title, artist, album, albumId, coverId, durationMs, quality }
+// Queue item: { assetId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? }
 export const player = createStore({
   queue: [],
   index: -1,
@@ -25,26 +25,71 @@ export const current = () => {
 export function fromEntry(e, album) {
   return {
     assetId: e.asset.id, title: e.title, artist: e.artist, album: album.title, albumId: album.id,
-    coverId: album.cover_id, durationMs: e.asset.duration_ms, asset: e.asset,
+    coverId: album.cover_id, durationMs: e.asset.duration_ms, asset: e.asset, kind: e.kind,
   };
 }
 
 export function fromTrack(t) {
   return {
     assetId: t.asset.id, title: t.title, artist: t.artist, album: t.album, albumId: t.album_id,
-    coverId: t.cover_id, durationMs: t.asset.duration_ms, asset: t.asset,
+    coverId: t.cover_id, durationMs: t.asset.duration_ms, asset: t.asset, kind: t.kind,
   };
 }
+
+// ---- play history (decision D9) ----
+// Each playback gets its own session; "heard" adds only normal progress, so seeking does not count.
+let session = null;
+
+function report(finished = false, keepalive = false) {
+  if (!session) return;
+  const p = session;
+  post('/plays', {
+    session: p.id, asset_id: p.item.assetId, album_id: p.item.albumId || 0,
+    position_ms: Math.round(audio.currentTime * 1000), listened_ms: Math.round(p.heard), finished,
+  }, { keepalive }).catch(() => {});
+}
+
+let pendingSeek = null; // ms to jump to once the new track can seek
 
 function load(index, autoplay = true) {
   const s = player.get();
   const item = s.queue[index];
   if (!item) return;
+  if (session) report(); // close out the track we are leaving
+  session = { id: crypto.randomUUID(), item, heard: 0, last: null };
+  pendingSeek = item.resumeMs || null;
+  if (!pendingSeek && item.kind === 'spoken') { // drama and radio pick up where they stopped
+    get(`/assets/${item.assetId}/resume`).then((r) => {
+      if (session && session.item === item && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
+    }, () => {});
+  }
   player.set({ index, time: 0, duration: (item.durationMs || 0) / 1000, buffering: true });
   audio.src = streamURL(item.assetId);
   if (autoplay) audio.play().catch(() => player.set({ playing: false, buffering: false }));
   updateMediaSession(item);
 }
+
+function seekWhenReady(ms) {
+  if (audio.readyState >= 1) audio.currentTime = ms / 1000;
+  else pendingSeek = ms;
+}
+
+audio.addEventListener('loadedmetadata', () => {
+  if (pendingSeek) {
+    audio.currentTime = pendingSeek / 1000;
+    pendingSeek = null;
+  }
+});
+audio.addEventListener('timeupdate', () => {
+  if (!session || audio.paused) return;
+  const t = audio.currentTime;
+  if (session.last !== null && t > session.last && t - session.last < 2) session.heard += (t - session.last) * 1000;
+  session.last = t;
+});
+audio.addEventListener('seeking', () => session && (session.last = null));
+setInterval(() => !audio.paused && report(), 15000);
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && report(false, true));
+addEventListener('pagehide', () => report(false, true));
 
 export function playQueue(items, index = 0) {
   if (!items.length) return;
@@ -110,13 +155,20 @@ audio.addEventListener('timeupdate', () => {
 });
 audio.addEventListener('durationchange', () => isFinite(audio.duration) && player.set({ duration: audio.duration }));
 audio.addEventListener('play', () => player.set({ playing: true }));
-audio.addEventListener('pause', () => player.set({ playing: false }));
+audio.addEventListener('pause', () => {
+  player.set({ playing: false });
+  if (!audio.ended) report();
+});
 audio.addEventListener('waiting', () => player.set({ buffering: true }));
 audio.addEventListener('playing', () => {
   player.set({ buffering: false, playing: true });
   prefetchNext();
 });
-audio.addEventListener('ended', next);
+audio.addEventListener('ended', () => {
+  report(true);
+  session = null;
+  next();
+});
 audio.addEventListener('error', () => {
   const item = current();
   player.set({ buffering: false, playing: false });

@@ -73,6 +73,7 @@ type Entry struct {
 	TrackID int64      `json:"track_id"`
 	Title   string     `json:"title"`
 	Artist  string     `json:"artist"`
+	Kind    string     `json:"kind"`
 	Asset   AssetBrief `json:"asset"`
 }
 
@@ -87,7 +88,7 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		return nil, err
 	}
 	d := &AlbumDetail{AlbumSummary: list[0], Entries: []Entry{}}
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, `+briefCols+`
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.kind, `+briefCols+`
 		FROM album_entries e JOIN tracks t ON t.id = e.track_id JOIN assets a ON a.id = e.asset_id
 		WHERE e.album_id = ? AND a.state = 'verified' ORDER BY e.disc_no, e.track_no, t.title`, id)
 	if err != nil {
@@ -96,7 +97,7 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist}, e.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist, &e.Kind}, e.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		d.Entries = append(d.Entries, e)
@@ -111,12 +112,13 @@ type TrackItem struct {
 	Album   string     `json:"album,omitempty"`
 	AlbumID int64      `json:"album_id,omitempty"`
 	CoverID int64      `json:"cover_id,omitempty"`
+	Kind    string     `json:"kind"`  // music | spoken
 	Asset   AssetBrief `json:"asset"` // the track's first verified file
 }
 
 // trackSQL picks one verified asset per track and the first album it appears on.
 const trackSQL = `SELECT t.id, t.title, t.artist,
-	coalesce(fa.title, ''), coalesce(fa.id, 0), coalesce(fa.cover_id, 0),
+	coalesce(fa.title, ''), coalesce(fa.id, 0), coalesce(fa.cover_id, 0), t.kind,
 	` + briefCols + `
 	FROM tracks t
 	JOIN assets a ON a.id = (SELECT ta.asset_id FROM track_assets ta JOIN assets x ON x.id = ta.asset_id
@@ -131,7 +133,7 @@ func scanTracks(rows *sql.Rows, err error) ([]TrackItem, error) {
 	out := []TrackItem{}
 	for rows.Next() {
 		var t TrackItem
-		if err := rows.Scan(append([]any{&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID}, t.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind}, t.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		out = append(out, t)

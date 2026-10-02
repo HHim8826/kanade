@@ -101,7 +101,8 @@ type EntryInput struct {
 	Date        string
 	DiscNo      int
 	TrackNo     int
-	CoverID     int64 // 0 when none
+	CoverID     int64  // 0 when none
+	Kind        string // music | spoken; empty means music
 }
 
 type PublishResult struct {
@@ -124,8 +125,12 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 	err = tx.QueryRowContext(ctx, `SELECT track_id FROM track_assets WHERE asset_id = ? ORDER BY track_id LIMIT 1`, assetID).Scan(&res.TrackID)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		r, err := tx.ExecContext(ctx, `INSERT INTO tracks (title, artist, created_at, updated_at) VALUES (?, ?, ?, ?)`,
-			in.Title, in.Artist, now, now)
+		kind := in.Kind
+		if kind == "" {
+			kind = "music"
+		}
+		r, err := tx.ExecContext(ctx, `INSERT INTO tracks (title, artist, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
+			in.Title, in.Artist, kind, now, now)
 		if err != nil {
 			return res, err
 		}

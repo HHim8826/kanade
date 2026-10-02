@@ -25,7 +25,7 @@ export async function api(method, path, body, opts = {}) {
     payload = JSON.stringify(body);
   }
   const res = await fetch('/api/v1' + path, {
-    method, headers, body: payload, credentials: 'same-origin', signal: opts.signal,
+    method, headers, body: payload, credentials: 'same-origin', signal: opts.signal, keepalive: !!opts.keepalive,
   });
   const text = await res.text();
   let data = null;
