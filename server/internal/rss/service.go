@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -40,12 +41,48 @@ type Service struct {
 	ua   string
 	log  *slog.Logger
 	wake chan struct{}
+
+	mu      sync.Mutex
+	polling map[int64]*sync.Mutex // one poll at a time per source: background and "refresh now" take turns
+}
+
+// lockSource serializes polls of one source.
+func (s *Service) lockSource(id int64) func() {
+	s.mu.Lock()
+	if s.polling == nil {
+		s.polling = map[int64]*sync.Mutex{}
+	}
+	m := s.polling[id]
+	if m == nil {
+		m = &sync.Mutex{}
+		s.polling[id] = m
+	}
+	s.mu.Unlock()
+	m.Lock()
+	return m.Unlock
 }
 
 func New(d *sql.DB, dl Downloader, contact string, log *slog.Logger) *Service {
 	return &Service{db: d, dl: dl, log: log, wake: make(chan struct{}, 1),
-		ua:   fmt.Sprintf("Kanade/0.2 ( %s )", contact),
-		http: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: safeDial, Proxy: http.ProxyFromEnvironment}}}
+		ua: fmt.Sprintf("Kanade/0.2 ( %s )", contact),
+		http: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: safeDial, Proxy: http.ProxyFromEnvironment},
+			CheckRedirect: checkRedirect}}
+}
+
+type sourceKey struct{}
+
+// checkRedirect lets a source's login and cookie follow a redirect only to a site allowed to have
+// them; Go's own rule (any subdomain, and http after https) is wider.
+func checkRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return errors.New("stopped after 10 redirects")
+	}
+	req.Header.Del("Authorization")
+	req.Header.Del("Cookie")
+	if src, ok := req.Context().Value(sourceKey{}).(*Source); ok {
+		src.credentials(req)
+	}
+	return nil
 }
 
 // safeDial keeps feed fetches off this machine's own services (aria2's RPC, the app itself).
@@ -82,6 +119,7 @@ type Source struct {
 	Include      string `json:"include"`
 	Exclude      string `json:"exclude"`
 	AuthUser     string `json:"auth_user"`
+	AuthOrigins  string `json:"auth_origins"` // other sites that get the login and cookie, one per line
 	HasPassword  bool   `json:"has_password"`
 	HasCookie    bool   `json:"has_cookie"`
 	Searchable   bool   `json:"searchable"` // the URL takes a q= search term
@@ -95,16 +133,17 @@ type Source struct {
 	Matched      int    `json:"matched"` // items the include rules match (computed)
 	pass, cookie string
 	etag, lm     string
+	updatedAt    int64 // changes with every edit: a poll judges what it fetched by the settings of now
 }
 
-const sourceCols = `id, name, url, interval_min, enabled, auto_download, include_rules, exclude_rules, auth_user, auth_pass, cookie,
-	etag, last_modified, baseline, next_poll_at, last_poll_at, last_ok_at, failures, last_error,
+const sourceCols = `id, name, url, interval_min, enabled, auto_download, include_rules, exclude_rules, auth_user, auth_origins, auth_pass, cookie,
+	etag, last_modified, baseline, next_poll_at, last_poll_at, last_ok_at, failures, last_error, updated_at,
 	(SELECT count(*) FROM rss_items i WHERE i.source_id = rss_sources.id)`
 
 func scanSource(sc interface{ Scan(...any) error }) (*Source, error) {
 	var s Source
 	err := sc.Scan(&s.ID, &s.Name, &s.URL, &s.IntervalMin, &s.Enabled, &s.AutoDownload, &s.Include, &s.Exclude, &s.AuthUser,
-		&s.pass, &s.cookie, &s.etag, &s.lm, &s.Baseline, &s.NextPollAt, &s.LastPollAt, &s.LastOKAt, &s.Failures, &s.LastError, &s.Items)
+		&s.AuthOrigins, &s.pass, &s.cookie, &s.etag, &s.lm, &s.Baseline, &s.NextPollAt, &s.LastPollAt, &s.LastOKAt, &s.Failures, &s.LastError, &s.updatedAt, &s.Items)
 	if err != nil {
 		return nil, err
 	}
@@ -153,6 +192,7 @@ type SourceInput struct {
 	Include      *string `json:"include"`
 	Exclude      *string `json:"exclude"`
 	AuthUser     *string `json:"auth_user"`
+	AuthOrigins  *string `json:"auth_origins"`
 	AuthPass     *string `json:"auth_pass"`
 	Cookie       *string `json:"cookie"`
 	ClearAuth    bool    `json:"clear_auth"`
@@ -218,6 +258,17 @@ func (in SourceInput) apply(src *Source) error {
 	if in.AuthUser != nil {
 		src.AuthUser = strings.TrimSpace(*in.AuthUser)
 	}
+	if in.AuthOrigins != nil {
+		var list []string
+		for _, l := range strings.Fields(*in.AuthOrigins) {
+			u, err := url.Parse(l)
+			if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return invalid("%q is not a site address like https://dl.example.org", l)
+			}
+			list = append(list, origin(u))
+		}
+		src.AuthOrigins = strings.Join(list, "\n")
+	}
 	if in.AuthPass != nil && *in.AuthPass != "" {
 		src.pass = *in.AuthPass
 	}
@@ -251,8 +302,8 @@ func (s *Service) Create(ctx context.Context, in SourceInput) (*Source, error) {
 	}
 	now := db.Now()
 	r, err := s.db.ExecContext(ctx, `INSERT INTO rss_sources (name, url, interval_min, enabled, auto_download, include_rules, exclude_rules,
-		auth_user, auth_pass, cookie, baseline, next_poll_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-		src.Name, src.URL, src.IntervalMin, src.Enabled, src.AutoDownload, src.Include, src.Exclude, src.AuthUser, src.pass, src.cookie,
+		auth_user, auth_origins, auth_pass, cookie, baseline, next_poll_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+		src.Name, src.URL, src.IntervalMin, src.Enabled, src.AutoDownload, src.Include, src.Exclude, src.AuthUser, src.AuthOrigins, src.pass, src.cookie,
 		now, now, now)
 	if err != nil {
 		return nil, err
@@ -267,18 +318,23 @@ func (s *Service) Update(ctx context.Context, id int64, in SourceInput) (*Source
 	if err != nil {
 		return nil, err
 	}
-	wasEnabled := src.Enabled
+	wasEnabled, wasAuto := src.Enabled, src.AutoDownload
 	if err := in.apply(src); err != nil {
 		return nil, err
+	}
+	if wasAuto && !src.AutoDownload { // what waited for auto-download is let go; turned on again, only new items count
+		if _, err := s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = '' WHERE source_id = ? AND auto_state = 'pending'`, id); err != nil {
+			return nil, err
+		}
 	}
 	next := src.NextPollAt
 	if src.Enabled && !wasEnabled {
 		next = db.Now()
 	}
 	_, err = s.db.ExecContext(ctx, `UPDATE rss_sources SET name = ?, url = ?, interval_min = ?, enabled = ?, auto_download = ?,
-		include_rules = ?, exclude_rules = ?, auth_user = ?, auth_pass = ?, cookie = ?, etag = ?, last_modified = ?, baseline = ?,
-		next_poll_at = ?, updated_at = ? WHERE id = ?`,
-		src.Name, src.URL, src.IntervalMin, src.Enabled, src.AutoDownload, src.Include, src.Exclude, src.AuthUser, src.pass, src.cookie,
+		include_rules = ?, exclude_rules = ?, auth_user = ?, auth_origins = ?, auth_pass = ?, cookie = ?, etag = ?, last_modified = ?, baseline = ?,
+		next_poll_at = ?, updated_at = max(?, updated_at + 1) WHERE id = ?`,
+		src.Name, src.URL, src.IntervalMin, src.Enabled, src.AutoDownload, src.Include, src.Exclude, src.AuthUser, src.AuthOrigins, src.pass, src.cookie,
 		src.etag, src.lm, src.Baseline, next, db.Now(), id)
 	if err != nil {
 		return nil, err
@@ -339,49 +395,68 @@ type PollResult struct {
 }
 
 // Poll fetches a source now, records new items and, when auto-download is on and the fetch is
-// not a baseline, downloads new items its rules include.
+// not a baseline, queues the new items its rules include and starts what is queued.
+//
+// Polls of one source take turns, and what a fetch brought is judged by the source's settings as
+// they are when it returns (review #22): a changed address discards it; auto-download turned off
+// meanwhile downloads nothing; one turned on meanwhile keeps its baseline for the next fetch.
 func (s *Service) Poll(ctx context.Context, id int64) (*PollResult, error) {
+	defer s.lockSource(id)()
 	src, err := s.source(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	now := db.Now()
-	entries, etag, lm, notModified, err := s.fetch(ctx, src, src.URL, true)
+	entries, etag, lm, notModified, ferr := s.fetch(ctx, src, src.URL, true)
+	cur, err := s.source(ctx, id)
 	if err != nil {
+		return nil, err // deleted meanwhile
+	}
+	if cur.URL != src.URL { // the answer is from the old address: look again at the new one
+		s.db.ExecContext(ctx, `UPDATE rss_sources SET next_poll_at = ? WHERE id = ?`, db.Now(), id)
+		s.Wake()
+		return &PollResult{}, ferr
+	}
+	if ferr != nil {
 		// Exponential backoff: one interval after the first failure, doubling, at most 6 hours.
-		backoff := time.Duration(src.IntervalMin) * time.Minute << min(src.Failures, 10)
+		backoff := time.Duration(cur.IntervalMin) * time.Minute << min(cur.Failures, 10)
 		backoff = min(backoff, maxBackoff)
 		s.db.ExecContext(ctx, `UPDATE rss_sources SET last_poll_at = ?, failures = failures + 1, last_error = ?, next_poll_at = ? WHERE id = ?`,
-			now, err.Error(), now+backoff.Milliseconds(), id)
-		return nil, err
+			now, ferr.Error(), now+backoff.Milliseconds(), id)
+		res := &PollResult{}
+		s.runPending(ctx, cur, res) // what is queued can still start
+		return res, ferr
 	}
+	changed := cur.updatedAt != src.updatedAt
+	baseline := src.Baseline || cur.Baseline // items present while a baseline was due are never downloaded
 	res := &PollResult{Fetched: len(entries)}
-	var fresh []int64
 	if !notModified {
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return nil, err
 		}
 		for _, e := range entries {
+			pending := ""
+			if cur.AutoDownload && !baseline && e.Download != "" && Match(cur.Include, cur.Exclude, e.Title) == "included" {
+				pending = "pending"
+			}
 			r, err := tx.ExecContext(ctx, `INSERT INTO rss_items (source_id, guid, title, page, download, info_hash, size, seeders,
-				published_at, first_seen_at, baseline) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				published_at, first_seen_at, baseline, auto_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 				ON CONFLICT (source_id, guid) DO NOTHING`,
-				id, e.GUID, e.Title, e.Page, e.Download, e.InfoHash, e.Size, e.Seeders, e.Published, now, src.Baseline)
+				id, e.GUID, e.Title, e.Page, e.Download, e.InfoHash, e.Size, e.Seeders, e.Published, now, baseline, pending)
 			if err != nil {
 				tx.Rollback()
 				return nil, err
 			}
 			if n, _ := r.RowsAffected(); n > 0 {
 				res.New++
-				itemID, _ := r.LastInsertId()
-				fresh = append(fresh, itemID)
 			} else if e.Seeders >= 0 { // a known item: only its live numbers change
 				tx.ExecContext(ctx, `UPDATE rss_items SET seeders = ? WHERE source_id = ? AND guid = ?`, e.Seeders, id, e.GUID)
 			}
 		}
-		// Keep the newest items, and every item a download came from.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM rss_items WHERE source_id = ? AND download_id IS NULL AND id NOT IN
-			(SELECT id FROM rss_items WHERE source_id = ? ORDER BY first_seen_at DESC, id DESC LIMIT ?)`, id, id, keepItems); err != nil {
+		// Keep the newest items, every item a download came from, and what waits for auto-download.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM rss_items WHERE source_id = ? AND download_id IS NULL AND auto_state != 'pending'
+			AND id NOT IN (SELECT id FROM rss_items WHERE source_id = ? ORDER BY first_seen_at DESC, id DESC LIMIT ?)`, id, id, keepItems); err != nil {
 			tx.Rollback()
 			return nil, err
 		}
@@ -389,27 +464,74 @@ func (s *Service) Poll(ctx context.Context, id int64) (*PollResult, error) {
 			return nil, err
 		}
 	}
-	jitter := time.Duration(float64(src.IntervalMin) * float64(time.Minute) * (0.9 + 0.2*rand.Float64()))
-	s.db.ExecContext(ctx, `UPDATE rss_sources SET etag = ?, last_modified = ?, baseline = 0, last_poll_at = ?, last_ok_at = ?,
-		failures = 0, last_error = '', next_poll_at = ? WHERE id = ?`, etag, lm, now, now, now+jitter.Milliseconds(), id)
+	next := now + time.Duration(float64(cur.IntervalMin)*float64(time.Minute)*(0.9+0.2*rand.Float64())).Milliseconds()
+	if changed {
+		next = db.Now() // settings changed during the fetch: look again with them
+		s.Wake()
+	}
+	// A baseline set during the fetch stays for the next one.
+	s.db.ExecContext(ctx, `UPDATE rss_sources SET etag = ?, last_modified = ?, baseline = CASE WHEN updated_at = ? THEN 0 ELSE baseline END,
+		last_poll_at = ?, last_ok_at = ?, failures = 0, last_error = '', next_poll_at = ? WHERE id = ?`,
+		etag, lm, src.updatedAt, now, now, next, id)
+	s.runPending(ctx, cur, res)
+	return res, nil
+}
 
-	if src.AutoDownload && !src.Baseline {
-		for _, itemID := range fresh {
-			if res.Downloaded >= maxAutoPerPoll {
-				break
-			}
-			it, err := s.item(ctx, itemID)
-			if err != nil || it == nil || Match(src.Include, src.Exclude, it.Title) != "included" || it.Download == "" || it.Downloaded {
-				continue
-			}
-			if _, err := s.startDownload(ctx, src, it, true); err != nil {
-				s.log.Warn("rss auto-download", "item", itemID, "err", err)
-				continue
-			}
-			res.Downloaded++
+const autoMaxTries = 8
+
+// runPending starts the source's queued auto-downloads, at most maxAutoPerPoll a poll, oldest
+// first. A failure waits and tries again later (doubling from 10 minutes, at most 6 hours); after
+// autoMaxTries it is shown as failed. Items the rules no longer pick leave the queue.
+func (s *Service) runPending(ctx context.Context, src *Source, res *PollResult) {
+	if !src.AutoDownload {
+		return
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, auto_tries FROM rss_items WHERE source_id = ? AND auto_state = 'pending' AND auto_next <= ?
+		ORDER BY first_seen_at, id LIMIT 50`, src.ID, db.Now())
+	if err != nil {
+		return
+	}
+	type queued struct {
+		id    int64
+		tries int
+	}
+	var list []queued
+	for rows.Next() {
+		var q queued
+		if rows.Scan(&q.id, &q.tries) == nil {
+			list = append(list, q)
 		}
 	}
-	return res, nil
+	rows.Close()
+	for _, q := range list {
+		if res.Downloaded >= maxAutoPerPoll {
+			return
+		}
+		it, err := s.item(ctx, q.id)
+		if err != nil || it == nil {
+			continue
+		}
+		if it.Downloaded {
+			s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = 'done', auto_error = '' WHERE id = ?`, q.id)
+			continue
+		}
+		if Match(src.Include, src.Exclude, it.Title) != "included" || it.Download == "" {
+			s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = '' WHERE id = ?`, q.id)
+			continue
+		}
+		if _, err := s.startDownload(ctx, src, it, true); err != nil {
+			s.log.Warn("rss auto-download", "item", q.id, "err", err)
+			state, wait := "pending", min(10*time.Minute<<min(q.tries, 10), maxBackoff)
+			if q.tries+1 >= autoMaxTries {
+				state = "failed"
+			}
+			s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = ?, auto_tries = auto_tries + 1, auto_next = ?, auto_error = ? WHERE id = ?`,
+				state, db.Now()+wait.Milliseconds(), err.Error(), q.id)
+			continue
+		}
+		s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = 'done', auto_error = '' WHERE id = ?`, q.id)
+		res.Downloaded++
+	}
 }
 
 // fetch gets and parses a feed. conditional sends the stored ETag and Last-Modified.
@@ -418,7 +540,7 @@ func (s *Service) fetch(ctx context.Context, src *Source, rawURL string, conditi
 	if err != nil {
 		return nil, "", "", false, err
 	}
-	s.authorize(req, src)
+	req = s.authorize(req, src)
 	req.Header.Set("Accept", "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.5")
 	if conditional {
 		if src.etag != "" {
@@ -444,14 +566,53 @@ func (s *Service) fetch(ctx context.Context, src *Source, rawURL string, conditi
 	return entries, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"), false, err
 }
 
-func (s *Service) authorize(req *http.Request, src *Source) {
+// authorize prepares a request for a source: the login and cookie go only to the source's own site
+// (same scheme, host and port) and the sites listed for it, and keep to that on redirects (review
+// #17). A torrent link on another site gets neither.
+func (s *Service) authorize(req *http.Request, src *Source) *http.Request {
 	req.Header.Set("User-Agent", s.ua)
+	src.credentials(req)
+	return req.WithContext(context.WithValue(req.Context(), sourceKey{}, src))
+}
+
+func (src *Source) credentials(req *http.Request) {
+	if !src.trusts(req.URL) {
+		return
+	}
 	if src.AuthUser != "" || src.pass != "" {
 		req.SetBasicAuth(src.AuthUser, src.pass)
 	}
 	if src.cookie != "" {
 		req.Header.Set("Cookie", src.cookie)
 	}
+}
+
+// trusts reports whether a site may receive the source's login and cookie.
+func (src *Source) trusts(u *url.URL) bool {
+	o := origin(u)
+	if su, err := url.Parse(src.URL); err == nil && origin(su) == o {
+		return true
+	}
+	for _, l := range strings.Split(src.AuthOrigins, "\n") {
+		if l != "" && l == o {
+			return true
+		}
+	}
+	return false
+}
+
+// origin is scheme://host[:port], lower-cased, without a default port.
+func origin(u *url.URL) string {
+	scheme, host, port := strings.ToLower(u.Scheme), strings.ToLower(u.Hostname()), u.Port()
+	if (scheme == "https" && port == "443") || (scheme == "http" && port == "80") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return scheme + "://" + host
 }
 
 // Item is a feed item with its standing against the source's rules and the downloads.
@@ -464,10 +625,12 @@ type Item struct {
 	Match      string `json:"match"`                 // included | excluded | ""
 	DownloadID int64  `json:"download_id,omitempty"` // the download started from it, or of the same torrent
 	Downloaded bool   `json:"downloaded"`
+	AutoState  string `json:"auto_state,omitempty"` // pending | done | failed (review #23)
+	AutoError  string `json:"auto_error,omitempty"`
 }
 
 const itemSQL = `SELECT i.id, i.source_id, s.name, i.guid, i.title, i.page, i.download, i.info_hash, i.size, i.seeders,
-	i.published_at, i.first_seen_at, s.include_rules, s.exclude_rules, coalesce(i.download_id, 0)
+	i.published_at, i.first_seen_at, s.include_rules, s.exclude_rules, coalesce(i.download_id, 0), i.auto_state, i.auto_error
 	FROM rss_items i JOIN rss_sources s ON s.id = i.source_id`
 
 func (s *Service) scanItems(ctx context.Context, rows *sql.Rows) ([]Item, error) {
@@ -477,7 +640,7 @@ func (s *Service) scanItems(ctx context.Context, rows *sql.Rows) ([]Item, error)
 		var it Item
 		var include, exclude string
 		if err := rows.Scan(&it.ID, &it.SourceID, &it.Source, &it.GUID, &it.Title, &it.Page, &it.Download, &it.InfoHash, &it.Size,
-			&it.Seeders, &it.Published, &it.FirstSeen, &include, &exclude, &it.DownloadID); err != nil {
+			&it.Seeders, &it.Published, &it.FirstSeen, &include, &exclude, &it.DownloadID, &it.AutoState, &it.AutoError); err != nil {
 			return nil, err
 		}
 		it.Match = Match(include, exclude, it.Title)
@@ -621,8 +784,7 @@ func (s *Service) startDownload(ctx context.Context, src *Source, it *Item, auto
 		if err != nil {
 			return 0, err
 		}
-		s.authorize(req, src)
-		resp, err := s.http.Do(req)
+		resp, err := s.http.Do(s.authorize(req, src))
 		if err != nil {
 			return 0, err
 		}

@@ -118,9 +118,9 @@ DIR/
 | `PUT /uploads/{id}?offset=N` | 送一個分塊（最多 32 MB）；位移不符回 409 與伺服器已收到的位元組數 |
 | `GET /uploads/{id}`、`POST /uploads/{id}/complete` | 進度；完成（驗證大小與 SHA-256） |
 | `GET /tasks` | 任務中心：下載與匯入批次 |
-| `GET`／`POST /rss/sources`、`PATCH`／`DELETE /rss/sources/{id}` | RSS 來源（密碼與 Cookie 只回報是否已設定） |
+| `GET`／`POST /rss/sources`、`PATCH`／`DELETE /rss/sources/{id}` | RSS 來源（密碼與 Cookie 只回報是否已設定；`auth_origins`：其他也要收到帳密與 Cookie 的網站，每行一個） |
 | `POST /rss/sources/{id}/refresh`、`GET /rss/sources/{id}/search?q=` | 立即更新；站內搜尋（不入庫） |
-| `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、是否已下載）；從條目或站內搜尋結果開始下載 |
+| `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、是否已下載、自動下載的 `auto_state`：`pending`／`done`／`failed` 與 `auto_error`）；從條目或站內搜尋結果開始下載 |
 | `GET /home` | 首頁資料：繼續播放、最近播放、最近加入、未聽完的廣播劇、任務摘要、待整理（D9） |
 | `POST /plays` | 回報播放：`session`、`asset_id`、`album_id`、`position_ms`、`listened_ms`、`finished` |
 | `GET /assets/{id}/resume`、`GET /albums/random` | 續播位置；隨機一張音樂專輯 |
@@ -247,6 +247,15 @@ DIR/
 - 上傳完成（#5）：`Complete` 可重送；若 rename 後、寫入資料庫前中斷，已就位的檔案以大小與 SHA-256 檢查後完成；內容不符則重新上傳。啟動時 `Recover` 自動完成這類上傳。
 - 測試：上傳略過檔案保留、ZIP 內略過檔案保留工作資料夾、結果寫入失敗保留來源且重啟後不重複入庫、重試轉檔與修正後的 CUE 與收件匣 LOG、部分分軌補齊與遺失的轉檔重新匯入、並行預留不超額（staging 與 uploads）、分軌的上界與預算不足時失敗、上傳 rename 後恢復、分批規劃（含資料夾拆分與附件）、真的 aria2 分三批下載（含大於預算的單檔）。
 - 實測：暫存預算暫設 50 MB，以本機 web seed 的 76 MB 測試 torrent（兩個資料夾）下載：第 1 批（38 MB）下載、匯入、清除後才開始第 2 批，兩張專輯都入庫；測試資料已刪除。
+
+### 審查修正：RSS（2026-10-02）
+
+- 遷移 14：`rss_sources.auth_origins`；`rss_items.auto_state`、`auto_tries`、`auto_next`、`auto_error`。
+- 認證範圍（#17）：帳密與 Cookie 只送到 RSS 網址的同一個網站（協定、主機、連接埠都相同），以及來源明列的其他網站；轉址時重新判斷（Go 預設會把它們帶到子網域、也會從 https 帶到 http）。跨站的 .torrent 連結預設不帶。
+- 輪詢（#22）：同一個來源的背景輪詢與「立即更新」輪流執行；抓取回來後以當下的設定判斷：網址改了就捨棄這次的結果並立刻重抓，自動下載在抓取中被關閉就不下載，抓取中重新開啟則基準留給下一次。設定每次修改都會讓版本（`updated_at`）前進。
+- 自動下載佇列（#23）：符合規則的新條目標為 `pending`，每次輪詢（包括 304 與抓取失敗時）最多開始 5 個，最舊的優先；失敗時保留在佇列，從 10 分鐘起加倍等待（最長 6 小時），8 次後標為 `failed`。規則改了不再符合的離開佇列；關閉自動下載時清空佇列；排隊中的條目不會被條目數上限刪掉。條目列表顯示「等待自動下載」或失敗原因。
+- 站內搜尋（#24）：結果列以來源與 GUID（或 info hash、下載連結）為 key，「已下載」狀態不會留給另一個 torrent；較慢的舊搜尋不會覆蓋新的結果。
+- 測試：認證只到自己的網站與明列網站（含轉址、不同協定或連接埠）、抓取中關閉自動下載、抓取中重新開啟、抓取中換網址、超過每次上限與暫時失敗的佇列、關閉自動下載清空佇列。
 
 ## 使用方式（開發環境）
 

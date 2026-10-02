@@ -3,10 +3,13 @@ package rss
 import (
 	"context"
 	"database/sql"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,11 +100,16 @@ type fakeDL struct {
 	db    *sql.DB
 	added []string
 	auto  []bool
+	fail  int // the next this many Adds fail, like a full disk
 }
 
 func (f *fakeDL) Add(ctx context.Context, uri string, torrent []byte, auto bool) (int64, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.fail > 0 {
+		f.fail--
+		return 0, errors.New("the disk is nearly full")
+	}
 	f.added = append(f.added, uri)
 	f.auto = append(f.auto, auto)
 	r, err := f.db.ExecContext(ctx, `INSERT INTO downloads (source, state, dir, auto_select, created_at, updated_at)
@@ -264,3 +272,175 @@ func TestPollFailureBacksOff(t *testing.T) {
 }
 
 func ptr(n int) *int { return &n }
+
+// A source's login and cookie reach only its own site and the sites listed for it, also through
+// redirects (review #17).
+func TestCredentialsStayWithTheirSite(t *testing.T) {
+	ctx := context.Background()
+	s, _, _, feed := newService(t)
+	s.http = &http.Client{CheckRedirect: checkRedirect}
+	type seen struct{ auth, cookie bool }
+	var mu sync.Mutex
+	got := map[string]seen{}
+	torrent := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			_, _, ok := r.BasicAuth()
+			mu.Lock()
+			got[name] = seen{ok, r.Header.Get("Cookie") != ""}
+			mu.Unlock()
+			w.Write([]byte("d4:infod4:name1:xee"))
+		}
+	}
+	other := httptest.NewServer(torrent("other"))
+	defer other.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/own.torrent", torrent("own"))
+	mux.HandleFunc("/away", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/x.torrent", http.StatusFound)
+	})
+	own := httptest.NewServer(mux)
+	defer own.Close()
+	_ = feed
+	src, err := s.Create(ctx, SourceInput{Name: str("Private"), URL: str(own.URL + "/rss"), AuthUser: str("me"), AuthPass: str("secret"),
+		Cookie: str("session=abc")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(link, name string, want seen) {
+		t.Helper()
+		mu.Lock()
+		delete(got, name)
+		mu.Unlock()
+		s.DownloadLink(ctx, src.ID, link)
+		mu.Lock()
+		defer mu.Unlock()
+		if got[name] != want {
+			t.Fatalf("%s: got %+v, want %+v", link, got[name], want)
+		}
+	}
+	check(own.URL+"/own.torrent", "own", seen{true, true})
+	check(other.URL+"/x.torrent", "other", seen{false, false}) // a link to another site
+	check(own.URL+"/away", "other", seen{false, false})        // a redirect to another site
+	// Listed explicitly, the other site gets them.
+	if _, err := s.Update(ctx, src.ID, SourceInput{AuthOrigins: str(other.URL + "/anything")}); err != nil {
+		t.Fatal(err)
+	}
+	check(other.URL+"/x.torrent", "other", seen{true, true})
+	check(own.URL+"/away", "other", seen{true, true})
+	if _, err := s.Update(ctx, src.ID, SourceInput{AuthOrigins: str("ftp://nope")}); err == nil {
+		t.Fatal("a non-web origin was accepted")
+	}
+	// Same host, another scheme or port, is another site.
+	u, _ := url.Parse("https://site.example/rss")
+	for raw, want := range map[string]bool{"https://SITE.example:443/a": true, "http://site.example/a": false,
+		"https://site.example:8443/a": false, "https://cdn.site.example/a": false} {
+		x, _ := url.Parse(raw)
+		if (origin(u) == origin(x)) != want {
+			t.Errorf("%s: same site = %v", raw, !want)
+		}
+	}
+}
+
+// A fetch that returns after the settings changed is judged by the new settings (review #22).
+func TestPollUsesSettingsOfNow(t *testing.T) {
+	ctx := context.Background()
+	s, dl, fs, feed := newService(t)
+	gate := make(chan struct{})
+	arrived := make(chan struct{}, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, ".torrent") {
+			arrived <- struct{}{}
+			<-gate
+		}
+		fs.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	gated := srv.URL + "/rss"
+	src, _ := s.Create(ctx, SourceInput{Name: str("Gated"), URL: str(feed), Include: str("flac"), AutoDownload: yes(true)})
+	s.Poll(ctx, src.ID) // baseline
+	s.Update(ctx, src.ID, SourceInput{URL: str(gated)})
+	go func() { <-arrived; gate <- struct{}{} }()
+	s.Poll(ctx, src.ID) // the new address is known now
+	fs.items = append([]string{"Fresh Album FLAC"}, fs.items...)
+
+	// Auto-download turned off while the fetch is out: nothing is downloaded.
+	done := make(chan struct{})
+	go func() { s.Poll(ctx, src.ID); close(done) }()
+	<-arrived
+	s.Update(ctx, src.ID, SourceInput{AutoDownload: yes(false)})
+	gate <- struct{}{}
+	<-done
+	if len(dl.added) != 0 {
+		t.Fatalf("downloaded after auto-download was turned off: %v", dl.added)
+	}
+
+	// Turned on again while a fetch is out: that fetch does not use up the new baseline.
+	fs.items = append([]string{"Later Album FLAC"}, fs.items...)
+	done = make(chan struct{})
+	go func() { s.Poll(ctx, src.ID); close(done) }()
+	<-arrived
+	s.Update(ctx, src.ID, SourceInput{AutoDownload: yes(true)})
+	gate <- struct{}{}
+	<-done
+	if cur, _ := s.source(ctx, src.ID); !cur.Baseline || len(dl.added) != 0 {
+		t.Fatalf("baseline %v, downloads %v", cur.Baseline, dl.added)
+	}
+
+	// The address changed while the fetch was out: its items are not kept.
+	before, _ := s.Items(ctx, ItemQuery{Source: src.ID})
+	fs.items = append([]string{"Wrong Site Album FLAC"}, fs.items...)
+	done = make(chan struct{})
+	go func() { s.Poll(ctx, src.ID); close(done) }()
+	<-arrived
+	s.Update(ctx, src.ID, SourceInput{URL: str(feed)})
+	gate <- struct{}{}
+	<-done
+	if after, _ := s.Items(ctx, ItemQuery{Source: src.ID}); len(after) != len(before) {
+		t.Fatalf("items from the old address kept: %d -> %d", len(before), len(after))
+	}
+}
+
+// More matches than one poll may start, and a passing failure, wait in the queue instead of being
+// dropped (review #23).
+func TestAutoDownloadQueue(t *testing.T) {
+	ctx := context.Background()
+	s, dl, fs, feed := newService(t)
+	src, _ := s.Create(ctx, SourceInput{Name: str("Q"), URL: str(feed), Include: str("flac"), AutoDownload: yes(true)})
+	s.Poll(ctx, src.ID) // baseline
+	for i := 0; i < 6; i++ {
+		fs.items = append([]string{fmt.Sprintf("Album %d FLAC", i)}, fs.items...)
+	}
+	if r, _ := s.Poll(ctx, src.ID); r.New != 6 || r.Downloaded != 5 {
+		t.Fatalf("first poll %+v", r)
+	}
+	if r, _ := s.Poll(ctx, src.ID); r.New != 0 || r.Downloaded != 1 || fs.cond == 0 { // a 304, and the sixth starts
+		t.Fatalf("second poll %+v (304s %d)", r, fs.cond)
+	}
+
+	// A failure (a full disk) keeps the item queued with the reason, and it starts later.
+	fs.items = append([]string{"Disk Album FLAC"}, fs.items...)
+	dl.fail = 1
+	if r, _ := s.Poll(ctx, src.ID); r.Downloaded != 0 {
+		t.Fatalf("started despite the failure %+v", r)
+	}
+	items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "disk"})
+	if len(items) != 1 || items[0].AutoState != "pending" || items[0].AutoError == "" {
+		t.Fatalf("queued %+v", items)
+	}
+	s.db.Exec(`UPDATE rss_items SET auto_next = 0`) // its wait is over
+	if r, _ := s.Poll(ctx, src.ID); r.Downloaded != 1 {
+		t.Fatalf("retry %+v", r)
+	}
+	if items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "disk"}); items[0].AutoState != "done" || !items[0].Downloaded {
+		t.Fatalf("after retry %+v", items[0])
+	}
+
+	// Turning auto-download off drops what is queued.
+	fs.items = append([]string{"Off Album FLAC"}, fs.items...)
+	dl.fail = 1
+	s.Poll(ctx, src.ID)
+	s.Update(ctx, src.ID, SourceInput{AutoDownload: yes(false)})
+	if items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "off"}); items[0].AutoState != "" {
+		t.Fatalf("still queued %+v", items[0])
+	}
+}

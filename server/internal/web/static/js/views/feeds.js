@@ -1,4 +1,4 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href } from '../router.js';
 import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
@@ -67,14 +67,17 @@ function ItemList({ sources, initialQ, rev }) {
     }
   };
   const searchable = sources.filter((s) => s.searchable && (!source || s.id === source));
+  const liveSeq = useRef(0);
   const searchSite = async (s) => {
+    const seq = ++liveSeq.current; // a slower earlier search never replaces a later one
     setLiveBusy(true);
     try {
-      setLive({ source: s, q: term, items: await get(`/rss/sources/${s.id}/search?q=${encodeURIComponent(term)}`) });
+      const items = await get(`/rss/sources/${s.id}/search?q=${encodeURIComponent(term)}`);
+      if (seq === liveSeq.current) setLive({ source: s, q: term, items });
     } catch (e) {
-      toast(e.message, 'error');
+      if (seq === liveSeq.current) toast(e.message, 'error');
     }
-    setLiveBusy(false);
+    if (seq === liveSeq.current) setLiveBusy(false);
   };
   return html`
     <div class="toolbar">
@@ -92,7 +95,7 @@ function ItemList({ sources, initialQ, rev }) {
       <div class="section-head"><h2 class="section-title">「${live.source.name}」站內搜尋「${live.q}」</h2>
         <${IconButton} icon="close" label="關閉搜尋結果" onClick=${() => setLive(null)} /></div>
       <p class="hint">即時向網站查詢，結果不會存起來；網站的 RSS 不一定有完整的歷史。</p>
-      ${live.items.length ? html`<ul class="feed-items">${live.items.map((it, i) => html`<${ItemRow} key=${'l' + i} it=${it} live=${live.source} />`)}</ul>`
+      ${live.items.length ? html`<ul class="feed-items">${live.items.map((it, i) => html`<${ItemRow} key=${liveKey(live, it, i)} it=${it} live=${live.source} />`)}</ul>`
         : html`<${Empty} icon="search">沒有結果<//>`}
     </div>`}
     ${first.loading && !first.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${first.error} onRetry=${first.reload} />`}
@@ -101,6 +104,10 @@ function ItemList({ sources, initialQ, rev }) {
     ${first.data && list.length >= 50 && !(more.key === key && more.done) && html`<div class="actions center">
       <button class="btn tonal" onClick=${loadMore}>載入更多</button></div>`}`;
 }
+
+// liveKey ties a live result's row (and the download it started) to that torrent, not to its place
+// in the list.
+const liveKey = (live, it, i) => `${live.source.id}|${it.guid || it.info_hash || it.download || 'i' + i}`;
 
 function ItemRow({ it, live }) {
   const [busy, setBusy] = useState(false);
@@ -125,8 +132,11 @@ function ItemRow({ it, live }) {
         ${it.match === 'included' && html` <span class="pill good">符合規則</span>`}
         ${it.match === 'excluded' && html` <span class="pill">已排除</span>`}
         ${done && html` <span class="pill">已下載</span>`}
+        ${!done && it.auto_state === 'pending' && html` <span class="pill">等待自動下載</span>`}
+        ${!done && it.auto_state === 'failed' && html` <span class="pill warn">自動下載失敗</span>`}
         ${!it.download && html` <span class="pill warn">只有網頁，無法直接下載</span>`}
       </div>
+      ${!done && it.auto_error && html`<div class="task-error">${it.auto_state === 'failed' ? '自動下載失敗，已停止重試：' : '自動下載暫時失敗，稍後再試：'}${it.auto_error}</div>`}
     </div>
     <div class="feed-actions">
       ${it.download && !done && html`<button class="btn tonal" disabled=${busy} onClick=${download}><${Icon} name="download" />下載</button>`}
@@ -199,7 +209,7 @@ function SourceDialog({ src, close, reload }) {
   const [f, setF] = useState(() => ({
     name: src ? src.name : '', url: src ? src.url : '', interval: String(src ? src.interval_min : 30), enabled: src ? src.enabled : true,
     include: src ? src.include : '', exclude: src ? src.exclude : '', auto: src ? src.auto_download : false,
-    user: src ? src.auth_user : '', pass: '', cookie: '', clearAuth: false, clearCookie: false,
+    user: src ? src.auth_user : '', pass: '', cookie: '', clearAuth: false, clearCookie: false, origins: src ? src.auth_origins || '' : '',
   }));
   const [nyaa, setNyaa] = useState({ c: '2_1', f: '0', q: '' });
   const [busy, setBusy] = useState(false);
@@ -213,7 +223,7 @@ function SourceDialog({ src, close, reload }) {
     e.preventDefault();
     if (f.auto && !f.include.trim()) return toast('自動下載需要至少一條包含規則', 'error');
     const body = { name: f.name, url: f.url, interval_min: Number(f.interval), enabled: f.enabled, include: f.include, exclude: f.exclude,
-      auto_download: f.auto, auth_user: f.user, clear_auth: f.clearAuth, clear_cookie: f.clearCookie };
+      auto_download: f.auto, auth_user: f.user, auth_origins: f.origins, clear_auth: f.clearAuth, clear_cookie: f.clearCookie };
     if (f.pass) body.auth_pass = f.pass;
     if (f.cookie) body.cookie = f.cookie;
     setBusy(true);
@@ -262,7 +272,8 @@ function SourceDialog({ src, close, reload }) {
           ${src && (src.has_password || src.auth_user) && html`<label class="check-field"><input type="checkbox" checked=${f.clearAuth} onChange=${set('clearAuth')} />清除帳號密碼</label>`}
           ${src && src.has_cookie && html`<label class="check-field"><input type="checkbox" checked=${f.clearCookie} onChange=${set('clearCookie')} />清除 Cookie</label>`}
         </div>
-        <p class="hint tight">只存在伺服器的資料庫裡，用來取得 RSS 與 .torrent 檔。</p>
+        <label class="field">也送到這些網站（選填）<textarea rows="2" value=${f.origins} placeholder="https://dl.example.org" onInput=${set('origins')}></textarea></label>
+        <p class="hint tight">只存在伺服器的資料庫裡，用來取得 RSS 與 .torrent 檔。帳密與 Cookie 只會送到 RSS 網址的同一個網站（相同協定、主機與連接埠，轉址也一樣）；.torrent 放在其他網站（例如 CDN）而需要登入時，把那個網站加在上面，每行一個。</p>
       </details>
       <div class="dialog-actions">
         <button type="button" class="btn text" onClick=${close}>取消</button>
