@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="application-name" content="Kanade">
+<meta property="og:site_name" content="Kanade">
+<meta property="og:title" content="Kanade">
+<meta name="description" content="Kanade is a personal, self-hosted music library and player that stores the owner's music in their own Google Drive.">
+<title>Kanade</title>
+<style>
+  body { font: 16px/1.6 system-ui, sans-serif; max-width: 42rem; margin: 3rem auto; padding: 0 1rem; color: #222; background: #fff; }
+  h1 { font-size: 1.8rem; margin-bottom: .25rem; } h2 { font-size: 1.15rem; margin-top: 2rem; }
+  .tagline { color: #555; margin-top: 0; }
+  footer { margin-top: 3rem; font-size: .9rem; color: #555; }
+  @media (prefers-color-scheme: dark) { body { color: #ddd; background: #161616; } .tagline, footer { color: #aaa; } a { color: #8ab4f8; } }
+</style></head>
+<body>
+<header>
+  <h1>Kanade</h1>
+  <p class="tagline">A personal, self-hosted music library and player.</p>
+</header>
+
+<main>
+<h2>What Kanade does</h2>
+<p>Kanade is a music app run by its owner for their own use. It helps the owner:</p>
+<ul>
+  <li>import music files and albums, including Japanese releases with original-language titles;</li>
+  <li>organize tracks, albums, artists and versions, and remove exact duplicate files;</li>
+  <li>stream the music to the owner's phone and computer, with playlists, favorites and play history.</li>
+</ul>
+
+<h2>Why Kanade uses Google Drive</h2>
+<p>Kanade keeps the owner's music files in the owner's own Google Drive, so the library
+does not depend on a single server's disk. After the owner signs in with Google and grants
+access, Kanade uses the Google Drive API to:</p>
+<ul>
+  <li>upload imported music files, cover art and lyrics to the owner's Drive;</li>
+  <li>list and read those files to build the music library;</li>
+  <li>stream audio from Drive to the owner's devices for playback.</li>
+</ul>
+<p>Data from Google Drive is used only to provide these features to the owner. It is not sold,
+shared with third parties, or used for advertising. Details are in the
+<a href="https://music.ser1ka.com/privacy">Kanade Privacy Policy</a>.</p>
+</main>
+
+<p><a href="/app/">Open Kanade</a> (sign-in required)</p>
+
+<footer>
+  <p>Kanade · music.ser1ka.com · <a href="https://music.ser1ka.com/privacy">Privacy Policy</a></p>
+</footer>
+</body></html>

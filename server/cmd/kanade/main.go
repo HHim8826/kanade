@@ -1,0 +1,269 @@
+// Command kanade is the Kanade music service.
+package main
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/HHim8826/kanade/server/internal/api"
+	"github.com/HHim8826/kanade/server/internal/auth"
+	"github.com/HHim8826/kanade/server/internal/config"
+	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/downloader"
+	"github.com/HHim8826/kanade/server/internal/gdrive"
+	"github.com/HHim8826/kanade/server/internal/importer"
+	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/stream"
+	"github.com/HHim8826/kanade/server/internal/uploads"
+)
+
+const usage = `usage: kanade [-data DIR] <command>
+
+  serve [-listen ADDR] [-public-url URL]   run the service
+  user add NAME                             create an account (password on stdin)
+  user passwd NAME                          set a password (password on stdin)
+  google client FILE                        load the OAuth client JSON from Google Cloud
+  google token FILE                         load an existing token (from the P0 spike)
+
+The data directory defaults to $KANADE_DATA, then ./data.
+`
+
+func main() {
+	defaultData := os.Getenv("KANADE_DATA")
+	if defaultData == "" {
+		defaultData = os.Getenv("SER1KA_DATA") // the name before the project became Kanade
+	}
+	if defaultData == "" {
+		defaultData = "data"
+	}
+	global := flag.NewFlagSet("kanade", flag.ExitOnError)
+	dataDir := global.String("data", defaultData, "data directory")
+	global.Usage = func() { fmt.Fprint(os.Stderr, usage) }
+	global.Parse(os.Args[1:])
+	args := global.Args()
+	if len(args) == 0 {
+		global.Usage()
+		os.Exit(2)
+	}
+
+	cfg := config.Config{DataDir: *dataDir, Listen: "127.0.0.1:8080", PublicURL: "https://music.ser1ka.com",
+		Aria2Path: defaultAria2()}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	var err error
+	switch args[0] {
+	case "serve":
+		err = serve(ctx, cfg, args[1:])
+	case "user":
+		err = userCmd(ctx, cfg, args[1:])
+	case "google":
+		err = googleCmd(ctx, cfg, args[1:])
+	default:
+		global.Usage()
+		os.Exit(2)
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		os.Exit(1)
+	}
+}
+
+func serve(ctx context.Context, cfg config.Config, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	fs.StringVar(&cfg.Listen, "listen", cfg.Listen, "listen address")
+	fs.StringVar(&cfg.PublicURL, "public-url", cfg.PublicURL, "public base URL (OAuth redirect)")
+	cacheMiB := fs.Int64("cache-mib", 512, "stream cache budget in MiB (plan §6)")
+	stagingMiB := fs.Int64("staging-mib", 2048, "download staging budget in MiB (plan §6)")
+	reserveGiB := fs.Int64("reserve-gib", 4, "free space to keep on the filesystem in GiB (plan §6)")
+	fs.StringVar(&cfg.Aria2Path, "aria2", cfg.Aria2Path, "path to aria2c")
+	fs.Parse(args)
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	if err := cfg.Prepare(); err != nil {
+		return err
+	}
+	d, err := db.Open(ctx, cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	authSvc := auth.New(d)
+	drive := gdrive.New(d, strings.TrimRight(cfg.PublicURL, "/")+"/oauth/google/callback")
+	lib := library.New(d)
+	imp := importer.New(d, lib, drive, cfg.Path(config.DirStaging), log)
+	cache, err := stream.NewCache(drive, cfg.Path(config.DirCache), *cacheMiB<<20, log)
+	if err != nil {
+		return err
+	}
+	streamKey, err := db.Secret(ctx, d, "stream_signing_key", 32)
+	if err != nil {
+		return err
+	}
+	aria, err := downloader.NewAria2(cfg.Aria2Path, cfg.Path(config.DirAria2), cfg.Path(config.DirDownloads), log)
+	if err != nil {
+		return err
+	}
+	downloads := downloader.NewService(d, aria, imp, cfg.Path(config.DirDownloads), *stagingMiB<<20, *reserveGiB<<30, log)
+	ups := uploads.New(d, cfg.Path(config.DirStaging, "uploads"), *stagingMiB<<20)
+	downloads.Other, ups.Other = ups.Committed, downloads.Committed // one shared staging budget
+	imp.OnBatchDone = func(ctx context.Context, kind, source string, failed int) {
+		if kind == "upload" && failed == 0 {
+			if err := ups.RemoveGroup(ctx, source); err != nil {
+				log.Warn("clear upload staging", "group", source, "err", err)
+			}
+		}
+	}
+	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
+		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log})
+	go imp.Run(ctx)
+	ariaDone := make(chan struct{})
+	go func() { aria.Run(ctx); close(ariaDone) }()
+	go downloads.Run(ctx)
+
+	has, err := authSvc.HasUsers(ctx)
+	if err != nil {
+		return err
+	}
+	if !has {
+		if _, err := os.Stat(srv.SetupCodePath()); errors.Is(err, os.ErrNotExist) {
+			raw := make([]byte, 12)
+			rand.Read(raw)
+			if err := os.WriteFile(srv.SetupCodePath(), []byte(hex.EncodeToString(raw)+"\n"), 0o600); err != nil {
+				return err
+			}
+		}
+		log.Warn("no account yet: create one with `user add`, or POST /api/v1/setup with the code in " + srv.SetupCodePath())
+	}
+
+	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 1)
+	go func() { errc <- hs.ListenAndServe() }()
+	log.Info("listening", "addr", cfg.Listen, "public_url", cfg.PublicURL, "data", cfg.DataDir)
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	err = hs.Shutdown(shutdownCtx)
+	// Wait for aria2 to save its session and exit; an orphan would linger as a zombie
+	// on hosts whose init does not reap (this container's PID 1 does not).
+	select {
+	case <-ariaDone:
+	case <-time.After(15 * time.Second):
+		log.Warn("aria2 did not stop in time")
+	}
+	return err
+}
+
+func readPassword() (string, error) {
+	fmt.Fprint(os.Stderr, "password: ")
+	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil && line == "" {
+		return "", errors.New("no password on stdin")
+	}
+	return strings.TrimRight(line, "\r\n"), nil
+}
+
+func userCmd(ctx context.Context, cfg config.Config, args []string) error {
+	if len(args) != 2 || (args[0] != "add" && args[0] != "passwd") {
+		return errors.New("usage: user add|passwd NAME")
+	}
+	if err := cfg.Prepare(); err != nil {
+		return err
+	}
+	d, err := db.Open(ctx, cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	pw, err := readPassword()
+	if err != nil {
+		return err
+	}
+	a := auth.New(d)
+	if args[0] == "add" {
+		if err := a.CreateUser(ctx, args[1], pw, false); err != nil {
+			return err
+		}
+		os.Remove(cfg.Path("setup-code")) // setup is no longer needed
+		fmt.Println("created", args[1])
+		return nil
+	}
+	if err := a.SetPassword(ctx, args[1], pw); err != nil {
+		return err
+	}
+	fmt.Println("password updated; existing logins were ended")
+	return nil
+}
+
+func googleCmd(ctx context.Context, cfg config.Config, args []string) error {
+	if len(args) != 2 || (args[0] != "client" && args[0] != "token") {
+		return errors.New("usage: google client|token FILE")
+	}
+	raw, err := os.ReadFile(args[1])
+	if err != nil {
+		return err
+	}
+	if err := cfg.Prepare(); err != nil {
+		return err
+	}
+	d, err := db.Open(ctx, cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	drive := gdrive.New(d, "")
+	if args[0] == "client" {
+		if err := drive.SetClientConfig(ctx, raw); err != nil {
+			return err
+		}
+		fmt.Println("OAuth client stored")
+		return nil
+	}
+	var tok gdrive.Token
+	if err := json.Unmarshal(raw, &tok); err != nil {
+		return err
+	}
+	if err := drive.ImportToken(ctx, tok); err != nil {
+		return err
+	}
+	fmt.Println("token stored")
+	return nil
+}
+
+// defaultAria2 prefers an aria2c shipped next to this binary, then $KANADE_ARIA2,
+// then the development copy in tools/.
+func defaultAria2() string {
+	if exe, err := os.Executable(); err == nil {
+		if p := filepath.Join(filepath.Dir(exe), "aria2c"); fileExists(p) {
+			return p
+		}
+	}
+	if p := os.Getenv("KANADE_ARIA2"); p != "" {
+		return p
+	}
+	return "/data/music-platform/tools/aria2/aria2c"
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && st.Mode().IsRegular()
+}

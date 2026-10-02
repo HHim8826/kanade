@@ -1,0 +1,7 @@
+secrets/
+var/
+tools/
+cache-p0/
+server/bin/
+spikes/*/bin/
+*.log
