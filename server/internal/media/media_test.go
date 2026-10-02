@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"golang.org/x/text/encoding/japanese"
+	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
 func probeFile(t *testing.T, name string) *Info {
@@ -205,5 +206,32 @@ func TestDecodeText(t *testing.T) {
 	}
 	if s, _ := DecodeText(append([]byte{0xEF, 0xBB, 0xBF}, "bom"...)); s != "bom" {
 		t.Fatalf("utf-8 bom: %q", s)
+	}
+}
+
+func TestRedecodeWithChosenEncoding(t *testing.T) {
+	gbk, _ := simplifiedchinese.GBK.NewEncoder().Bytes([]byte("测试歌曲"))
+	var body []byte
+	body = append(body, id3Frame("TIT2", append([]byte{0}, gbk...))...)
+	body = append(body, id3Frame("TALB", append([]byte{3}, []byte("アルバム")...))...) // UTF-8 stays as it is
+	n := len(body)
+	header := []byte{'I', 'D', '3', 3, 0, 0, byte(n >> 21 & 0x7f), byte(n >> 14 & 0x7f), byte(n >> 7 & 0x7f), byte(n & 0x7f)}
+	audio, _ := os.ReadFile("testdata/tone-notag.mp3")
+	file := append(append(header, body...), audio...)
+	info, err := Probe(bytes.NewReader(file), int64(len(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Tags.Title == "测试歌曲" {
+		t.Fatal("GBK should not be guessed automatically")
+	}
+	if err := info.Redecode("gbk"); err != nil {
+		t.Fatal(err)
+	}
+	if info.Tags.Title != "测试歌曲" || info.Tags.Album != "アルバム" || info.Encoding != "gbk" {
+		t.Fatalf("after redecode %+v %q", info.Tags, info.Encoding)
+	}
+	if err := info.Redecode("ebcdic"); err == nil {
+		t.Fatal("unknown encoding accepted")
 	}
 }

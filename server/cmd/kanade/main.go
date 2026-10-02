@@ -124,7 +124,19 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	downloads := downloader.NewService(d, aria, imp, cfg.Path(config.DirDownloads), *stagingMiB<<20, *reserveGiB<<30, log)
 	ups := uploads.New(d, cfg.Path(config.DirStaging, "uploads"), *stagingMiB<<20)
-	downloads.Other, ups.Other = ups.Committed, downloads.Committed // one shared staging budget
+	// One shared staging budget (plan §6): downloads, client uploads and extracted archives.
+	downloads.Other = func(ctx context.Context) int64 { return ups.Committed(ctx) + imp.WorkCommitted(ctx) }
+	ups.Other = func(ctx context.Context) int64 { return downloads.Committed(ctx) + imp.WorkCommitted(ctx) }
+	imp.Space = func(ctx context.Context, need int64) error {
+		used := downloads.Committed(ctx) + ups.Committed(ctx) + imp.WorkCommitted(ctx)
+		if used+need > *stagingMiB<<20 {
+			return fmt.Errorf("staging holds %d MB, the budget is %d MB", used>>20, *stagingMiB)
+		}
+		if free := downloader.FreeSpace(cfg.DataDir); free >= 0 && free-need < *reserveGiB<<30 {
+			return fmt.Errorf("the disk would drop below the %d GB free-space reserve", *reserveGiB)
+		}
+		return nil
+	}
 	imp.OnBatchDone = func(ctx context.Context, kind, source string, failed int) {
 		if kind == "upload" && failed == 0 {
 			if err := ups.RemoveGroup(ctx, source); err != nil {

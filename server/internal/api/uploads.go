@@ -93,12 +93,12 @@ func (s *Server) completeUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 // importUploadGroup turns a fully uploaded group into an import batch.
-func (s *Server) importUploadGroup(w http.ResponseWriter, r *http.Request, group string) {
+func (s *Server) importUploadGroup(w http.ResponseWriter, r *http.Request, group string, preview bool) {
 	if _, err := s.uploads.ReadyForImport(r.Context(), group); err != nil {
 		writeError(w, http.StatusConflict, err)
 		return
 	}
-	id, n, err := s.importer.CreateBatch(r.Context(), "upload", group, s.uploads.GroupDir(group))
+	id, n, err := s.importer.CreateBatch(r.Context(), "upload", group, s.uploads.GroupDir(group), preview)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

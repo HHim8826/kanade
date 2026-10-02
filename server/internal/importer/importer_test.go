@@ -118,7 +118,7 @@ func TestBatchImportsSkipsAndDedupes(t *testing.T) {
 	copyFixture(t, "tone-alac.m4a", filepath.Join(src, "lossless.m4a"))
 	os.WriteFile(filepath.Join(src, "notes.txt"), []byte("not audio"), 0o644)
 
-	batch, n, err := im.CreateBatch(ctx, "local", "test", src)
+	batch, n, err := im.CreateBatch(ctx, "local", "test", src, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestFailedUploadCanBeRetried(t *testing.T) {
 	src := t.TempDir()
 	copyFixture(t, "tone.ogg", filepath.Join(src, "a.ogg"))
 	fd.failNext = errors.New("network down")
-	batch, _, err := im.CreateBatch(ctx, "local", "", src)
+	batch, _, err := im.CreateBatch(ctx, "local", "", src, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +250,7 @@ func TestAlbumWithoutAlbumArtistStaysOneAlbum(t *testing.T) {
 	// A solo album keeps its one performer as album artist.
 	taggedMP3(t, filepath.Join(src, "Solo", "Disc 1", "01.mp3"), map[string]string{"TIT2": "A", "TPE1": "Makino Yui", "TALB": "Solo", "TRCK": "1"})
 	taggedMP3(t, filepath.Join(src, "Solo", "Disc 2", "01.mp3"), map[string]string{"TIT2": "B", "TPE1": "Makino Yui", "TALB": "Solo", "TRCK": "1"})
-	batch, _, err := im.CreateBatch(ctx, "local", "", src)
+	batch, _, err := im.CreateBatch(ctx, "local", "", src, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestLyricsFromLRCFile(t *testing.T) {
 	taggedMP3(t, filepath.Join(src, "01 song.mp3"), map[string]string{"TIT2": "Song", "TPE1": "A"})
 	sjis, _ := japanese.ShiftJIS.NewEncoder().Bytes([]byte("[00:01.00]一行目\r\n[00:02.00]二行目\r\n"))
 	os.WriteFile(filepath.Join(src, "01 song.lrc"), sjis, 0o644)
-	batch, _, err := im.CreateBatch(ctx, "local", "", src)
+	batch, _, err := im.CreateBatch(ctx, "local", "", src, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestOriginalTagsRestoreAfterEdit(t *testing.T) {
 	src := filepath.Join(t.TempDir(), "Album")
 	os.MkdirAll(src, 0o755)
 	taggedMP3(t, filepath.Join(src, "03 x.mp3"), map[string]string{"TIT2": "Song", "TPE1": "A", "TALB": "Al", "TRCK": "3"})
-	batch, _, _ := im.CreateBatch(ctx, "local", "", src)
+	batch, _, _ := im.CreateBatch(ctx, "local", "", src, false)
 	runUntilDone(t, im, batch)
 	albums, _ := lib.Albums(ctx, 10, 0, false)
 	if len(albums) != 1 {
@@ -340,7 +340,7 @@ func TestOriginalTagsRestoreAfterEdit(t *testing.T) {
 		t.Fatalf("restored %+v", d)
 	}
 	// Importing the folder again finds the same entry.
-	batch, _, _ = im.CreateBatch(ctx, "local", "", src)
+	batch, _, _ = im.CreateBatch(ctx, "local", "", src, false)
 	if b := runUntilDone(t, im, batch); b.Items[0].State != StateDuplicate {
 		t.Fatalf("re-import %+v", b.Items)
 	}

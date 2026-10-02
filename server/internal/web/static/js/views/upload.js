@@ -6,6 +6,7 @@ import { ErrorBox, Icon, fmtBytes, html, toast } from '../ui.js';
 const AUDIO = /\.(flac|mp3|m4a|mp4|aac|ogg|oga|opus|wav|aiff?|ape|tak|wv|tta|dsf|dff|wma)$/i;
 const IMAGE = /\.(jpe?g|png)$/i;
 const SIDECAR = /\.(lrc|cue|log)$/i; // lyrics; CUE sheets and rip logs are kept with the album
+const ARCHIVE = /\.zip$/i; // expanded on the server, after its limits are checked
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -43,7 +44,7 @@ export function Upload() {
     const folder = files.some((f) => f.webkitRelativePath);
     // From a folder, keep cover and scan images too: the server picks album art from them.
     const list = files
-      .filter((f) => AUDIO.test(f.name) || SIDECAR.test(f.name) || (folder && IMAGE.test(f.name)))
+      .filter((f) => AUDIO.test(f.name) || SIDECAR.test(f.name) || ARCHIVE.test(f.name) || (folder && IMAGE.test(f.name)))
       .map((f) => ({ file: f, path: f.webkitRelativePath || f.name }));
     setEntries(list);
     setError(null);
@@ -51,8 +52,9 @@ export function Upload() {
   };
 
   const audioCount = entries.filter((e) => AUDIO.test(e.path)).length;
+  const zipCount = entries.filter((e) => ARCHIVE.test(e.path)).length;
   const imageCount = entries.filter((e) => IMAGE.test(e.path)).length;
-  const otherCount = entries.length - audioCount - imageCount;
+  const otherCount = entries.length - audioCount - zipCount - imageCount;
   const totalBytes = entries.reduce((a, e) => a + e.file.size, 0);
 
   const start = async () => {
@@ -67,9 +69,9 @@ export function Upload() {
         sent = base + entry.file.size;
       }
       setProgress({ sent: totalBytes, total: totalBytes, file: '建立匯入…' });
-      const r = await post('/imports', { upload_group: group });
-      toast(`已上傳，開始匯入 ${r.files} 首`);
-      go('tasks');
+      const r = await post('/imports', { upload_group: group, preview: true });
+      toast('已上傳，請確認要怎麼匯入');
+      go('import/' + r.id);
     } catch (e) {
       setError(e);
       setProgress(null);
@@ -79,22 +81,22 @@ export function Upload() {
   const busy = progress !== null;
   return html`<section>
     <h1 class="page-title">上傳音樂</h1>
-    <p class="hint">選擇資料夾時會保留資料夾結構，Disc 子資料夾、封面與掃描圖都會用來整理專輯。</p>
+    <p class="hint">選擇資料夾時會保留資料夾結構，Disc 子資料夾、封面與掃描圖都會用來整理專輯。也可以上傳 ZIP 壓縮檔。上傳後會先列出要怎麼分成專輯，確認了才開始匯入。</p>
     <div class="actions">
       <label class=${'btn tonal' + (busy ? ' disabled' : '')}><${Icon} name="note" />選擇檔案
-        <input type="file" multiple hidden disabled=${busy} accept="audio/*,.flac,.ape,.tak,.wv,.opus,.lrc,.cue,.log" onChange=${pick} /></label>
+        <input type="file" multiple hidden disabled=${busy} accept="audio/*,.flac,.ape,.tak,.wv,.opus,.lrc,.cue,.log,.zip,application/zip" onChange=${pick} /></label>
       <label class=${'btn tonal' + (busy ? ' disabled' : '')}><${Icon} name="album" />選擇資料夾
         <input type="file" hidden disabled=${busy} webkitdirectory onChange=${pick} /></label>
     </div>
     ${entries.length > 0 && html`<div class="card pad">
-      <div class="title">${[`${audioCount} 首音樂`, imageCount && `${imageCount} 張圖片`, otherCount && `${otherCount} 個歌詞或附屬檔`].filter(Boolean).join('、')}，共 ${fmtBytes(totalBytes)}</div>
+      <div class="title">${[audioCount && `${audioCount} 首音樂`, zipCount && `${zipCount} 個壓縮檔`, imageCount && `${imageCount} 張圖片`, otherCount && `${otherCount} 個歌詞或附屬檔`].filter(Boolean).join('、')}，共 ${fmtBytes(totalBytes)}</div>
       <ul class="items compact">${entries.slice(0, 50).map((e) => html`<li key=${e.path}><span class="grow path">${e.path}</span><span class="sub">${fmtBytes(e.file.size)}</span></li>`)}</ul>
       ${entries.length > 50 && html`<div class="sub">…還有 ${entries.length - 50} 個檔案</div>`}
       ${busy
         ? html`<div class="upload-progress"><div class="sub">${progress.file}</div>
             <div class="progress"><div style=${{ width: `${(progress.sent / progress.total) * 100}%` }}></div></div>
             <div class="sub">${fmtBytes(progress.sent)} / ${fmtBytes(progress.total)}</div></div>`
-        : html`<div class="actions"><button class="btn filled" disabled=${!audioCount} onClick=${start}><${Icon} name="upload" />開始上傳</button></div>`}
+        : html`<div class="actions"><button class="btn filled" disabled=${!audioCount && !zipCount} onClick=${start}><${Icon} name="upload" />開始上傳</button></div>`}
     </div>`}
     <${ErrorBox} error=${error} />
   </section>`;

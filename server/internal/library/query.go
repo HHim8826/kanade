@@ -84,13 +84,14 @@ type Entry struct {
 
 type AlbumDetail struct {
 	AlbumSummary
-	Catalog    string   `json:"catalog"`
-	Edition    string   `json:"edition"`
-	MBRelease  string   `json:"mb_release,omitempty"`
-	MergedInto int64    `json:"merged_into,omitempty"` // emptied by a merge into this album
-	Original   bool     `json:"original"`              // made by an import, so its tags can be restored
-	Aliases    []string `json:"aliases"`
-	Entries    []Entry  `json:"entries"`
+	Catalog    string    `json:"catalog"`
+	Edition    string    `json:"edition"`
+	MBRelease  string    `json:"mb_release,omitempty"`
+	MergedInto int64     `json:"merged_into,omitempty"` // emptied by a merge into this album
+	Original   bool      `json:"original"`              // made by an import, so its tags can be restored
+	Aliases    []string  `json:"aliases"`
+	Sidecars   []Sidecar `json:"sidecars"` // CUE sheets and rip logs kept with the album
+	Entries    []Entry   `json:"entries"`
 }
 
 func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
@@ -106,6 +107,9 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 	}
 	d.MergedInto = merged.Int64
 	if d.Aliases, err = aliasNames(ctx, s.db, "album", id); err != nil {
+		return nil, err
+	}
+	if d.Sidecars, err = s.albumSidecars(ctx, id); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.version, t.kind, `+briefCols+`
@@ -342,4 +346,45 @@ func (s *Store) StreamTarget(ctx context.Context, assetID int64) (*Asset, error)
 		return nil, errors.New("asset is not available yet")
 	}
 	return a, nil
+}
+
+// AlbumByTags is the album that an import with this album and album artist would join (the one
+// first made from those tags, followed through merges), or nil.
+func (s *Store) AlbumByTags(ctx context.Context, album, albumArtist string) (*AlbumSummary, error) {
+	var id int64
+	var merged sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT id, merged_into FROM albums WHERE origin = ? ORDER BY id LIMIT 1`,
+		albumOrigin(album, albumArtist)).Scan(&id, &merged)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for hops := 0; merged.Valid && hops < 10; hops++ {
+		id = merged.Int64
+		if err := s.db.QueryRowContext(ctx, `SELECT merged_into FROM albums WHERE id = ?`, id).Scan(&merged); err != nil {
+			return nil, err
+		}
+	}
+	list, err := scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id = ? GROUP BY al.id`, id))
+	if err != nil || len(list) == 0 {
+		return nil, err
+	}
+	return &list[0], nil
+}
+
+// TrackBySameAudio names a library track whose file decodes to the same audio (decision D2 §6: the
+// same recording with other tags), or "". All-zero MD5s mean "not computed" and match nothing.
+func (s *Store) TrackBySameAudio(ctx context.Context, audioMD5 string) (string, error) {
+	if audioMD5 == "" || strings.Trim(audioMD5, "0") == "" {
+		return "", nil
+	}
+	var title string
+	err := s.db.QueryRowContext(ctx, `SELECT t.title FROM assets a JOIN track_assets ta ON ta.asset_id = a.id
+		JOIN tracks t ON t.id = ta.track_id WHERE a.audio_md5 = ? LIMIT 1`, audioMD5).Scan(&title)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return title, err
 }

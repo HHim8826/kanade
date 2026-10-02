@@ -9,7 +9,9 @@ const downloadStates = {
 };
 const itemStates = {
   pending: '等待中', uploading: '上傳中', published: '已入庫', duplicate: '已存在', skipped: '略過', failed: '失敗',
+  excluded: '已排除', expanded: '已展開',
 };
+const batchStates = { analyzing: '分析中', review: '等待確認', running: '進行中', done: '完成', canceled: '已取消' };
 const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳' };
 
 const fmtWhen = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
@@ -185,7 +187,7 @@ function ImportCard({ b, onChange }) {
       <div class="grow">
         <div class="title">${batchKinds[b.kind] || b.kind}${b.kind !== 'upload' && b.source ? '：' + b.source : ''}</div>
         <div class="sub">
-          <span class=${'chip state-' + (b.state === 'done' ? 'completed' : 'downloading')}>${b.state === 'done' ? '完成' : '進行中'}</span>
+          <span class=${'chip state-' + ({ done: 'completed', review: 'selecting', canceled: 'canceled' }[b.state] || 'downloading')}>${batchStates[b.state] || b.state}</span>
           <span class="count">${fmtWhen(b.created_at)}</span>
           ${Object.entries(c).map(([k, n]) => html` <span class=${'count state-' + k}>${itemStates[k] || k} ${n}</span>`)}
         </div>
@@ -193,6 +195,8 @@ function ImportCard({ b, onChange }) {
       <span class=${'chev' + (open ? ' open' : '')}><${Icon} name="expand" /></span>
     </button>
     ${b.state === 'running' && html`<${Progress} value=${total ? done / total : 0} />`}
+    ${(b.state === 'review' || b.state === 'analyzing') && html`<div class="task-actions">
+      <a class="btn filled" href=${href('import/' + b.id)}>${b.state === 'review' ? '確認並開始匯入' : '查看'}</a></div>`}
     ${c.failed > 0 && html`<div class="task-actions"><button class="btn text" onClick=${retry}><${Icon} name="refresh" />重試失敗項目</button></div>`}
     ${open && detail && html`<ul class="items">
       ${detail.items.map((it) => html`<li key=${it.id}>

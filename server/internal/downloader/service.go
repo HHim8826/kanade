@@ -263,6 +263,9 @@ func dirSize(dir string) int64 {
 	return n
 }
 
+// FreeSpace is the space left on dir's filesystem, or -1 when it cannot be read.
+func FreeSpace(dir string) int64 { return freeSpace(dir) }
+
 func freeSpace(dir string) int64 {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(dir, &st); err != nil {

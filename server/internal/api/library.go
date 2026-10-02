@@ -11,6 +11,7 @@ import (
 	"image/jpeg"
 	_ "image/png"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
+	"github.com/HHim8826/kanade/server/internal/importer"
 )
 
 func pageArgs(r *http.Request) (limit, offset int) {
@@ -255,13 +257,14 @@ func (s *Server) createImport(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Path        string `json:"path"`         // absolute, or relative to the imports directory
 		UploadGroup string `json:"upload_group"` // or: everything a client uploaded in one group
+		Preview     bool   `json:"preview"`      // wait in review after analysis (P2-3)
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.UploadGroup != "" {
-		s.importUploadGroup(w, r, req.UploadGroup)
+		s.importUploadGroup(w, r, req.UploadGroup, req.Preview)
 		return
 	}
 	p := req.Path
@@ -285,7 +288,7 @@ func (s *Server) createImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, fmt.Errorf("imports must come from %s", strings.Join(s.importRoots(), ", ")))
 		return
 	}
-	id, n, err := s.importer.CreateBatch(r.Context(), "local", req.Path, real)
+	id, n, err := s.importer.CreateBatch(r.Context(), "local", req.Path, real, req.Preview)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
@@ -318,6 +321,109 @@ func (s *Server) importBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, b)
+}
+
+// importPreview shows how a batch's files will be grouped (P2-3).
+func (s *Server) importPreview(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	p, err := s.importer.Preview(r.Context(), id)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	if p == nil {
+		writeError(w, http.StatusNotFound, errors.New("no such import"))
+		return
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) importError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, importer.ErrNotInReview):
+		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, importer.ErrBadOp):
+		writeError(w, http.StatusBadRequest, err)
+	default:
+		s.internal(w, r, err)
+	}
+}
+
+// editImportPlan applies one change to a batch in review and answers with the new preview.
+func (s *Server) editImportPlan(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var op importer.PlanOp
+	if err := readJSON(r, &op); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.importer.ApplyOp(r.Context(), id, op); err != nil {
+		s.importError(w, r, err)
+		return
+	}
+	s.importPreview(w, r)
+}
+
+func (s *Server) startImport(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.importer.Start(r.Context(), id); err != nil {
+		s.importError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) cancelImport(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.importer.Cancel(r.Context(), id); err != nil {
+		s.importError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// sidecar sends a CUE sheet or rip log kept with an album.
+func (s *Server) sidecar(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	c, err := s.lib.Sidecar(r.Context(), id)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	if c == nil {
+		writeError(w, http.StatusNotFound, errors.New("no such file"))
+		return
+	}
+	resp, err := s.drive.OpenRange(r.Context(), c.DriveFileID, 0, -1)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	defer resp.Body.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": c.Name}))
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	io.Copy(w, io.LimitReader(resp.Body, c.Size))
 }
 
 func (s *Server) retryImport(w http.ResponseWriter, r *http.Request) {

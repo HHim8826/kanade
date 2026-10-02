@@ -56,9 +56,12 @@ type Importer struct {
 	covers       map[string]int64   // directory -> cover ID, for the current run
 	albumArtists map[string]string  // batch|album folder|album -> decided album artist
 
-	// OnBatchDone runs once when a batch has no pending items left; failed counts items
-	// that need a retry. Client uploads use it to clear their staging folder.
+	// OnBatchDone runs once when a batch has no pending items left, or is canceled; failed counts
+	// items that need a retry. Client uploads use it to clear their staging folder.
 	OnBatchDone func(ctx context.Context, kind, source string, failed int)
+	// Space checks that need more bytes fit the shared staging budget and the disk reserve
+	// (extracting archives); nil means no limit.
+	Space func(ctx context.Context, need int64) error
 }
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
@@ -72,8 +75,9 @@ var audioExt = map[string]bool{
 	".dsf": true, ".dff": true, ".wma": true,
 }
 
-// CreateBatch queues every audio file under dir (recursively) and wakes the worker.
-func (im *Importer) CreateBatch(ctx context.Context, kind, source, dir string) (int64, int, error) {
+// CreateBatch queues every audio file, CUE or LOG sidecar and ZIP archive under dir (recursively)
+// and wakes the worker. With preview the batch waits for the user after analysis.
+func (im *Importer) CreateBatch(ctx context.Context, kind, source, dir string, preview bool) (int64, int, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return 0, 0, err
@@ -91,21 +95,38 @@ func (im *Importer) CreateBatch(ctx context.Context, kind, source, dir string) (
 	if err != nil {
 		return 0, 0, err
 	}
-	return im.CreateBatchFiles(ctx, kind, source, dir, files)
+	return im.CreateBatchFiles(ctx, kind, source, dir, files, preview)
 }
 
-// CreateBatchFiles queues the audio files among paths (for example the files chosen in a
-// torrent). root is the folder that relative paths and folder structure are taken from.
-func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root string, paths []string) (int64, int, error) {
-	var files []string
+// CreateBatchFiles queues the audio files, sidecars and archives among paths (for example the files
+// chosen in a torrent). root is the folder that relative paths and folder structure are taken from.
+// The count returned is of audio files and archives.
+func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root string, paths []string, preview bool) (int64, int, error) {
+	type file struct{ path, role string }
+	var files []file
+	count := 0
 	for _, p := range paths {
-		if audioExt[strings.ToLower(filepath.Ext(p))] {
-			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
-				files = append(files, p)
-			}
+		ext := strings.ToLower(filepath.Ext(p))
+		role := ""
+		switch {
+		case audioExt[ext]:
+			role = RoleAudio
+		case sidecarExt[ext]:
+			role = RoleSidecar
+		case ext == ".zip":
+			role = RoleZip
+		default:
+			continue
+		}
+		if st, err := os.Stat(p); err != nil || !st.Mode().IsRegular() {
+			continue
+		}
+		files = append(files, file{p, role})
+		if role != RoleSidecar {
+			count++
 		}
 	}
-	if len(files) == 0 {
+	if count == 0 {
 		return 0, 0, errors.New("no audio files found")
 	}
 	tx, err := im.db.BeginTx(ctx, nil)
@@ -114,18 +135,19 @@ func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root str
 	}
 	defer tx.Rollback()
 	now := db.Now()
-	r, err := tx.ExecContext(ctx, `INSERT INTO import_batches (kind, source, state, created_at) VALUES (?, ?, 'running', ?)`, kind, source, now)
+	r, err := tx.ExecContext(ctx, `INSERT INTO import_batches (kind, source, state, preview, created_at) VALUES (?, ?, ?, ?, ?)`,
+		kind, source, BatchAnalyzing, preview, now)
 	if err != nil {
 		return 0, 0, err
 	}
 	batchID, _ := r.LastInsertId()
-	for _, p := range files {
-		rel, err := filepath.Rel(root, p)
+	for _, f := range files {
+		rel, err := filepath.Rel(root, f.path)
 		if err != nil {
-			rel = filepath.Base(p)
+			rel = filepath.Base(f.path)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, updated_at)
-			VALUES (?, ?, ?, 'pending', ?)`, batchID, p, filepath.ToSlash(rel), now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, ?)`, batchID, f.path, filepath.ToSlash(rel), f.role, now); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -133,7 +155,7 @@ func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root str
 		return 0, 0, err
 	}
 	im.Wake()
-	return batchID, len(files), nil
+	return batchID, count, nil
 }
 
 func (im *Importer) Wake() {
@@ -145,24 +167,41 @@ func (im *Importer) Wake() {
 
 // Retry puts a batch's failed items back in the queue.
 func (im *Importer) Retry(ctx context.Context, batchID int64) (int, error) {
+	// A broken archive would only fail again; files that could not be read get a fresh look.
 	r, err := im.db.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
-		WHERE batch_id = ? AND state = 'failed'`, db.Now(), batchID)
+		WHERE batch_id = ? AND state = 'failed' AND role != ? AND batch_id IN (SELECT id FROM import_batches WHERE state = ?)`,
+		db.Now(), batchID, RoleZip, BatchDone)
 	if err != nil {
 		return 0, err
 	}
 	n, _ := r.RowsAffected()
 	if n > 0 {
-		im.db.ExecContext(ctx, `UPDATE import_batches SET state = 'running', finished_at = NULL WHERE id = ?`, batchID)
+		im.db.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = NULL WHERE id = ?`, BatchRunning, batchID)
 		im.Wake()
 	}
 	return int(n), nil
 }
 
-// Run processes queued items one at a time until ctx ends (plan §6: one upload at a time).
+// Run analyzes new batches and processes the items of running ones, one at a time, until ctx ends
+// (plan §6: one upload at a time).
 func (im *Importer) Run(ctx context.Context) {
 	// Items interrupted mid-upload resume from their saved session.
 	im.db.ExecContext(ctx, `UPDATE import_items SET state = 'pending' WHERE state = 'uploading'`)
 	for {
+		if id := im.nextAnalysis(ctx); id != 0 {
+			if err := im.analyze(ctx, id); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				im.log.Error("import analysis", "batch", id, "err", err)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(30 * time.Second):
+				}
+			}
+			continue
+		}
 		it, err := im.next(ctx)
 		if err != nil && ctx.Err() == nil {
 			im.log.Error("import queue", "err", err)
@@ -181,20 +220,33 @@ func (im *Importer) Run(ctx context.Context) {
 }
 
 type item struct {
-	id, batchID     int64
-	path, rel, kind string
+	id, batchID           int64
+	path, rel, kind, role string
+	plan                  *Plan // nil for items queued before P2-3
+	temp                  bool
 }
 
+// next is the oldest waiting item of a running batch; a batch's sidecars wait for its audio, so
+// they can join the album it made.
 func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
-	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind FROM import_items i
-		JOIN import_batches b ON b.id = i.batch_id WHERE i.state = 'pending' ORDER BY i.id LIMIT 1`).
-		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind)
+	var plan string
+	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp
+		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
+		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
+		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
+		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if plan != "" {
+		it.plan = &Plan{}
+		if err := json.Unmarshal([]byte(plan), it.plan); err != nil {
+			it.plan = nil
+		}
 	}
 	return &it, nil
 }
@@ -234,18 +286,29 @@ func (im *Importer) handle(ctx context.Context, it *item) {
 	im.mu.Lock()
 	delete(im.progress, it.id)
 	im.mu.Unlock()
-	if it.kind == "upload" && out.state != StateFailed {
-		im.removeStaged(it.path) // client uploads are copies; failed ones stay for a retry
+	if out.state != StateFailed { // failed ones stay for a retry
+		switch {
+		case it.temp:
+			im.removeUnder(im.workDir(it.batchID), it.path) // extracted from an archive
+		case it.kind == "upload":
+			im.removeStaged(it.path) // client uploads are copies
+		}
 	}
-	res, err := im.db.ExecContext(ctx, `UPDATE import_batches SET state = 'done', finished_at = ? WHERE id = ? AND state != 'done'
-		AND NOT EXISTS (SELECT 1 FROM import_items WHERE batch_id = ? AND state IN ('pending', 'uploading'))`,
-		db.Now(), it.batchID, it.batchID)
-	if n, _ := res.RowsAffected(); err == nil && n > 0 && im.OnBatchDone != nil {
-		var source string
-		var failed int
-		im.db.QueryRowContext(ctx, `SELECT b.source, (SELECT count(*) FROM import_items WHERE batch_id = b.id AND state = 'failed')
-			FROM import_batches b WHERE b.id = ?`, it.batchID).Scan(&source, &failed)
-		im.OnBatchDone(ctx, it.kind, source, failed)
+	im.finishIfIdle(ctx, it.batchID)
+}
+
+// batchDone runs once a batch has nothing left to do: archives extracted for it are deleted when
+// nothing failed, and OnBatchDone lets client uploads clear their staging folder.
+func (im *Importer) batchDone(ctx context.Context, batchID int64) {
+	var kind, source string
+	var failed int
+	im.db.QueryRowContext(ctx, `SELECT b.kind, b.source, (SELECT count(*) FROM import_items WHERE batch_id = b.id AND state = 'failed')
+		FROM import_batches b WHERE b.id = ?`, batchID).Scan(&kind, &source, &failed)
+	if failed == 0 {
+		os.RemoveAll(im.workDir(batchID))
+	}
+	if im.OnBatchDone != nil {
+		im.OnBatchDone(ctx, kind, source, failed)
 	}
 }
 
@@ -254,6 +317,9 @@ func (im *Importer) setState(ctx context.Context, id int64, state string) {
 }
 
 func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
+	if it.role == RoleSidecar {
+		return im.processSidecar(ctx, it)
+	}
 	var out outcome
 	f, err := os.Open(it.path)
 	if err != nil {
@@ -297,9 +363,15 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		}
 	}
 	out.assetID = asset.ID
-	in := entryInput(it.rel, info)
-	if info.Tags.AlbumArtist == "" && in.Album != "" {
-		in.AlbumArtist = im.albumArtistFor(ctx, it, in.Album)
+	var in library.EntryInput
+	if it.plan != nil {
+		in = it.plan.input()
+		in.AlbumID = im.groupAlbum(ctx, it.batchID, it.plan.Group)
+	} else { // queued before plans existed
+		in = entryInput(it.rel, info)
+		if info.Tags.AlbumArtist == "" && in.Album != "" {
+			in.AlbumArtist = im.albumArtistFor(ctx, it, in.Album)
+		}
 	}
 
 	if asset.State != library.AssetVerified {
@@ -549,11 +621,14 @@ func (im *Importer) albumArtistFor(ctx context.Context, it *item, album string) 
 }
 
 // removeStaged deletes an imported upload and any folders it leaves empty, up to the staging root.
-func (im *Importer) removeStaged(p string) {
+func (im *Importer) removeStaged(p string) { im.removeUnder(im.staging, p) }
+
+// removeUnder deletes a file and the folders it leaves empty, up to root.
+func (im *Importer) removeUnder(root, p string) {
 	if err := os.Remove(p); err != nil {
 		return
 	}
-	root := filepath.Clean(im.staging)
+	root = filepath.Clean(root)
 	for dir := filepath.Dir(p); strings.HasPrefix(dir, root+string(filepath.Separator)); dir = filepath.Dir(dir) {
 		if os.Remove(dir) != nil { // not empty
 			return
@@ -566,9 +641,9 @@ func (im *Importer) removeStaged(p string) {
 // The album artist is whatever the tags said; an album artist decided from sibling files is kept
 // in the album's origin instead.
 func (im *Importer) Original(ctx context.Context, trackID int64) (*library.EntryInput, error) {
-	var rel, raw string
-	err := im.db.QueryRowContext(ctx, `SELECT rel_path, info FROM import_items WHERE track_id = ? AND info IS NOT NULL
-		ORDER BY id LIMIT 1`, trackID).Scan(&rel, &raw)
+	var rel, raw, opts string
+	err := im.db.QueryRowContext(ctx, `SELECT i.rel_path, i.info, b.options FROM import_items i JOIN import_batches b ON b.id = i.batch_id
+		WHERE i.track_id = ? AND i.info IS NOT NULL ORDER BY i.id LIMIT 1`, trackID).Scan(&rel, &raw, &opts)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -578,6 +653,10 @@ func (im *Importer) Original(ctx context.Context, trackID int64) (*library.Entry
 	var info media.Info
 	if err := json.Unmarshal([]byte(raw), &info); err != nil {
 		return nil, fmt.Errorf("import record of track %d: %w", trackID, err)
+	}
+	var o batchOptions
+	if json.Unmarshal([]byte(opts), &o) == nil && o.Encoding != "" {
+		info.Redecode(o.Encoding) // the encoding the preview chose is part of how the tags were read
 	}
 	in := entryInput(rel, &info)
 	return &in, nil

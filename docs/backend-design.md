@@ -66,12 +66,15 @@ DIR/
 | `lyrics` | 每首歌曲一份歌詞：來源（內嵌／LRC／手動）、是否有時間軸 |
 | `aliases` | 歌手、專輯、歌曲的其他名稱，建入搜尋索引 |
 | `edit_groups`、`edits` | 修改紀錄：每個操作一組，逐欄記舊值與新值，供撤回 |
+| `sidecars` | 與專輯一起保存的 CUE、LOG：Drive file ID、SHA-256、所屬專輯 |
 
 精確去重鍵是 `sha256`＋`size`（唯一約束），上傳完成以 Drive 回傳的 `sha256Checksum` 驗證（P0 第 1 節）。
 
 ## 匯入狀態
 
-`import_items.state`：`pending → parsing → hashing → uploading → verifying → published`，另有 `duplicate`（音檔已存在，只建立收錄）、`failed`、`skipped`（不支援的格式）。每一步完成即寫入資料庫；重啟後從最後完成的步驟繼續，上傳以保存的 session 續傳。
+`import_items.state`：`pending → parsing → hashing → uploading → verifying → published`，另有 `duplicate`（音檔已存在，只建立收錄）、`failed`、`skipped`（不支援的格式）、`excluded`（預覽中排除）、`expanded`（已展開的 ZIP）。每一步完成即寫入資料庫；重啟後從最後完成的步驟繼續，上傳以保存的 session 續傳。
+
+`import_batches.state`（P2-3）：`analyzing → review → running → done`，另有 `canceled`。分析（展開 ZIP、讀標籤、定計畫）完成後，要預覽的批次停在 `review`，其餘直接 `running`；工作程序只處理 `running` 批次的檔案。
 
 ## API（`/api/v1`，JSON，`Authorization: Bearer <token>`）
 
@@ -88,7 +91,10 @@ DIR/
 | `GET /tracks`、`GET /artists`、`GET /search?q=` | 歌曲、歌手（只列有歌曲的）、搜尋 |
 | `GET`／`HEAD /stream/{asset_id}` | 播放（Range、D7 快取）。驗證：`Authorization` header，或 `POST /stream/{id}/url` 取得的 12 小時簽名網址 |
 | `GET /covers/{id}?size=N` | 封面縮圖（預設 300，`size=0` 為原圖） |
-| `POST /imports` | `{"path": "..."}` 匯入伺服器上 `imports/`、`downloads/`、`staging/` 內的資料夾；或 `{"upload_group": "..."}` 匯入一組客戶端上傳 |
+| `POST /imports` | `{"path": "..."}` 匯入伺服器上 `imports/`、`downloads/`、`staging/` 內的資料夾；或 `{"upload_group": "..."}` 匯入一組客戶端上傳；`"preview": true` 時分析後等待確認 |
+| `GET /imports/{id}/preview`、`POST /imports/{id}/plan` | 預覽（各組、單曲、其他檔案、偵測到的編碼）；修改計畫（`op`：`group`、`items`、`move`、`standalone`、`folders`、`encoding`、`exclude`、`include`），回傳新的預覽 |
+| `POST /imports/{id}/start`、`POST /imports/{id}/cancel` | 開始執行；取消（只限等待確認或分析中） |
+| `GET /sidecars/{id}` | 下載與專輯一起保存的 CUE／LOG |
 | `GET /imports`、`GET /imports/{id}`、`POST /imports/{id}/retry` | 匯入批次、逐檔狀態與上傳進度、重試失敗項目 |
 | `POST /downloads` | `{"uri": "magnet:..."}`／`{"uri": "https://.../x.torrent"}`，或以 `Content-Type: application/x-bittorrent` 直接送 .torrent |
 | `GET /downloads`、`GET /downloads/{id}` | 下載清單；單一下載含檔案清單與預設勾選（`suggested`） |
@@ -178,6 +184,14 @@ DIR/
   - 編輯對話框在窄欄時輸入框超出邊界；
   - 修改後重新載入時整頁閃成載入中，捲動位置跑掉（`useLoad` 的重新整理改為保留目前資料）。
 - 已知限制：歌手字串不拆分多人（「A feat. B」是一位歌手）；羅馬字與假名之間的自動互通只靠別名；AcoustID 未實作。
+
+### P2-3 匯入預覽（2026-10-02）
+
+- 遷移 8：批次的預覽旗標與選項（文字編碼）、檔案的角色（音檔／附屬檔／ZIP）與計畫、`sidecars`。部署前備份到 `var/backups/db-20261002-pre-0008.sqlite`。
+- 匯入流程改為「分析 → 確認 → 執行」，原有的單元測試（專輯歌手推定、廣播劇判斷、歌詞、恢復原標籤）照舊通過；新增預覽編輯、依資料夾分組、排除與取消、GBK 重新解碼、ZIP（CP932 檔名、封面、CUE、清理）與 ZIP 檢查（路徑逃逸、壓縮比、預算、沒有音檔）的測試。
+- 暫存預算由下載、上傳與展開的 ZIP 共用（`Other`／`Space`）。
+- 網頁端：上傳頁可選 ZIP，上傳完直接進入預覽頁（`#/import/<id>`）；任務頁顯示「分析中／等待確認／已取消」並可進入預覽；專輯頁列出附屬檔案。
+- 實測（Chrome，桌面與手機寬度）：伺服器資料夾（兩碟、CUE、LOG、封面、一首沒有專輯標籤的歌）預覽 → 改專輯名稱與曲名、把單曲移進專輯 → 匯入，專輯、歌曲、附屬檔案下載正確；上傳 ZIP → 伺服器展開 → 預覽 → 取消，暫存與展開的檔案都已刪除。測試資料以永久刪除移到 Drive 垃圾桶，測試用的 Drive 資料夾與附屬檔也移到垃圾桶；曲庫與測試前備份逐表比對一致。
 
 ## 使用方式（開發環境）
 

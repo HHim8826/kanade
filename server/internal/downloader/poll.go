@@ -219,7 +219,8 @@ func (s *Service) startImport(ctx context.Context, r *row) {
 			paths = append(paths, filepath.Join(r.dir, filepath.FromSlash(f.Path)))
 		}
 	}
-	batch, n, err := s.imp.CreateBatchFiles(ctx, "download", r.Name, r.dir, paths)
+	// No preview: the files were already chosen; the album can be tidied afterwards (P2-3).
+	batch, n, err := s.imp.CreateBatchFiles(ctx, "download", r.Name, r.dir, paths, false)
 	if err != nil {
 		s.db.ExecContext(ctx, `UPDATE downloads SET error = ? WHERE id = ?`, "import: "+err.Error(), r.ID)
 		return

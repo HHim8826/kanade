@@ -4,7 +4,7 @@ import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { enqueue, fromEntry, fromTrack, playNext, playQueue, player, shuffled, toggle } from '../player.js';
 import { href } from '../router.js';
 import { useStore } from '../store.js';
-import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
+import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
 import { FavoritesTab, PlaylistsTab } from './collections.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { changeCover, editAlbum, editArtistAliases, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
@@ -192,6 +192,12 @@ export function Album({ id }) {
       <${TrackList} items=${items.filter((i) => i.disc === d)} showNumber
         menuExtra=${(it) => [{ icon: 'delete', label: '從專輯移除', onClick: () => removeFromAlbum(a, it) }]} />
     </div>`)}
+    ${a.sidecars.length > 0 && html`<h2 class="section-title">附屬檔案</h2>
+      <ul class="items">${a.sidecars.map((c) => html`<li key=${c.id}>
+        <span class="grow path">${c.name}</span>
+        <span class="sub">${c.kind === 'cue' ? 'CUE' : c.kind === 'log' ? '翻錄紀錄' : c.kind} · ${fmtBytes(c.size)}</span>
+        <a class="btn text" href=${'/api/v1/sidecars/' + c.id} download=${c.name}><${Icon} name="download" />下載</a>
+      </li>`)}</ul>`}
   </section>`;
 }
 

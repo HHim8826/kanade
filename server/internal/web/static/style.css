@@ -356,3 +356,28 @@ button.plain { border: 0; background: none; font: inherit; color: inherit; text-
 .edit-details li { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 4px 0; }
 .edit-details .diff-field { width: auto; }
 .mb-head a.link { color: var(--primary); }
+
+/* ---- import preview (P2-3) ---- */
+.state-canceled, .state-excluded { color: var(--on-surface-variant); }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin: 8px 0 16px; }
+.select-field { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--on-surface-variant); }
+.select-field select, .field select { font: inherit; font-size: 14px; color: var(--on-surface); padding: 8px 10px; border-radius: var(--radius-s);
+  border: 1px solid var(--outline); background: var(--surface); }
+.field select { font-size: 15px; padding: 12px; }
+.summary-line { margin: 0 0 12px; }
+.center { text-align: center; }
+.import-group { padding: 12px 12px 4px 16px; margin-bottom: 12px; }
+.group-head { display: flex; align-items: flex-start; gap: 8px; }
+.group-title { margin: 0 0 2px; font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+.chips { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+.chips .pill { margin: 0; }
+.pill.good { background: color-mix(in srgb, var(--good) 18%, transparent); color: var(--on-surface); }
+.pill.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+.pill.check input { margin: 0; accent-color: var(--primary); }
+.import-items { list-style: none; margin: 0; padding: 0; }
+.import-items li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--outline-variant); }
+.import-items .num { width: 40px; flex: none; text-align: right; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; font-size: 13px; }
+.import-items .track-text { display: flex; flex-direction: column; min-width: 0; }
+.import-items .row-more { width: 40px; height: 40px; flex: none; color: var(--on-surface-variant); }
+.path.small { font-size: 11px; opacity: .8; }
+.import-review .page-head > .grow { flex: 1 1 14em; }

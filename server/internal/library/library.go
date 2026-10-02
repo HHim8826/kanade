@@ -167,6 +167,19 @@ type EntryInput struct {
 	TrackNo     int
 	CoverID     int64  // 0 when none
 	Kind        string // music | spoken; empty means music
+
+	// Set by a planned import (P2-3).
+	Tagged    *Tagged // what the file's tags said: the entry's identity, whatever the preview changed
+	AlbumTags *Tagged // the album identity of the file's group (Album and AlbumArtist)
+	AlbumID   int64   // join exactly this album: where an earlier file of the same group went
+	NewAlbum  bool    // make a new album even if one was made from the same tags
+}
+
+// Tagged is the album identity a file's own tags give it. It is what later imports of the same
+// file are matched by, whatever the preview or later edits changed.
+type Tagged struct {
+	Album, AlbumArtist string
+	Disc, Track        int
 }
 
 type PublishResult struct {
@@ -221,7 +234,14 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 
 	if in.Album != "" {
 		disc := max(in.DiscNo, 1)
-		origin := entryOrigin(albumOrigin(in.Album, in.AlbumArtist), disc, in.TrackNo)
+		key, tagDisc, tagTrack := albumOrigin(in.Album, in.AlbumArtist), disc, in.TrackNo
+		if t := in.Tagged; t != nil && t.Album != "" {
+			key, tagDisc, tagTrack = albumOrigin(t.Album, t.AlbumArtist), max(t.Disc, 1), t.Track
+		}
+		origin := entryOrigin(key, tagDisc, tagTrack)
+		if a := in.AlbumTags; a != nil && a.Album != "" {
+			key = albumOrigin(a.Album, a.AlbumArtist) // the album is found or made by the group's identity
+		}
 		// The same file imported with the same tags is the entry made last time, wherever it has
 		// been moved or renumbered since (P2-2).
 		err := tx.QueryRowContext(ctx, `SELECT id FROM album_entries WHERE asset_id = ? AND origin = ? ORDER BY id LIMIT 1`,
@@ -232,7 +252,15 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 		if !errors.Is(err, sql.ErrNoRows) {
 			return res, err
 		}
-		albumID, err := upsertAlbum(ctx, tx, in, now)
+		var albumID int64
+		switch {
+		case in.AlbumID != 0:
+			albumID, err = joinAlbum(ctx, tx, in, now)
+		case in.NewAlbum:
+			albumID, err = createAlbum(ctx, tx, in, key, now)
+		default:
+			albumID, err = upsertAlbum(ctx, tx, in, key, now)
+		}
 		if err != nil {
 			return res, err
 		}
@@ -273,8 +301,7 @@ func upsertArtist(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
 // upsertAlbum finds the album first made from this title and album artist, even if it was renamed
 // since, and follows it when it was merged into another. Two different releases with identical tags
 // still meet here; the P2 import preview lets users keep them apart.
-func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, now int64) (int64, error) {
-	key := albumOrigin(in.Album, in.AlbumArtist)
+func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, key string, now int64) (int64, error) {
 	var id, cover int64
 	var merged sql.NullInt64
 	err := tx.QueryRowContext(ctx, `SELECT id, coalesce(cover_id, 0), merged_into FROM albums WHERE origin = ? ORDER BY id LIMIT 1`,
@@ -294,6 +321,25 @@ func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, now int64) (int
 	case !errors.Is(err, sql.ErrNoRows):
 		return 0, err
 	}
+	return createAlbum(ctx, tx, in, key, now)
+}
+
+// joinAlbum adds to the album given in AlbumID, filling in its cover when it has none.
+func joinAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, now int64) (int64, error) {
+	var cover int64
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce(cover_id, 0) FROM albums WHERE id = ?`, in.AlbumID).Scan(&cover); err != nil {
+		return 0, err
+	}
+	if cover == 0 && in.CoverID != 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE albums SET cover_id = ?, updated_at = ? WHERE id = ?`, in.CoverID, now, in.AlbumID); err != nil {
+			return 0, err
+		}
+	}
+	return in.AlbumID, nil
+}
+
+// createAlbum makes an album that later imports with the same tags (key) will find.
+func createAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, key string, now int64) (int64, error) {
 	var coverArg any
 	if in.CoverID != 0 {
 		coverArg = in.CoverID
@@ -303,7 +349,7 @@ func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, now int64) (int
 	if err != nil {
 		return 0, err
 	}
-	id, _ = r.LastInsertId()
+	id, _ := r.LastInsertId()
 	return id, index(ctx, tx, "album", id, in.Album, in.AlbumArtist)
 }
 
