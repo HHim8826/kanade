@@ -89,3 +89,69 @@ func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, 
 		VALUES (?, ?, ?, ?, ?)`, sha, size, assetID, kind, db.Now())
 	return err
 }
+
+// MarkDriveFile records what Drive says about a library file: gone (deleted or trashed) makes a
+// verified asset missing, and a missing one that is there again verified. It reports a change.
+func (s *Store) MarkDriveFile(ctx context.Context, driveID string, gone bool) (bool, error) {
+	from, to := AssetVerified, AssetMissing
+	if !gone {
+		from, to = AssetMissing, AssetVerified
+	}
+	r, err := s.db.ExecContext(ctx, `UPDATE assets SET state = ? WHERE drive_file_id = ? AND state = ?`, to, driveID, from)
+	if err != nil {
+		return false, err
+	}
+	n, _ := r.RowsAffected()
+	return n > 0, nil
+}
+
+// DriveFiles lists the Drive file IDs of library files that should be there (verified or missing).
+func (s *Store) DriveFiles(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT drive_file_id, state FROM assets WHERE drive_file_id IS NOT NULL AND state IN (?, ?)`,
+		AssetVerified, AssetMissing)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, state string
+		if err := rows.Scan(&id, &state); err != nil {
+			return nil, err
+		}
+		out[id] = state
+	}
+	return out, rows.Err()
+}
+
+// MissingItem is a library song whose file is gone from Drive.
+type MissingItem struct {
+	TrackID int64  `json:"track_id"`
+	Title   string `json:"title"`
+	Artist  string `json:"artist"`
+	Album   string `json:"album,omitempty"`
+	AlbumID int64  `json:"album_id,omitempty"`
+	Format  string `json:"format"`
+	Size    int64  `json:"size"`
+}
+
+func (s *Store) Missing(ctx context.Context) ([]MissingItem, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.artist, coalesce(al.title, ''), coalesce(al.id, 0), a.format, a.size
+		FROM assets a JOIN track_assets ta ON ta.asset_id = a.id JOIN tracks t ON t.id = ta.track_id
+		LEFT JOIN album_entries e ON e.id = (SELECT min(id) FROM album_entries WHERE asset_id = a.id)
+		LEFT JOIN albums al ON al.id = e.album_id
+		WHERE a.state = ? ORDER BY al.title, t.title`, AssetMissing)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []MissingItem{}
+	for rows.Next() {
+		var m MissingItem
+		if err := rows.Scan(&m.TrackID, &m.Title, &m.Artist, &m.Album, &m.AlbumID, &m.Format, &m.Size); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}

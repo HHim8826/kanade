@@ -10,7 +10,7 @@ import { Album, Artist, Home, Library, Search } from './views/library.js';
 import { Login } from './views/login.js';
 import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
-import { Edits } from './views/organize.js';
+import { Edits, Missing } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
 import { Settings } from './views/settings.js';
 import { Tasks } from './views/tasks.js';
@@ -35,6 +35,7 @@ function Page({ route, onLogout }) {
     case 'playlist': return html`<${Playlist} id=${arg} />`;
     case 'history': return html`<${History} />`;
     case 'edits': return html`<${Edits} />`;
+    case 'missing': return html`<${Missing} />`;
     case 'tasks': return html`<${Tasks} />`;
     case 'upload': return html`<${Upload} />`;
     case 'import': return html`<${ImportReview} id=${arg} />`;

@@ -49,6 +49,7 @@ type Cache struct {
 
 	mu    sync.Mutex
 	files map[string]*file
+	lean  atomic.Bool // low disk: keep only what is being played
 }
 
 // NewCache starts with an empty cache directory: block maps are not persisted, so a
@@ -96,7 +97,11 @@ func (c *Cache) open(id string, size int64) (*file, error) {
 	if size > c.budget {
 		return nil, errors.New("file is larger than the stream cache")
 	}
-	c.evictLocked(size)
+	if c.lean.Load() {
+		c.evictLocked(c.budget) // everything idle goes before another file comes in
+	} else {
+		c.evictLocked(size)
+	}
 	f, err := os.OpenFile(filepath.Join(c.dir, strings.NewReplacer("/", "_", "..", "_").Replace(id)), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, err
@@ -142,8 +147,30 @@ func (c *Cache) evictLocked(need int64) {
 	}
 }
 
+// Trim drops every idle file and returns how many bytes of cache that freed (the disk guard).
+func (c *Cache) Trim() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var before int64
+	for _, cf := range c.files {
+		before += cf.size
+	}
+	c.evictLocked(c.budget)
+	var after int64
+	for _, cf := range c.files {
+		after += cf.size
+	}
+	return before - after
+}
+
+// SetLean keeps the cache to the files being played while the disk is low; prefetching stops.
+func (c *Cache) SetLean(on bool) { c.lean.Store(on) }
+
 // Prefetch starts filling a file without a client request (plan: preload at most the next track).
 func (c *Cache) Prefetch(id string, size int64) error {
+	if c.lean.Load() {
+		return nil
+	}
 	cf, err := c.open(id, size)
 	if err != nil {
 		return err

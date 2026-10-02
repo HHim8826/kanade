@@ -14,6 +14,8 @@ func (s *Server) uploadError(w http.ResponseWriter, u *uploads.Upload, err error
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, uploads.ErrOverBudget):
 		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, uploads.ErrLowDisk):
+		writeError(w, http.StatusInsufficientStorage, err)
 	case errors.Is(err, uploads.ErrOffset):
 		// Tell the client where to resume.
 		writeJSON(w, http.StatusConflict, map[string]any{"error": err.Error(), "received": u.Received})

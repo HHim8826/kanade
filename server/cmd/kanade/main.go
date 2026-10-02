@@ -10,6 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -23,12 +24,15 @@ import (
 	"github.com/HHim8826/kanade/server/internal/auth"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/diskguard"
 	"github.com/HHim8826/kanade/server/internal/downloader"
+	"github.com/HHim8826/kanade/server/internal/drivesync"
 	"github.com/HHim8826/kanade/server/internal/ffmpeg"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/logfile"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
@@ -94,12 +98,26 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	stagingMiB := fs.Int64("staging-mib", 2048, "download staging budget in MiB (plan §6)")
 	reserveGiB := fs.Int64("reserve-gib", 4, "free space to keep on the filesystem in GiB (plan §6)")
 	fs.StringVar(&cfg.Aria2Path, "aria2", cfg.Aria2Path, "path to aria2c")
+	logPath := fs.String("log", "", `log file, rotated at 10 MB with 5 kept (default "<data>/logs/kanade.log"; "-" for stderr)`)
 	fs.Parse(args)
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
 	if err := cfg.Prepare(); err != nil {
 		return err
 	}
+	var logOut io.Writer = os.Stderr
+	if *logPath != "-" {
+		if *logPath == "" {
+			*logPath = cfg.Path("logs", "kanade.log")
+		}
+		lf, err := logfile.Open(*logPath, 10<<20, 5)
+		if err != nil {
+			return err
+		}
+		defer lf.Close()
+		logOut = lf
+		fmt.Fprintln(os.Stderr, "logging to", *logPath) // stderr keeps only this and crashes
+	}
+	log := slog.New(slog.NewTextHandler(logOut, nil))
 	d, err := db.Open(ctx, cfg.DBPath())
 	if err != nil {
 		return err
@@ -154,14 +172,19 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	mb := identify.New(strings.TrimRight(cfg.PublicURL, "/") + "/")
 	mb.Log = log
 	feeds := rss.New(d, downloads, strings.TrimRight(cfg.PublicURL, "/")+"/", log)
+	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace, Cache: cache,
+		DL: downloads, UL: ups, Log: log}
+	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox}
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log,
-		Identify: mb, RSS: feeds})
+		Identify: mb, RSS: feeds, Disk: guard, Sync: syncer})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
 	go downloads.Run(ctx)
 	go feeds.Run(ctx)
+	go guard.Run(ctx)
+	go syncer.Run(ctx)
 
 	has, err := authSvc.HasUsers(ctx)
 	if err != nil {

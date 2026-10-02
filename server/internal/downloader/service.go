@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,6 +42,7 @@ var (
 	ErrNotReady   = errors.New("the downloader is not running")
 	ErrOverBudget = errors.New("not enough staging space")
 	ErrBadState   = errors.New("not possible in the current state")
+	ErrLowDisk    = errors.New("the disk is nearly full; new downloads wait until space is freed")
 )
 
 type FileView struct {
@@ -73,6 +75,7 @@ type View struct {
 }
 
 type Service struct {
+	lowDisk atomic.Bool // set by the disk guard
 	db      *sql.DB
 	aria    *Aria2
 	imp     *importer.Importer
@@ -99,6 +102,58 @@ func (s *Service) poke() {
 
 var btih = regexp.MustCompile(`(?i)^magnet:\?.*xt=urn:btih:`)
 
+// SetLowDisk is set by the disk guard: while it is on, nothing new starts downloading.
+func (s *Service) SetLowDisk(on bool) { s.lowDisk.Store(on) }
+
+// PauseForDisk pauses every transfer that writes to disk (seeding goes on), marking them so that
+// ResumeAfterDisk picks them up again.
+func (s *Service) PauseForDisk(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT id, gid, state FROM downloads WHERE state IN (?, ?)`, StateDownloading, StateQueued)
+	if err != nil {
+		return 0, err
+	}
+	type dl struct {
+		id         int64
+		gid, state string
+	}
+	var list []dl
+	for rows.Next() {
+		var d dl
+		if rows.Scan(&d.id, &d.gid, &d.state) == nil {
+			list = append(list, d)
+		}
+	}
+	rows.Close()
+	for _, d := range list {
+		if d.state == StateDownloading && d.gid != "" {
+			if err := s.aria.RPC.Call(ctx, "forcePause", nil, d.gid); err != nil && !IsNotFound(err) {
+				return 0, err
+			}
+		}
+		s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, paused_by = 'disk', error = ?, updated_at = ? WHERE id = ?`,
+			StatePaused, "paused: the disk is nearly full; it continues by itself once space is freed", db.Now(), d.id)
+	}
+	return len(list), nil
+}
+
+// ResumeAfterDisk queues again what the disk guard paused.
+func (s *Service) ResumeAfterDisk(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, paused_by = '', error = '', updated_at = ?
+		WHERE state = ? AND paused_by = 'disk'`, StateQueued, db.Now(), StatePaused)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	if n > 0 {
+		s.poke()
+	}
+	return int(n), nil
+}
+
 // Add starts a download from a magnet link, a .torrent URL or .torrent bytes (uploaded, or fetched
 // by the caller; uri then names where they came from). Torrents become paused aria2 tasks right
 // away; magnets first fetch their metadata. With auto the suggested files are chosen as soon as the
@@ -106,6 +161,9 @@ var btih = regexp.MustCompile(`(?i)^magnet:\?.*xt=urn:btih:`)
 func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool) (int64, error) {
 	if !s.aria.Ready() {
 		return 0, ErrNotReady
+	}
+	if s.lowDisk.Load() {
+		return 0, ErrLowDisk
 	}
 	uri = strings.TrimSpace(uri)
 	source := uri
@@ -289,6 +347,9 @@ func (s *Service) Select(ctx context.Context, id int64, indexes []int) error {
 }
 
 func (s *Service) selectLocked(ctx context.Context, id int64, indexes []int) error {
+	if s.lowDisk.Load() {
+		return ErrLowDisk
+	}
 	r, err := s.load(ctx, id)
 	if err != nil {
 		return err
@@ -408,6 +469,10 @@ func (s *Service) Resume(ctx context.Context, id int64) error {
 	if r.State != StatePaused {
 		return ErrBadState
 	}
+	if s.lowDisk.Load() && !(r.TotalBytes > 0 && r.DoneBytes >= r.TotalBytes) {
+		return ErrLowDisk
+	}
+	s.db.ExecContext(ctx, `UPDATE downloads SET paused_by = '' WHERE id = ?`, id)
 	if r.TotalBytes > 0 && r.DoneBytes >= r.TotalBytes { // finished downloading: back to seeding
 		if err := s.aria.RPC.Call(ctx, "unpause", nil, r.gid); err != nil {
 			return err

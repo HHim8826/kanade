@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"github.com/HHim8826/kanade/server/internal/drivesync"
 	"html"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 )
@@ -102,4 +105,54 @@ func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>%[1]s</title><body style="font:16px/1.6 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem">
 <h1>%[1]s</h1><p>%[2]s</p></body>`, html.EscapeString(title), html.EscapeString(msg))
+}
+
+// ---- reconciling with Drive and the inbox (P2-6) ----
+
+func (s *Server) driveSync(w http.ResponseWriter, r *http.Request) {
+	if s.sync == nil {
+		writeJSON(w, http.StatusOK, map[string]any{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.sync.Status())
+}
+
+// driveReconcile starts a full check of every library file against Drive; it runs in the
+// background and its result shows in the sync status.
+func (s *Server) driveReconcile(w http.ResponseWriter, r *http.Request) {
+	if s.sync == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("drive sync is not running"))
+		return
+	}
+	if s.sync.Status().FullRunning {
+		writeError(w, http.StatusConflict, drivesync.ErrRunning)
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+		defer cancel()
+		if _, err := s.sync.Full(ctx); err != nil {
+			s.log.Warn("drive full reconcile", "err", err)
+		}
+	}()
+	w.WriteHeader(http.StatusAccepted)
+}
+
+// driveInbox looks in the inbox folder now instead of waiting for the next round.
+func (s *Server) driveInbox(w http.ResponseWriter, r *http.Request) {
+	n, err := s.importer.ScanInbox(r.Context())
+	if err != nil {
+		writeError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"files": n})
+}
+
+func (s *Server) missing(w http.ResponseWriter, r *http.Request) {
+	list, err := s.lib.Missing(r.Context())
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }

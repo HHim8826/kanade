@@ -111,6 +111,9 @@ func (im *Importer) analyze(ctx context.Context, batchID int64) error {
 	if err := im.db.QueryRowContext(ctx, `SELECT kind FROM import_batches WHERE id = ?`, batchID).Scan(&kind); err != nil {
 		return err
 	}
+	if err := im.fetchInboxLocal(ctx, batchID); err != nil { // inbox sidecars and archives are needed here
+		return err
+	}
 	if err := im.expandZips(ctx, batchID, kind); err != nil {
 		return err
 	}
@@ -209,19 +212,20 @@ func (im *Importer) expandZips(ctx context.Context, batchID int64, kind string) 
 
 // probeAll reads the tags of every audio file not read yet.
 func (im *Importer) probeAll(ctx context.Context, batchID int64) error {
-	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path FROM import_items
+	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, drive_id, drive_size FROM import_items
 		WHERE batch_id = ? AND role = ? AND state = 'pending' AND info IS NULL`, batchID, RoleAudio)
 	if err != nil {
 		return err
 	}
 	type pending struct {
-		id   int64
-		path string
+		id          int64
+		path, drive string
+		size        int64
 	}
 	var list []pending
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.id, &p.path); err != nil {
+		if err := rows.Scan(&p.id, &p.path, &p.drive, &p.size); err != nil {
 			rows.Close()
 			return err
 		}
@@ -233,7 +237,13 @@ func (im *Importer) probeAll(ctx context.Context, batchID int64) error {
 			return err
 		}
 		state, msg := "pending", ""
-		info, err := probePath(p.path)
+		var info *media.Info
+		var err error
+		if p.path == "" && p.drive != "" {
+			info, err = im.probeDrive(ctx, p.drive, p.size) // read in place, in the Drive inbox
+		} else {
+			info, err = probePath(p.path)
+		}
 		switch {
 		case errors.Is(err, media.ErrUnknownFormat):
 			state, msg = StateSkipped, "not a recognized audio file"

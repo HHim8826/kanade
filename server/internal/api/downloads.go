@@ -15,6 +15,8 @@ func (s *Server) downloadError(w http.ResponseWriter, r *http.Request, err error
 		writeError(w, http.StatusServiceUnavailable, err)
 	case errors.Is(err, downloader.ErrOverBudget), errors.Is(err, downloader.ErrBadState):
 		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, downloader.ErrLowDisk):
+		writeError(w, http.StatusInsufficientStorage, err)
 	default:
 		writeError(w, http.StatusBadRequest, err)
 	}
@@ -137,5 +139,9 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"downloads": downloads, "imports": imports})
+	out := map[string]any{"downloads": downloads, "imports": imports}
+	if s.disk != nil {
+		out["disk"] = s.disk.Status() // low disk: the task page says what is held back
+	}
+	writeJSON(w, http.StatusOK, out)
 }

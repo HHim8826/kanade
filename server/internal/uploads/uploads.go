@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -32,6 +33,7 @@ const (
 
 var (
 	ErrOverBudget = errors.New("not enough staging space")
+	ErrLowDisk    = errors.New("the disk is nearly full; new uploads wait until space is freed")
 	ErrOffset     = errors.New("chunk does not continue where the upload stopped")
 	ErrNotFound   = errors.New("no such upload")
 	groupRe       = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
@@ -48,9 +50,10 @@ type Upload struct {
 }
 
 type Store struct {
-	db     *sql.DB
-	root   string // staging/uploads
-	budget int64
+	lowDisk atomic.Bool // set by the disk guard
+	db      *sql.DB
+	root    string // staging/uploads
+	budget  int64
 	// Other returns staging space held elsewhere (downloads), so both share one budget (plan §6).
 	Other func(context.Context) int64
 
@@ -130,6 +133,9 @@ func (s *Store) partPath(u *Upload) string {
 	return filepath.Join(s.GroupDir(u.Group), filepath.FromSlash(u.Path)) + ".part"
 }
 
+// SetLowDisk is set by the disk guard: while it is on, no new upload starts.
+func (s *Store) SetLowDisk(on bool) { s.lowDisk.Store(on) }
+
 // Create starts an upload, or returns the existing one with the same group and path so that a
 // client can resume after losing its state.
 func (s *Store) Create(ctx context.Context, group, p string, size int64, sha string) (*Upload, error) {
@@ -155,6 +161,9 @@ func (s *Store) Create(ctx context.Context, group, p string, size int64, sha str
 		return u, nil
 	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
+	}
+	if s.lowDisk.Load() { // started uploads may finish; new ones wait
+		return nil, ErrLowDisk
 	}
 	used := s.Committed(ctx)
 	if s.Other != nil {

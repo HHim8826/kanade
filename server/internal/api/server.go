@@ -18,7 +18,9 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/auth"
 	"github.com/HHim8826/kanade/server/internal/config"
+	"github.com/HHim8826/kanade/server/internal/diskguard"
 	"github.com/HHim8826/kanade/server/internal/downloader"
+	"github.com/HHim8826/kanade/server/internal/drivesync"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
@@ -46,6 +48,8 @@ type Deps struct {
 	Uploads   *uploads.Store
 	Identify  *identify.MusicBrainz
 	RSS       *rss.Service
+	Disk      *diskguard.Guard
+	Sync      *drivesync.Syncer
 	StreamKey []byte // HMAC key for signed stream URLs
 	Log       *slog.Logger
 }
@@ -63,6 +67,8 @@ type Server struct {
 	uploads   *uploads.Store
 	mb        *identify.MusicBrainz
 	rss       *rss.Service
+	disk      *diskguard.Guard
+	sync      *drivesync.Syncer
 	streamKey []byte
 	log       *slog.Logger
 	started   time.Time
@@ -70,7 +76,7 @@ type Server struct {
 
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, rss: d.RSS, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
 }
 
 type ctxKey int
@@ -93,6 +99,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/drive/client", s.authed(s.driveSetClient))
 	mux.Handle("POST /api/v1/drive/auth", s.authed(s.driveAuth))
 	mux.Handle("POST /api/v1/drive/auth/paste", s.authed(s.driveAuthPaste))
+	mux.Handle("GET /api/v1/drive/sync", s.authed(s.driveSync))
+	mux.Handle("POST /api/v1/drive/reconcile", s.authed(s.driveReconcile))
+	mux.Handle("POST /api/v1/drive/inbox", s.authed(s.driveInbox))
+	mux.Handle("GET /api/v1/library/missing", s.authed(s.missing))
 
 	mux.Handle("GET /api/v1/home", s.authed(s.home))
 	mux.Handle("POST /api/v1/plays", s.authed(s.recordPlay))
@@ -182,6 +192,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/uploads/{id}", s.authed(s.appendUpload))
 	mux.Handle("POST /api/v1/uploads/{id}/complete", s.authed(s.completeUpload))
 	return s.logRequests(mux)
+}
+
+func (s *Server) diskStatus() any {
+	if s.disk == nil {
+		return nil
+	}
+	return s.disk.Status()
 }
 
 // ---- helpers ----
@@ -396,5 +413,6 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"drive":          ds,
 		"aria2_ready":    s.aria2 != nil && s.aria2.Ready(),
 		"ffmpeg":         s.importer != nil && s.importer.FFmpeg != nil, // converting and splitting (D2)
+		"disk":           s.diskStatus(),
 	})
 }

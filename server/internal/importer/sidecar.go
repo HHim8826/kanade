@@ -69,9 +69,14 @@ func (im *Importer) processSidecar(ctx context.Context, it *item) (outcome, erro
 		return out, err
 	}
 	name := filepath.Base(it.path)
-	file, err := im.drive.Upload(ctx, gdrive.Upload{Path: it.path, Name: name, ParentID: parent, MIME: "text/plain",
-		Size: st.Size(), SHA256: out.sha, Sessions: &memSessions{}})
-	if err != nil {
+	var file gdrive.File
+	if df, ok := im.df(); ok && it.driveID != "" { // from the Drive inbox: move it, do not upload a copy
+		if err := df.Move(ctx, it.driveID, parent, []string{it.driveParent}); err != nil {
+			return out, err
+		}
+		file.ID = it.driveID
+	} else if file, err = im.drive.Upload(ctx, gdrive.Upload{Path: it.path, Name: name, ParentID: parent, MIME: "text/plain",
+		Size: st.Size(), SHA256: out.sha, Sessions: &memSessions{}}); err != nil {
 		return out, err
 	}
 	kind := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")

@@ -110,14 +110,15 @@ export function Home() {
         <span class="sub">剩 ${fmtTime(t.asset.duration_ms - t.position_ms)}</span>
       </button></li>`)}</ul>`}
     ${d && html`<${Shelf} title="最近加入" albums=${d.recently_added} />`}
-    ${att && (att.without_album > 0 || att.unknown_artist > 0) && html`<h2 class="section-title">待整理</h2>
-      <a class="card summary-card" href=${href('library/tracks')}>
+    ${att && (att.without_album > 0 || att.unknown_artist > 0 || att.missing > 0) && html`<h2 class="section-title">待整理</h2>
+      <a class="card summary-card" href=${href(att.missing > 0 ? 'missing' : 'library/tracks')}>
         <${Icon} name="note" />
         <span class="grow">
           ${att.without_album > 0 && html`<span class="pill">沒有專輯的歌曲 ${att.without_album}</span>`}
           ${att.unknown_artist > 0 && html`<span class="pill">沒有歌手 ${att.unknown_artist}</span>`}
+          ${att.missing > 0 && html`<span class="pill warn">Drive 中遺失 ${att.missing}</span>`}
         </span>
-        <span class="sub">歌曲 ›</span>
+        <span class="sub">${att.missing > 0 ? '查看 ›' : '歌曲 ›'}</span>
       </a>`}
   </section>`;
 }

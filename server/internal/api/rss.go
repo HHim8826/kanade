@@ -19,6 +19,8 @@ func (s *Server) rssError(w http.ResponseWriter, r *http.Request, err error) {
 		writeError(w, http.StatusBadRequest, err)
 	case errors.Is(err, downloader.ErrNotReady):
 		writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, downloader.ErrLowDisk):
+		writeError(w, http.StatusInsufficientStorage, err)
 	case r.Context().Err() != nil:
 		s.internal(w, r, err)
 	default: // the feed or the torrent link failed: the site's problem, said as it is

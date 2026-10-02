@@ -53,9 +53,10 @@ type Importer struct {
 	wake    chan struct{}
 
 	mu           sync.Mutex
-	progress     map[int64][2]int64 // item ID -> bytes sent, total
-	covers       map[string]int64   // directory -> cover ID, for the current run
-	albumArtists map[string]string  // batch|album folder|album -> decided album artist
+	progress     map[int64][2]int64       // item ID -> bytes sent, total
+	covers       map[string]int64         // directory -> cover ID, for the current run
+	driveDirs    map[string][]gdrive.File // inbox folder -> its files, for the current batch
+	albumArtists map[string]string        // batch|album folder|album -> decided album artist
 
 	// OnBatchDone runs once when a batch has no pending items left, or is canceled; failed counts
 	// items that need a retry. Client uploads use it to clear their staging folder.
@@ -69,7 +70,8 @@ type Importer struct {
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
 	return &Importer{db: d, lib: lib, drive: drive, staging: stagingDir, log: log,
-		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[string]int64{}, albumArtists: map[string]string{}}
+		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[string]int64{}, albumArtists: map[string]string{},
+		driveDirs: map[string][]gdrive.File{}}
 }
 
 var audioExt = map[string]bool{
@@ -230,6 +232,9 @@ type item struct {
 	// Made by FFmpeg from another file (P2-4).
 	sourcePath, sourceKind, sourceSHA string
 	sourceSize                        int64
+	// In the Drive inbox (P2-6, D6); sha is Drive's own checksum.
+	driveID, driveParent, sha string
+	driveSize                 int64
 }
 
 // next is the oldest waiting item of a running batch; a batch's sidecars wait for its audio, so
@@ -238,12 +243,12 @@ func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
 	var plan string
 	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp,
-		i.source_path, i.source_kind, i.source_sha256, i.source_size
+		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.drive_id, i.drive_parent, i.sha256, i.drive_size
 		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
 		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
 		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
 		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp,
-			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize)
+			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.driveID, &it.driveParent, &it.sha, &it.driveSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -315,6 +320,9 @@ func (im *Importer) batchDone(ctx context.Context, batchID int64) {
 	if failed == 0 {
 		os.RemoveAll(im.workDir(batchID))
 	}
+	im.mu.Lock()
+	clear(im.driveDirs) // the next inbox batch lists folders afresh
+	im.mu.Unlock()
 	if im.OnBatchDone != nil {
 		im.OnBatchDone(ctx, kind, source, failed)
 	}
@@ -327,6 +335,9 @@ func (im *Importer) setState(ctx context.Context, id int64, state string) {
 func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	if it.role == RoleSidecar {
 		return im.processSidecar(ctx, it)
+	}
+	if it.driveID != "" && it.path == "" {
+		return im.processDrive(ctx, it) // in the Drive inbox: imported where it is
 	}
 	var out outcome
 	f, err := os.Open(it.path)
@@ -410,7 +421,11 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	if it.sourcePath != "" {
 		beside = it.sourcePath
 	}
-	if in.Album != "" {
+	switch {
+	case in.Album == "":
+	case it.driveParent != "": // fetched from the Drive inbox: its folder is there
+		in.CoverID = im.driveCover(ctx, it, info)
+	default:
 		in.CoverID = im.coverFor(ctx, beside, info)
 	}
 	res, err := im.lib.Publish(ctx, asset.ID, in)
@@ -419,10 +434,14 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	}
 	out.trackID, out.entry = res.TrackID, res.EntryID
 	im.sourceOf(ctx, it, asset.ID)
-	if it.sourceKind == SourceSplit {
-		beside = it.path // a song cut from an image has no .lrc of its own
+	switch {
+	case it.driveParent != "" && it.sourceKind != SourceSplit:
+		im.driveLyrics(ctx, it, res.TrackID, info)
+	case it.sourceKind == SourceSplit:
+		im.importLyrics(ctx, it.path, res.TrackID, info) // a song cut from an image has no .lrc of its own
+	default:
+		im.importLyrics(ctx, beside, res.TrackID, info)
 	}
-	im.importLyrics(ctx, beside, res.TrackID, info)
 	out.state = StatePublished
 	if !res.Created {
 		out.state = StateDuplicate

@@ -248,6 +248,7 @@ type Attention struct {
 	WithoutAlbum  int `json:"without_album"`  // standalone tracks: maybe an album to sort out
 	UnknownArtist int `json:"unknown_artist"` // no artist tag
 	FailedImports int `json:"failed_imports"` // import items waiting for a retry
+	Missing       int `json:"missing"`        // files deleted or trashed in Drive (P2-6)
 }
 
 func (s *Store) Attention(ctx context.Context) (Attention, error) {
@@ -255,6 +256,7 @@ func (s *Store) Attention(ctx context.Context) (Attention, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT
 		(SELECT count(*) FROM tracks t WHERE NOT EXISTS (SELECT 1 FROM album_entries e WHERE e.track_id = t.id)),
 		(SELECT count(*) FROM tracks WHERE artist = ''),
-		(SELECT count(*) FROM import_items WHERE state = 'failed')`).Scan(&a.WithoutAlbum, &a.UnknownArtist, &a.FailedImports)
+		(SELECT count(*) FROM import_items WHERE state = 'failed'),
+		(SELECT count(*) FROM assets WHERE state = ?)`, AssetMissing).Scan(&a.WithoutAlbum, &a.UnknownArtist, &a.FailedImports, &a.Missing)
 	return a, err
 }

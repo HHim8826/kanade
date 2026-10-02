@@ -56,15 +56,30 @@ func (im *Importer) itemFailed(ctx context.Context, id int64, state, msg string)
 }
 
 type audioItem struct {
-	id        int64
-	path, rel string
-	info      media.Info
+	id                   int64
+	path, rel            string
+	info                 media.Info
+	driveID, driveParent string // in the Drive inbox, not fetched yet when path is ""
+	driveSize            int64
+}
+
+// local fetches an inbox file when it has to be local (FFmpeg works on files).
+func (im *Importer) local(ctx context.Context, batchID int64, a *audioItem) error {
+	if a.path != "" || a.driveID == "" {
+		return nil
+	}
+	p, err := im.fetchDrive(ctx, batchID, a.id, a.driveID, a.rel, a.driveSize)
+	if err != nil {
+		return err
+	}
+	a.path = p
+	return nil
 }
 
 // pendingAudio lists the batch's audio still to import, with what was read of it.
 func (im *Importer) pendingAudio(ctx context.Context, batchID int64) ([]audioItem, error) {
-	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, rel_path, coalesce(info, '') FROM import_items
-		WHERE batch_id = ? AND role = ? AND state = 'pending' AND source_kind = ''`, batchID, RoleAudio)
+	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, rel_path, coalesce(info, ''), drive_id, drive_parent, drive_size
+		FROM import_items WHERE batch_id = ? AND role = ? AND state = 'pending' AND source_kind = ''`, batchID, RoleAudio)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +88,7 @@ func (im *Importer) pendingAudio(ctx context.Context, batchID int64) ([]audioIte
 	for rows.Next() {
 		var a audioItem
 		var raw string
-		if err := rows.Scan(&a.id, &a.path, &a.rel, &raw); err != nil {
+		if err := rows.Scan(&a.id, &a.path, &a.rel, &raw, &a.driveID, &a.driveParent, &a.driveSize); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(raw), &a.info)
@@ -177,6 +192,12 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 	}
 	if im.FFmpeg == nil {
 		return fail("splitting by the CUE sheet needs FFmpeg, which the server does not have")
+	}
+	if err := im.local(ctx, batchID, img); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fail("cannot fetch the disc image from Drive: " + err.Error())
 	}
 	s, err := im.FFmpeg.Probe(ctx, img.path)
 	if err != nil {
@@ -283,8 +304,8 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 	for _, d := range dsts {
 		rel := path.Join(path.Dir(img.rel), filepath.Base(d))
 		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp,
-			source_path, source_kind, source_sha256, source_size, updated_at) VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?)`,
-			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, now); err != nil {
+			source_path, source_kind, source_sha256, source_size, drive_parent, updated_at) VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?)`,
+			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, img.driveParent, now); err != nil {
 			return err
 		}
 	}
@@ -316,6 +337,12 @@ func (im *Importer) convert(ctx context.Context, batchID int64, a audioItem) err
 	fail := func(msg string) error {
 		im.itemFailed(ctx, a.id, StateFailed, msg)
 		return nil
+	}
+	if err := im.local(ctx, batchID, &a); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return fail("cannot fetch it from Drive: " + err.Error())
 	}
 	s, err := im.FFmpeg.Probe(ctx, a.path)
 	if err != nil {

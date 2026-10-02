@@ -20,6 +20,7 @@ func New(d *sql.DB) *Store { return &Store{db: d} }
 const (
 	AssetUploading = "uploading"
 	AssetVerified  = "verified"
+	AssetMissing   = "missing" // deleted or trashed in Drive; kept, and verified again if it comes back
 )
 
 type Asset struct {

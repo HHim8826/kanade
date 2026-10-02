@@ -12,7 +12,7 @@ const itemStates = {
   excluded: '已排除', expanded: '已展開', split: '已分軌',
 };
 const batchStates = { analyzing: '分析中', review: '等待確認', running: '進行中', done: '完成', canceled: '已取消' };
-const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳' };
+const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳', inbox: 'Drive 收件匣' };
 
 const fmtWhen = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
@@ -46,6 +46,8 @@ export function Tasks() {
       </div>
     </div>
     <${ErrorBox} error=${tasks.error} onRetry=${tasks.reload} />
+    ${tasks.data && tasks.data.disk && tasks.data.disk.low && html`<div class="error-box" role="alert"><span>
+      磁碟空間不足（剩 ${fmtBytes(tasks.data.disk.free_bytes)}，需保留 ${fmtBytes(tasks.data.disk.reserve_bytes)}）：已清掉播放快取${tasks.data.disk.stopped ? '，並暫停下載、暫不接受新的下載與上傳' : ''}。空間恢復後會自動繼續，不會刪除還沒存進 Drive 的檔案。</span></div>`}
     ${!tasks.data && !tasks.error && html`<${Spinner} />`}
     ${tasks.data && html`
       <h2 class="section-title">下載</h2>

@@ -541,6 +541,24 @@ export function editArtistAliases(artist) {
     onSubmit=${async (text) => done(await api('PATCH', '/artists/' + artist.id, { aliases: lines(text) }), '已更新別名')} />`);
 }
 
+// ---- files gone from Drive (P2-6) ----
+
+export function Missing() {
+  const list = useLoad(() => get('/library/missing'), []);
+  return html`<section>
+    <h1 class="page-title">Drive 中遺失的檔案</h1>
+    <p class="hint">這些歌曲的音檔在 Google Drive 被刪除或移到垃圾桶，暫時無法播放；曲庫資料都還在。從 Drive 垃圾桶還原後，下一次同步（或設定頁的「完整對帳」）會自動恢復。若是不要了，可以在歌曲的「編輯資訊」裡永久刪除。</p>
+    ${list.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${list.error} onRetry=${list.reload} />`}
+    ${list.data && !list.data.length && html`<${Empty} icon="note">沒有遺失的檔案。<//>`}
+    ${list.data && list.data.length > 0 && html`<ul class="list">${list.data.map((m) => html`<li key=${m.track_id}>
+      <button class="row plain wide" onClick=${() => editTrack(m.track_id)}>
+        <span class="avatar"><${Icon} name="note" /></span>
+        <span class="grow track-text"><span class="title">${m.title}</span>
+          <span class="sub">${[m.artist || '未知歌手', m.album, m.format.toUpperCase()].filter(Boolean).join(' · ')}</span></span>
+      </button></li>`)}</ul>`}
+  </section>`;
+}
+
 // ---- the edit log ----
 
 const sourceNames = { user: '手動', identify: 'MusicBrainz', restore: '恢復原標籤', undo: '撤回' };
