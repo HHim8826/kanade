@@ -33,6 +33,7 @@ export function Settings({ onLogout }) {
     <h2 class="section-title">服務</h2>
     <div class="card pad">
       ${status.data && html`<div class="sub">下載器（aria2）：${status.data.aria2_ready ? '運作中' : '未就緒'}</div>
+        <div class="sub">格式轉換與 CUE 分軌（FFmpeg）：${status.data.ffmpeg ? '可用' : '未安裝'}</div>
         <div class="sub">已運行 ${Math.floor(status.data.uptime_seconds / 3600)} 小時 ${Math.floor((status.data.uptime_seconds % 3600) / 60)} 分</div>`}
     </div>
     <h2 class="section-title">帳號</h2>

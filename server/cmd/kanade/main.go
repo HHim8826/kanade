@@ -24,6 +24,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/downloader"
+	"github.com/HHim8826/kanade/server/internal/ffmpeg"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
@@ -110,6 +111,11 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 		return err
 	}
 	imp := importer.New(d, lib, drive, cfg.Path(config.DirStaging), log)
+	if imp.FFmpeg = ffmpeg.Find(cfg.DataDir); imp.FFmpeg != nil {
+		log.Info("ffmpeg ready", "path", imp.FFmpeg.Path())
+	} else {
+		log.Warn("no ffmpeg: APE, TAK, WavPack, TTA, ALAC, WAV and AIFF files and CUE images will wait (set KANADE_FFMPEG)")
+	}
 	cache, err := stream.NewCache(drive, cfg.Path(config.DirCache), *cacheMiB<<20, log)
 	if err != nil {
 		return err

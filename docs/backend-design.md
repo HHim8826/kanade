@@ -41,6 +41,8 @@ DIR/
 | `library` | 曲庫資料模型與查詢、搜尋 |
 | `importer` | 匯入管線：解析 → 雜湊 → 去重 → 上傳 → 驗證 → 入庫 |
 | `downloader` | aria2 子程序與 JSON-RPC |
+| `ffmpeg` | FFmpeg 子程序：轉 FLAC、依 CUE 分軌、PCM MD5 驗證（P2-4） |
+| `identify` | MusicBrainz 查詢與差異比對（P2-2） |
 | `stream` | D7 播放快取 |
 | `api` | HTTP 路由、驗證中介層、頁面 |
 
@@ -67,6 +69,7 @@ DIR/
 | `aliases` | 歌手、專輯、歌曲的其他名稱，建入搜尋索引 |
 | `edit_groups`、`edits` | 修改紀錄：每個操作一組，逐欄記舊值與新值，供撤回 |
 | `sidecars` | 與專輯一起保存的 CUE、LOG：Drive file ID、SHA-256、所屬專輯 |
+| `import_sources` | 轉換或分軌的來源檔（SHA-256＋大小）與由它產生的音檔，用於再次匯入時略過 |
 
 精確去重鍵是 `sha256`＋`size`（唯一約束），上傳完成以 Drive 回傳的 `sha256Checksum` 驗證（P0 第 1 節）。
 
@@ -192,6 +195,14 @@ DIR/
 - 暫存預算由下載、上傳與展開的 ZIP 共用（`Other`／`Space`）。
 - 網頁端：上傳頁可選 ZIP，上傳完直接進入預覽頁（`#/import/<id>`）；任務頁顯示「分析中／等待確認／已取消」並可進入預覽；專輯頁列出附屬檔案。
 - 實測（Chrome，桌面與手機寬度）：伺服器資料夾（兩碟、CUE、LOG、封面、一首沒有專輯標籤的歌）預覽 → 改專輯名稱與曲名、把單曲移進專輯 → 匯入，專輯、歌曲、附屬檔案下載正確；上傳 ZIP → 伺服器展開 → 預覽 → 取消，暫存與展開的檔案都已刪除。測試資料以永久刪除移到 Drive 垃圾桶，測試用的 Drive 資料夾與附屬檔也移到垃圾桶；曲庫與測試前備份逐表比對一致。
+
+### P2-4 轉換與分軌（2026-10-02）
+
+- 遷移 9：匯入項目記錄來源（路徑、轉換或分軌、SHA-256、大小）；`import_sources`。部署前備份到 `var/backups/db-20261002-pre-0009.sqlite`。
+- 新套件 `internal/ffmpeg`。開發環境的 FFmpeg 在 `tools/ffmpeg`（n8.1 靜態版），解碼器含 APE、TAK、WavPack、TTA、ALAC。
+- 事前驗證（實際執行）：24-bit WAV／ALAC 轉 FLAC 後仍為 24-bit、PCM MD5 相同；以原位元深度解碼的 PCM MD5 等於 FLAC STREAMINFO 的 MD5；`atrim` 依取樣數切割、各段長度相加等於原檔、串接 MD5 等於原檔。
+- 測試：轉換（WAV 24-bit、WavPack、ALAC、浮點 WAV 被拒）、分軌（EAC 式 .wav 指向 .flac、pregap 歸屬、封面取自原資料夾）、時間對不上的 CUE 讓整軌失敗而不是整張匯成一首、同一來源再次匯入被略過。
+- 實測（Chrome）：伺服器資料夾內放 WavPack 整軌＋CP932 編碼的 CUE（FILE 寫 .wav）、24-bit/96 kHz WAV、浮點 WAV：預覽正確顯示日文曲名、分軌與轉換標示與略過原因；匯入後為 FLAC 44.1/16 三首與 FLAC 96/24 一首，CUE 存為附屬檔，分出的歌曲可以連續播放。測試資料已刪除（Drive 檔案移到垃圾桶），曲庫與測試前備份逐表比對一致。
 
 ## 使用方式（開發環境）
 

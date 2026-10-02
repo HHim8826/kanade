@@ -382,5 +382,6 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"uptime_seconds": int(time.Since(s.started).Seconds()),
 		"drive":          ds,
 		"aria2_ready":    s.aria2 != nil && s.aria2.Ready(),
+		"ffmpeg":         s.importer != nil && s.importer.FFmpeg != nil, // converting and splitting (D2)
 	})
 }

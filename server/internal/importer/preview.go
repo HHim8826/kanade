@@ -35,6 +35,7 @@ type PreviewItem struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	Encoding   string `json:"encoding,omitempty"`   // the guess for fields stored without an encoding
 	SameAudio  string `json:"same_audio,omitempty"` // a library track with the same decoded audio (D2 §6)
+	Source     string `json:"source,omitempty"`     // converted | split: made by FFmpeg (P2-4)
 }
 
 type AlbumRef struct {
@@ -76,7 +77,7 @@ func (im *Importer) Preview(ctx context.Context, batchID int64) (*Preview, error
 	opts := im.options(ctx, batchID)
 	p := &Preview{BatchView: *b, Encoding: opts.Encoding, Encodings: media.Encodings(), Detected: map[string]int{},
 		Groups: []PreviewGroup{}, Standalone: []PreviewItem{}, Other: []PreviewItem{}}
-	rows, err := im.db.QueryContext(ctx, `SELECT id, rel_path, role, state, error, coalesce(plan, ''), coalesce(info, '')
+	rows, err := im.db.QueryContext(ctx, `SELECT id, rel_path, role, state, error, coalesce(plan, ''), coalesce(info, ''), source_kind
 		FROM import_items WHERE batch_id = ? ORDER BY rel_path`, batchID)
 	if err != nil {
 		return nil, err
@@ -88,7 +89,7 @@ func (im *Importer) Preview(ctx context.Context, batchID int64) (*Preview, error
 	var list []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.item.ID, &r.item.Path, &r.item.Role, &r.item.State, &r.item.Error, &r.plan, &r.info); err != nil {
+		if err := rows.Scan(&r.item.ID, &r.item.Path, &r.item.Role, &r.item.State, &r.item.Error, &r.plan, &r.info, &r.item.Source); err != nil {
 			rows.Close()
 			return nil, err
 		}

@@ -9,7 +9,7 @@ const downloadStates = {
 };
 const itemStates = {
   pending: '等待中', uploading: '上傳中', published: '已入庫', duplicate: '已存在', skipped: '略過', failed: '失敗',
-  excluded: '已排除', expanded: '已展開',
+  excluded: '已排除', expanded: '已展開', split: '已分軌',
 };
 const batchStates = { analyzing: '分析中', review: '等待確認', running: '進行中', done: '完成', canceled: '已取消' };
 const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳' };

@@ -14,16 +14,29 @@ const warningText = {
   same_audio: '有歌曲與曲庫中的音訊相同（標籤不同）',
 };
 const encodingNames = { '': '自動判斷', cp932: 'Shift-JIS（CP932，日文）', gbk: 'GBK（簡體中文）', big5: 'Big5（繁體中文）', latin1: 'Latin-1（西歐）', cp1252: 'CP1252（西歐）', 'utf-16': 'UTF-16' };
-const stateText = { skipped: '不匯入', failed: '無法讀取', excluded: '已手動排除', expanded: '已展開', published: '已入庫', duplicate: '已存在', pending: '等待中' };
+const stateText = { skipped: '不匯入', failed: '無法匯入', excluded: '已手動排除', expanded: '已展開', published: '已入庫', duplicate: '已存在', pending: '等待中', split: '已分軌' };
 
 function reason(it) {
   if (it.state === 'excluded') return '已手動排除';
   if (it.role === 'sidecar') return it.path.toLowerCase().endsWith('.log') ? '翻錄紀錄，會和專輯一起保存' : 'CUE 檔，會和專輯一起保存';
   if (it.role === 'zip' && it.state === 'expanded') return '壓縮檔已展開';
   const e = it.error || '';
-  if (e.startsWith('not a recognized audio file')) return '不是可辨識的音訊檔';
-  if (e.includes('is not playable yet')) return `${(it.format || '').toUpperCase()} 格式暫不支援（之後會轉成 FLAC）`;
-  if (e.startsWith('cannot read audio')) return '無法讀取：' + e.slice(18);
+  const known = [
+    [/^not a recognized audio file/, () => '不是可辨識的音訊檔'],
+    [/is not supported: DSD/, () => `${(it.format || '').toUpperCase()} 不支援（DSD 與 MP3、AAC、Vorbis、Opus 以外的有損格式會略過）`],
+    [/needs FFmpeg/, () => '需要 FFmpeg 才能轉換或分軌，伺服器上沒有'],
+    [/^split into (\d+) songs/, (m) => `整軌已依 CUE 分成 ${m[1]} 首`],
+    [/imported before/, () => '這個來源檔以前匯入過，略過'],
+    [/^floating-point audio/, () => '浮點格式無法無損存成 FLAC，略過'],
+    [/do not add up to the disc image|does not decode to the same audio/, () => '轉換結果與原檔不一致，未匯入（原檔保留）'],
+    [/does not match its own checksum/, () => '整軌檔與自身的校驗碼不符：檔案可能損壞'],
+    [/track times do not fit/, () => 'CUE 的曲目時間與整軌檔對不上'],
+    [/^cannot read audio/, () => '無法讀取：' + e.replace(/^cannot read audio:? ?/, '')],
+  ];
+  for (const [re, text] of known) {
+    const m = e.match(re);
+    if (m) return text(m);
+  }
   return e || stateText[it.state] || it.state;
 }
 
@@ -164,7 +177,8 @@ function ItemRows({ items, review, onMenu }) {
     <span class="num">${num(it.plan)}</span>
     <span class="grow track-text">
       <span class="title">${it.plan.title}</span>
-      <span class="sub">${[it.plan.artist || '未知歌手', it.plan.kind === 'spoken' && '談話', it.format && it.format.toUpperCase(), it.duration_ms && fmtTime(it.duration_ms)].filter(Boolean).join(' · ')}</span>
+      <span class="sub">${[it.plan.artist || '未知歌手', it.plan.kind === 'spoken' && '談話', it.format && it.format.toUpperCase(), it.duration_ms && fmtTime(it.duration_ms),
+        it.source === 'converted' && `由 ${it.path.split('.').pop().toUpperCase()} 轉成 FLAC`, it.source === 'split' && '依 CUE 由整軌切出'].filter(Boolean).join(' · ')}</span>
       ${it.same_audio && html`<span class="warn-text">曲庫已有相同音訊：「${it.same_audio}」</span>`}
       <span class="sub path small">${it.path}</span>
     </span>

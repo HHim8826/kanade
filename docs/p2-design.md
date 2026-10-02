@@ -83,11 +83,11 @@
 
 ## P2-4 轉換與分軌
 
-- FFmpeg 位置：`KANADE_FFMPEG`，或資料目錄旁 `tools/ffmpeg`；不存在時這類檔案標示原因、其他照常（D2 第 7 點）。同時只跑一個，`nice` 降低優先權。
-- 轉 FLAC：APE、TAK、WavPack、TTA、ALAC、WAV、AIFF；保留取樣率、位元深度、聲道與標籤。來源與輸出解碼後的 PCM MD5 必須相同。
-- CUE 分軌：依 INDEX 01 切點逐首輸出 FLAC，pregap 併入前一軌，首軌之前的隱藏音軌為第 0 軌；以取樣數切割（CD 為每幀 588 個取樣），各軌 PCM 依序串接的 MD5 必須等於整軌 PCM MD5。CUE 的 TITLE、PERFORMER、REM DATE、DISCNUMBER、CATALOG 作為原始標籤。
-- 轉換與分軌在分析階段完成，輸出放在 `staging/work/<批次>`，計入暫存預算；處理前先檢查空間。
-- `import_sources` 記錄來源檔 SHA-256 與大小對應到的音檔；同一來源再次匯入直接略過。
+- FFmpeg 位置：`KANADE_FFMPEG`（ffmpeg 執行檔，ffprobe 在同一資料夾），否則資料目錄旁的 `tools/ffmpeg/bin`，否則 PATH。找不到時這類檔案標示原因（「需要 FFmpeg」），其他照常匯入（D2 第 7 點）；設定頁顯示是否可用。同時只跑一個，以 `nice -n 10` 執行。
+- 轉 FLAC：APE、TAK、WavPack、TTA、ALAC、WAV、AIFF，保留取樣率、位元深度（24-bit 仍為 24-bit）、聲道、標籤與內嵌封面。來源與輸出各自解碼成原位元深度的 PCM，MD5 必須相同，否則該檔失敗、原檔不動。浮點 PCM（32-bit float WAV）無法無損存成 FLAC，標示原因後略過。DSD 與白名單外的有損格式略過。
+- CUE 分軌：CUE 以 D2 第 4 點解碼；`FILE` 找不到時依「同主檔名換副檔名」，單一 FILE 時再退而取同資料夾唯一的音檔。每首從自己的 INDEX 01 到下一首的 INDEX 01（pregap 併入前一首）；首軌 INDEX 01 前若有 4 秒以上的音訊，獨立為第 0 軌（隱藏音軌），較短的併入第 1 軌。以取樣數切割（每幀 = 取樣率 / 75），一次解碼輸出所有曲目；各曲 PCM 依序串接的 MD5 必須等於整軌的 PCM MD5，整軌為 FLAC 且 STREAMINFO 有 MD5 時也必須相符（可發現損壞的下載）。CUE 的專輯名稱、演出者、日期、碟號、類型與各曲名稱寫入輸出檔的標籤，之後照一般流程分組。只有一首的 FILE（逐首檔案）不分割。
+- 轉換與分軌在分析階段完成（預覽已能看到結果，並標示「由 WAV 轉成 FLAC」「依 CUE 由整軌切出」），輸出放在 `staging/work/<批次>`，處理前檢查共用暫存預算。封面與歌詞從原檔旁找。
+- `import_sources` 記錄來源檔 SHA-256 與大小對應到的音檔；同一來源再次匯入時在轉換前就略過（標為已存在）。來源檔（APE、整軌）不上傳 Drive。
 
 ## P2-5 RSS
 

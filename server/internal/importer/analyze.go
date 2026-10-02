@@ -117,6 +117,17 @@ func (im *Importer) analyze(ctx context.Context, batchID int64) error {
 	if err := im.probeAll(ctx, batchID); err != nil {
 		return err
 	}
+	// Disc images are cut by their CUE sheets first; what is left that players cannot play is
+	// converted; then the new files are read like the others.
+	if err := im.splitCues(ctx, batchID); err != nil {
+		return err
+	}
+	if err := im.convertAll(ctx, batchID); err != nil {
+		return err
+	}
+	if err := im.probeAll(ctx, batchID); err != nil {
+		return err
+	}
 	if err := im.replan(ctx, batchID); err != nil {
 		return err
 	}
@@ -228,7 +239,9 @@ func (im *Importer) probeAll(ctx context.Context, batchID int64) error {
 			state, msg = StateSkipped, "not a recognized audio file"
 		case err != nil:
 			state, msg = StateFailed, "cannot read audio: "+err.Error()
-		case !info.Playable:
+		case needsConversion(info) && im.FFmpeg == nil:
+			state, msg = StateSkipped, errNoFFmpeg.Error()
+		case !info.Playable && !needsConversion(info):
 			state, msg = StateSkipped, unplayable(info)
 		}
 		var raw any
@@ -258,7 +271,8 @@ func probePath(p string) (*media.Info, error) {
 }
 
 func unplayable(info *media.Info) string {
-	return fmt.Sprintf("%s (%s) is not playable yet; lossless conversion to FLAC comes in P2 (D2)", info.Format, info.Codec)
+	return fmt.Sprintf("%s (%s) is not supported: DSD and lossy formats other than MP3, AAC, Vorbis and Opus are skipped (D2)",
+		info.Format, info.Codec)
 }
 
 // batchOptions are the per-batch choices made in the preview.

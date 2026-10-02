@@ -71,3 +71,21 @@ func nullID(id int64) any {
 	}
 	return id
 }
+
+// SourceImported reports whether files were already made from this source (decision D2 §2–3: an
+// APE file or a disc image imported once is skipped the next time).
+func (s *Store) SourceImported(ctx context.Context, sha string, size int64) (bool, error) {
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM import_sources WHERE sha256 = ? AND size = ? LIMIT 1`, sha, size).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// AddSource records that an asset was made from a source file.
+func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, kind string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO import_sources (sha256, size, asset_id, kind, created_at)
+		VALUES (?, ?, ?, ?, ?)`, sha, size, assetID, kind, db.Now())
+	return err
+}

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/ffmpeg"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/media"
@@ -60,8 +61,10 @@ type Importer struct {
 	// items that need a retry. Client uploads use it to clear their staging folder.
 	OnBatchDone func(ctx context.Context, kind, source string, failed int)
 	// Space checks that need more bytes fit the shared staging budget and the disk reserve
-	// (extracting archives); nil means no limit.
+	// (extracting archives, converting); nil means no limit.
 	Space func(ctx context.Context, need int64) error
+	// FFmpeg converts and splits (P2-4); nil when the server has none.
+	FFmpeg *ffmpeg.Tool
 }
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
@@ -224,6 +227,9 @@ type item struct {
 	path, rel, kind, role string
 	plan                  *Plan // nil for items queued before P2-3
 	temp                  bool
+	// Made by FFmpeg from another file (P2-4).
+	sourcePath, sourceKind, sourceSHA string
+	sourceSize                        int64
 }
 
 // next is the oldest waiting item of a running batch; a batch's sidecars wait for its audio, so
@@ -231,11 +237,13 @@ type item struct {
 func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
 	var plan string
-	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp
+	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp,
+		i.source_path, i.source_kind, i.source_sha256, i.source_size
 		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
 		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
 		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
-		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp)
+		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp,
+			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -341,7 +349,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	out.info = info
 	if !info.Playable {
 		out.state = StateSkipped
-		out.msg = fmt.Sprintf("%s (%s) is not playable yet; lossless conversion to FLAC comes in P2 (D2)", info.Format, info.Codec)
+		out.msg = unplayable(info) // a convertible file reaches here only from a batch queued before P2-4
 		return out, nil
 	}
 
@@ -397,15 +405,24 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		}
 	}
 
+	// Covers and lyrics lie next to the original, not next to a converted or cut copy.
+	beside := it.path
+	if it.sourcePath != "" {
+		beside = it.sourcePath
+	}
 	if in.Album != "" {
-		in.CoverID = im.coverFor(ctx, it.path, info)
+		in.CoverID = im.coverFor(ctx, beside, info)
 	}
 	res, err := im.lib.Publish(ctx, asset.ID, in)
 	if err != nil {
 		return out, err
 	}
 	out.trackID, out.entry = res.TrackID, res.EntryID
-	im.importLyrics(ctx, it.path, res.TrackID, info)
+	im.sourceOf(ctx, it, asset.ID)
+	if it.sourceKind == SourceSplit {
+		beside = it.path // a song cut from an image has no .lrc of its own
+	}
+	im.importLyrics(ctx, beside, res.TrackID, info)
 	out.state = StatePublished
 	if !res.Created {
 		out.state = StateDuplicate
