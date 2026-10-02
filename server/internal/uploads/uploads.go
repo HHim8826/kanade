@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/staging"
@@ -380,4 +381,86 @@ func (s *Store) RemoveGroup(ctx context.Context, group string) error {
 	}
 	_, err := s.db.ExecContext(ctx, `DELETE FROM uploads WHERE grp = ?`, group)
 	return err
+}
+
+// ---- unfinished uploads (review #6) ----
+
+// ErrBusy: an import of the group is under way.
+var ErrBusy = errors.New("this upload is being imported; cancel the import first")
+
+// Group is a client selection whose files are not imported yet.
+type Group struct {
+	Group     string `json:"group"`
+	Files     int    `json:"files"`
+	Size      int64  `json:"size"`
+	Received  int64  `json:"received"`
+	Complete  int    `json:"complete"`
+	UpdatedAt int64  `json:"updated_at"`
+	Importing bool   `json:"importing"` // an import batch of it is analyzing, in review or running
+}
+
+// importing is the SQL condition for a group (column grp) with an import still at work on it.
+const importing = `EXISTS (SELECT 1 FROM import_batches b WHERE b.kind = 'upload' AND b.source = grp
+	AND b.state NOT IN ('done', 'canceled'))`
+
+// Groups lists selections still being sent or waiting to be imported, newest first.
+func (s *Store) Groups(ctx context.Context) ([]Group, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT grp, count(*), sum(size), sum(received), count(*) FILTER (WHERE state = ?),
+		max(updated_at), `+importing+` FROM uploads WHERE state IN (?, ?) GROUP BY grp ORDER BY max(updated_at) DESC`,
+		StateComplete, StateReceiving, StateComplete)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Group{}
+	for rows.Next() {
+		var g Group
+		if err := rows.Scan(&g.Group, &g.Files, &g.Size, &g.Received, &g.Complete, &g.UpdatedAt, &g.Importing); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// CancelGroup drops a selection that is not imported: its staged files and records go, and the
+// space it held or reserved is free again. A group an import is working on is left alone.
+func (s *Store) CancelGroup(ctx context.Context, group string) error {
+	var busy, n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce(max(`+importing+`), 0) FROM uploads WHERE grp = ? AND state IN (?, ?)`,
+		group, StateReceiving, StateComplete).Scan(&n, &busy); err != nil {
+		return err
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if busy != 0 {
+		return ErrBusy
+	}
+	return s.RemoveGroup(ctx, group)
+}
+
+// Expire drops selections nobody has sent to or imported for maxAge, so interrupted uploads do not
+// hold staging space for ever. Groups with an import at work, or already imported, are kept.
+func (s *Store) Expire(ctx context.Context, maxAge time.Duration) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT grp FROM uploads GROUP BY grp
+		HAVING max(updated_at) < ? AND count(*) FILTER (WHERE state = ?) = 0 AND NOT max(`+importing+`)`,
+		db.Now()-maxAge.Milliseconds(), StateImported)
+	if err != nil {
+		return 0, err
+	}
+	var groups []string
+	for rows.Next() {
+		var g string
+		if rows.Scan(&g) == nil {
+			groups = append(groups, g)
+		}
+	}
+	rows.Close()
+	for _, g := range groups {
+		if err := s.RemoveGroup(ctx, g); err != nil {
+			return 0, err
+		}
+	}
+	return len(groups), nil
 }

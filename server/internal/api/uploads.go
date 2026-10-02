@@ -12,6 +12,8 @@ func (s *Server) uploadError(w http.ResponseWriter, u *uploads.Upload, err error
 	switch {
 	case errors.Is(err, uploads.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, uploads.ErrBusy):
+		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, uploads.ErrOverBudget):
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, uploads.ErrLowDisk):
@@ -110,4 +112,23 @@ func (s *Server) importUploadGroup(w http.ResponseWriter, r *http.Request, group
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "files": n})
+}
+
+// uploadGroups lists selections still being sent or waiting to be imported (review #6).
+func (s *Server) uploadGroups(w http.ResponseWriter, r *http.Request) {
+	list, err := s.uploads.Groups(r.Context())
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// cancelUploadGroup drops a selection that is not imported, freeing its staging space.
+func (s *Server) cancelUploadGroup(w http.ResponseWriter, r *http.Request) {
+	if err := s.uploads.CancelGroup(r.Context(), r.PathValue("group")); err != nil {
+		s.uploadError(w, nil, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

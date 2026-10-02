@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -216,5 +217,49 @@ func TestConcurrentCreatesStayWithinBudget(t *testing.T) {
 	wg.Wait()
 	if ok.Load() != 1 || s.Committed(ctx) != 700 {
 		t.Fatalf("granted %d, committed %d", ok.Load(), s.Committed(ctx))
+	}
+}
+
+// An unfinished selection is listed, can be cancelled (giving its reservation back) unless an import
+// is at work on it, and expires when left alone (review #6).
+func TestUnfinishedGroups(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, 1000)
+	u, _ := s.Create(ctx, "group-0020", "a.flac", 700, "")
+	s.Append(ctx, u.ID, 0, bytes.NewReader(make([]byte, 100)), 100)
+	gs, err := s.Groups(ctx)
+	if err != nil || len(gs) != 1 || gs[0].Group != "group-0020" || gs[0].Size != 700 || gs[0].Received != 100 || gs[0].Importing {
+		t.Fatalf("groups %+v %v", gs, err)
+	}
+	// The same selection again reuses its reservation; another one does not fit beside it.
+	if again, err := s.Create(ctx, "group-0020", "a.flac", 700, ""); err != nil || again.ID != u.ID {
+		t.Fatalf("resume %+v %v", again, err)
+	}
+	if _, err := s.Create(ctx, "group-0021", "b.flac", 700, ""); !errors.Is(err, ErrOverBudget) {
+		t.Fatalf("second reservation: %v", err)
+	}
+	// Being imported: kept.
+	s.db.Exec(`INSERT INTO import_batches (kind, source, state, created_at) VALUES ('upload', 'group-0020', 'running', 0)`)
+	if err := s.CancelGroup(ctx, "group-0020"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("cancel while importing: %v", err)
+	}
+	s.db.Exec(`UPDATE import_batches SET state = 'canceled'`)
+	if err := s.CancelGroup(ctx, "group-0020"); err != nil {
+		t.Fatal(err)
+	}
+	if s.Committed(ctx) != 0 {
+		t.Fatalf("still committed %d", s.Committed(ctx))
+	}
+	if _, err := os.Stat(s.GroupDir("group-0020")); !os.IsNotExist(err) {
+		t.Fatal("staging kept")
+	}
+	// Left alone for a week: expired.
+	s.Create(ctx, "group-0022", "c.flac", 10, "")
+	s.db.Exec(`UPDATE uploads SET updated_at = 0`)
+	if n, err := s.Expire(ctx, 7*24*time.Hour); err != nil || n != 1 {
+		t.Fatalf("expire %d %v", n, err)
+	}
+	if gs, _ := s.Groups(ctx); len(gs) != 0 {
+		t.Fatalf("left %+v", gs)
 	}
 }

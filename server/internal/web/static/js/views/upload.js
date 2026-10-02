@@ -1,7 +1,8 @@
 import { useState } from '../../vendor/hooks.module.js';
-import { ApiError, api, post } from '../api.js';
+import { ApiError, api, get, post } from '../api.js';
 import { go } from '../router.js';
-import { ErrorBox, Icon, fmtBytes, html, toast } from '../ui.js';
+import { ErrorBox, Icon, fmtBytes, html, toast, useLoad } from '../ui.js';
+import { confirmDialog } from './organize.js';
 
 const AUDIO = /\.(flac|mp3|m4a|mp4|aac|ogg|oga|opus|wav|aiff?|ape|tak|wv|tta|dsf|dff|wma)$/i;
 const IMAGE = /\.(jpe?g|png)$/i;
@@ -34,10 +35,59 @@ async function sendFile(group, entry, onProgress) {
   await post(`/uploads/${up.id}/complete`);
 }
 
+// The same selection keeps its upload group across retries and reloads (review #6): choosing the
+// same files again continues where they stopped instead of reserving the space a second time.
+const GROUPS = 'kanade.uploadGroups';
+const selectionKey = (list) => list.map((e) => `${e.path}\u0000${e.file.size}\u0000${e.file.lastModified}`).sort().join('\n');
+function groupFor(key) {
+  try {
+    const map = JSON.parse(localStorage.getItem(GROUPS) || '{}');
+    if (map[key]) return map[key].group;
+    const group = 'web-' + crypto.randomUUID();
+    map[key] = { group, at: Date.now() };
+    for (const [k, v] of Object.entries(map)) if (Date.now() - v.at > 7 * 86400000) delete map[k]; // the server forgets them too
+    localStorage.setItem(GROUPS, JSON.stringify(map));
+    return group;
+  } catch {
+    return 'web-' + crypto.randomUUID();
+  }
+}
+function forgetGroup(key) {
+  try {
+    const map = JSON.parse(localStorage.getItem(GROUPS) || '{}');
+    delete map[key];
+    localStorage.setItem(GROUPS, JSON.stringify(map));
+  } catch { /* nothing kept */ }
+}
+
+// Unfinished lists selections the server still holds: being sent, or sent and not imported.
+function Unfinished({ rev, onChange }) {
+  const list = useLoad(() => get('/uploads'), [rev]);
+  const groups = (list.data || []).filter((g) => !g.importing);
+  if (!groups.length) return null;
+  const cancel = (g) => confirmDialog({
+    title: '取消這次上傳', action: '取消上傳', danger: true,
+    children: html`<p>刪除伺服器上這次上傳已收到的 ${fmtBytes(g.received)}，釋出它預留的暫存空間。檔案還在你的電腦上，之後可以重新上傳。</p>`,
+    onConfirm: async () => {
+      await api('DELETE', '/uploads/groups/' + encodeURIComponent(g.group));
+      toast('已取消上傳');
+      onChange();
+    },
+  });
+  return html`<h2 class="section-title">未完成的上傳</h2>
+    <p class="hint">重新選擇同樣的檔案或資料夾並按「開始上傳」，會從中斷的地方繼續。一週沒有動靜的上傳會自動清除。</p>
+    <ul class="items">${groups.map((g) => html`<li key=${g.group}>
+      <span class="grow"><span class="title">${g.files} 個檔案，已收到 ${fmtBytes(g.received)} / ${fmtBytes(g.size)}</span>
+        <span class="sub">${g.complete === g.files ? '已傳完，尚未匯入' : '上傳中斷'} · ${new Date(g.updated_at).toLocaleString('zh-TW')}</span></span>
+      <button class="btn text danger-text" onClick=${() => cancel(g)}>取消上傳</button>
+    </li>`)}</ul>`;
+}
+
 export function Upload() {
   const [entries, setEntries] = useState([]);
   const [progress, setProgress] = useState(null); // { sent, total, file }
   const [error, setError] = useState(null);
+  const [rev, setRev] = useState(0);
 
   const pick = (e) => {
     const files = [...e.target.files];
@@ -58,7 +108,8 @@ export function Upload() {
   const totalBytes = entries.reduce((a, e) => a + e.file.size, 0);
 
   const start = async () => {
-    const group = 'web-' + crypto.randomUUID();
+    const key = selectionKey(entries);
+    const group = groupFor(key);
     let sent = 0;
     setError(null);
     try {
@@ -70,11 +121,13 @@ export function Upload() {
       }
       setProgress({ sent: totalBytes, total: totalBytes, file: '建立匯入…' });
       const r = await post('/imports', { upload_group: group, preview: true });
+      forgetGroup(key);
       toast('已上傳，請確認要怎麼匯入');
       go('import/' + r.id);
     } catch (e) {
       setError(e);
       setProgress(null);
+      setRev((n) => n + 1);
     }
   };
 
@@ -96,8 +149,9 @@ export function Upload() {
         ? html`<div class="upload-progress"><div class="sub">${progress.file}</div>
             <div class="progress"><div style=${{ width: `${(progress.sent / progress.total) * 100}%` }}></div></div>
             <div class="sub">${fmtBytes(progress.sent)} / ${fmtBytes(progress.total)}</div></div>`
-        : html`<div class="actions"><button class="btn filled" disabled=${!audioCount && !zipCount} onClick=${start}><${Icon} name="upload" />開始上傳</button></div>`}
+        : html`<div class="actions"><button class="btn filled" disabled=${!audioCount && !zipCount} onClick=${start}><${Icon} name="upload" />${error ? '繼續上傳' : '開始上傳'}</button></div>`}
     </div>`}
     <${ErrorBox} error=${error} />
+    <${Unfinished} rev=${rev} onChange=${() => setRev((n) => n + 1)} />
   </section>`;
 }

@@ -348,7 +348,7 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 		}
 		if op.NewAlbum != nil {
 			for _, p := range ps {
-				p.NewAlbum = *op.NewAlbum
+				p.NewAlbum, p.Chosen = *op.NewAlbum, *op.NewAlbum
 			}
 		}
 	case "items": // song fields
@@ -394,7 +394,7 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 		switch op.Into {
 		case "":
 			for _, p := range ps {
-				p.Group, p.Album, p.NewAlbum = "", "", false
+				p.Group, p.Album, p.NewAlbum, p.Chosen = "", "", false, false
 			}
 		case "new":
 			if op.Album == nil {
@@ -415,7 +415,7 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 				return err
 			}
 			for _, p := range ps {
-				p.Group, p.Album, p.AlbumArtist, p.NewAlbum = key, album, artist, false
+				p.Group, p.Album, p.AlbumArtist, p.NewAlbum, p.Chosen = key, album, artist, false, false
 			}
 		default:
 			target := inGroup(op.Into)
@@ -424,7 +424,7 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 			}
 			t := *target[0]
 			for _, p := range ps {
-				p.Group, p.Album, p.AlbumArtist, p.NewAlbum = t.Group, t.Album, t.AlbumArtist, t.NewAlbum
+				p.Group, p.Album, p.AlbumArtist, p.NewAlbum, p.Chosen = t.Group, t.Album, t.AlbumArtist, t.NewAlbum, t.Chosen
 				if p.Date == "" {
 					p.Date = t.Date
 				}
@@ -436,7 +436,7 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 			return badOp("no group %q", op.Group)
 		}
 		for _, p := range ps {
-			p.Group, p.Album, p.NewAlbum = "", "", false
+			p.Group, p.Album, p.NewAlbum, p.Chosen = "", "", false, false
 		}
 	case "folders": // every album folder is one album
 		if err := im.byFolder(ctx, batchID, plans); err != nil {

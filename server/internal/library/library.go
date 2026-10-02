@@ -174,6 +174,7 @@ type EntryInput struct {
 	AlbumTags *Tagged // the album identity of the file's group (Album and AlbumArtist)
 	AlbumID   int64   // join exactly this album: where an earlier file of the same group went
 	NewAlbum  bool    // make a new album even if one was made from the same tags
+	Chosen    bool    // the user chose that new album: even a file imported before goes into it (review #21)
 }
 
 // Tagged is the album identity a file's own tags give it. It is what later imports of the same
@@ -244,14 +245,17 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 			key = albumOrigin(a.Album, a.AlbumArtist) // the album is found or made by the group's identity
 		}
 		// The same file imported with the same tags is the entry made last time, wherever it has
-		// been moved or renumbered since (P2-2).
-		err := tx.QueryRowContext(ctx, `SELECT id FROM album_entries WHERE asset_id = ? AND origin = ? ORDER BY id LIMIT 1`,
-			assetID, origin).Scan(&res.EntryID)
-		if err == nil {
-			return res, tx.Commit()
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return res, err
+		// been moved or renumbered since (P2-2) — unless the user chose a new album for it, which
+		// gets an entry of its own sharing the file.
+		if !(in.NewAlbum && in.Chosen) {
+			err := tx.QueryRowContext(ctx, `SELECT id FROM album_entries WHERE asset_id = ? AND origin = ? ORDER BY id LIMIT 1`,
+				assetID, origin).Scan(&res.EntryID)
+			if err == nil {
+				return res, tx.Commit()
+			}
+			if !errors.Is(err, sql.ErrNoRows) {
+				return res, err
+			}
 		}
 		var albumID int64
 		switch {

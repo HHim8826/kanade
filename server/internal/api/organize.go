@@ -56,15 +56,17 @@ func (s *Server) editTrack(w http.ResponseWriter, r *http.Request) {
 	writeGroup(w, g)
 }
 
-// trashFiles moves files that left the library to the Drive trash. A failure leaves the file in
-// Drive, which is only clutter, so it is logged and counted, not fatal.
+// trashFiles moves files that left the library to the Drive trash. Each is owed to the trash in the
+// database until this works; a failure is retried in the background (review #26).
 func (s *Server) trashFiles(r *http.Request, ids []string) (trashed, failed int) {
 	for _, id := range ids {
 		if err := s.drive.Trash(r.Context(), id); err != nil && !gdrive.IsNotFound(err) { // not found: already deleted in Drive
-			s.log.Warn("trash drive file", "file", id, "err", err)
+			s.log.Warn("trash drive file; will retry", "file", id, "err", err)
+			s.lib.TrashFailed(r.Context(), id, err)
 			failed++
 			continue
 		}
+		s.lib.TrashDone(r.Context(), id)
 		trashed++
 	}
 	return trashed, failed

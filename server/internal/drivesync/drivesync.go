@@ -29,6 +29,7 @@ type Drive interface {
 	StartPageToken(ctx context.Context) (string, error)
 	Changes(ctx context.Context, token string) ([]gdrive.Change, string, error)
 	List(ctx context.Context, q string, fn func([]gdrive.File) error) error
+	Trash(ctx context.Context, id string) error
 }
 
 const (
@@ -72,6 +73,9 @@ type Status struct {
 	// BaselinePending: no full pass has checked the library since the change feed (re)started, so
 	// files gone before then are not known yet.
 	BaselinePending bool `json:"baseline_pending"`
+	// TrashPending counts deleted files still to be moved to the Drive trash (retried).
+	TrashPending int    `json:"trash_pending,omitempty"`
+	TrashError   string `json:"trash_error,omitempty"`
 }
 
 func (s *Syncer) Status() Status {
@@ -80,6 +84,7 @@ func (s *Syncer) Status() Status {
 	s.mu.Unlock()
 	ctx := context.Background()
 	st.BaselinePending = s.baselinePending(ctx)
+	st.TrashPending, st.TrashError, _ = s.Lib.TrashPending(ctx)
 	if st.LastFull == 0 {
 		var last struct {
 			At     int64   `json:"at"`
@@ -117,6 +122,7 @@ func (s *Syncer) Run(ctx context.Context) {
 		case <-time.After(wait):
 		}
 		wait = every
+		s.RetryTrash(ctx)
 		if _, err := s.Changes(ctx); err != nil && ctx.Err() == nil {
 			s.Log.Warn("drive changes", "err", err)
 		}
@@ -197,6 +203,26 @@ func (s *Syncer) position(ctx context.Context) (string, error) {
 	}
 	s.set(func(st *Status) { st.LastChecked = db.Now() })
 	return "", nil
+}
+
+// RetryTrash moves files the library let go of to the Drive trash, where an earlier try failed.
+func (s *Syncer) RetryTrash(ctx context.Context) (done int) {
+	ids, err := s.Lib.TrashDue(ctx, 100)
+	if err != nil {
+		return 0
+	}
+	for _, id := range ids {
+		if err := s.Drive.Trash(ctx, id); err != nil && !gdrive.IsNotFound(err) {
+			s.Lib.TrashFailed(ctx, id, err)
+			continue
+		}
+		s.Lib.TrashDone(ctx, id)
+		done++
+	}
+	if done > 0 {
+		s.Log.Info("deleted files moved to the drive trash", "count", done)
+	}
+	return done
 }
 
 func isBadRequest(err error) bool {

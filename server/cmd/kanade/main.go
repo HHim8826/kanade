@@ -160,6 +160,20 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	} else if n > 0 {
 		log.Info("uploads completed after a restart", "count", n)
 	}
+	go func() { // interrupted uploads left for a week give their staging space back (review #6)
+		for {
+			if n, err := ups.Expire(ctx, 7*24*time.Hour); err != nil {
+				log.Warn("expiring uploads", "err", err)
+			} else if n > 0 {
+				log.Info("abandoned uploads removed", "groups", n)
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(6 * time.Hour):
+			}
+		}
+	}()
 	// One shared staging budget (plan §6) for downloads, client uploads and the importer's work
 	// folder, with the free-space reserve; checks and reservations are atomic across them (review #4).
 	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}

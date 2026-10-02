@@ -326,3 +326,94 @@ func TestMissingTrackCanBeEditedAndDeleted(t *testing.T) {
 		t.Fatalf("still listed as missing: %+v", m)
 	}
 }
+
+// A merged album's CUE sheets and logs show on the album it went into, once each, and go back with
+// an undo (review #27).
+func TestMergeKeepsSidecars(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	a := publish(t, s, "sa", EntryInput{Title: "One", Album: "Source", AlbumArtist: "X", TrackNo: 1})
+	b := publish(t, s, "sb", EntryInput{Title: "Two", Album: "Target", AlbumArtist: "X", TrackNo: 2})
+	src, dst := albumOf(t, s, a.EntryID), albumOf(t, s, b.EntryID)
+	s.AddSidecar(ctx, src, "disc.cue", "cue", "c1", 10, "drive-cue")
+	s.AddSidecar(ctx, src, "rip.log", "log", "l1", 20, "drive-log")
+	s.AddSidecar(ctx, dst, "rip.log", "log", "l1", 20, "drive-log2") // the same log kept on both
+	g, err := s.MergeAlbum(ctx, src, dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, _ := s.Album(ctx, dst)
+	if len(d.Entries) != 2 || len(d.Sidecars) != 2 {
+		t.Fatalf("after merge: %d entries, sidecars %+v", len(d.Entries), d.Sidecars)
+	}
+	if c, _ := s.FindSidecar(ctx, dst, "c1", 10); c == nil {
+		t.Fatal("a re-import would keep the merged album's CUE again")
+	}
+	if _, _, err := s.Undo(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := s.Album(ctx, dst); len(d.Sidecars) != 1 {
+		t.Fatalf("after undo the target has %+v", d.Sidecars)
+	}
+	if d, _ := s.Album(ctx, src); len(d.Sidecars) != 2 {
+		t.Fatalf("after undo the source has %+v", d.Sidecars)
+	}
+}
+
+// A field changed after the change being undone stays, even when it was changed back to the same
+// value (A→B→C→B); a change that was itself undone does not count (review #20).
+func TestUndoKeepsLaterReturnToSameValue(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	r := publish(t, s, "u1", EntryInput{Title: "A"})
+	title := func() string { tr, _ := s.Track(ctx, r.TrackID); return tr.Title }
+	set := func(v string) int64 {
+		g, err := s.EditTrack(ctx, r.TrackID, TrackEdit{Title: &v})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	g1 := set("B")
+	set("C")
+	set("B")
+	if _, conflicts, err := s.Undo(ctx, g1); err != nil || len(conflicts) != 1 || title() != "B" {
+		t.Fatalf("undo: %v %+v, title %q", err, conflicts, title())
+	}
+	// A later change that was undone cancels out: undoing the first one then works.
+	r2 := publish(t, s, "u2", EntryInput{Title: "X"})
+	set2 := func(v string) int64 { g, _ := s.EditTrack(ctx, r2.TrackID, TrackEdit{Title: &v}); return g }
+	h1 := set2("Y")
+	h2 := set2("Z")
+	if _, _, err := s.Undo(ctx, h2); err != nil {
+		t.Fatal(err)
+	}
+	if _, conflicts, err := s.Undo(ctx, h1); err != nil || len(conflicts) != 0 {
+		t.Fatalf("undo after the later change was undone: %v %+v", err, conflicts)
+	}
+	if tr, _ := s.Track(ctx, r2.TrackID); tr.Title != "X" {
+		t.Fatalf("title %q", tr.Title)
+	}
+}
+
+// A new album the user chose gets its own entry for a file imported before, sharing the file;
+// re-importing without that choice still finds the earlier entry (review #21).
+func TestChosenNewAlbumKeepsIndependentEntry(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	first := publish(t, s, "n1", EntryInput{Title: "Song", Album: "Original", AlbumArtist: "X", TrackNo: 1})
+	var asset int64
+	s.db.QueryRow(`SELECT asset_id FROM album_entries WHERE id = ?`, first.EntryID).Scan(&asset)
+	again, err := s.Publish(ctx, asset, EntryInput{Title: "Song", Album: "Original", AlbumArtist: "X", TrackNo: 1})
+	if err != nil || again.EntryID != first.EntryID || again.Created {
+		t.Fatalf("plain re-import: %+v %v", again, err)
+	}
+	other, err := s.Publish(ctx, asset, EntryInput{Title: "Song", Album: "Another Edition", AlbumArtist: "X", TrackNo: 1,
+		NewAlbum: true, Chosen: true, Tagged: &Tagged{Album: "Original", AlbumArtist: "X", Track: 1}})
+	if err != nil || other.EntryID == first.EntryID || !other.Created {
+		t.Fatalf("chosen new album: %+v %v", other, err)
+	}
+	if a, b := albumOf(t, s, first.EntryID), albumOf(t, s, other.EntryID); a == b {
+		t.Fatal("both entries on one album")
+	}
+}

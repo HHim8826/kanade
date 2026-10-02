@@ -978,10 +978,14 @@ func (s *Store) Undo(ctx context.Context, groupID int64) (int64, []Conflict, err
 				return err
 			}
 			c := Conflict{Target: ed.Target, ID: ed.ID, Field: ed.Field, Want: ed.New, Now: cur}
+			later, err := laterEdit(ctx, e.tx, groupID, e.group, ed)
+			if err != nil {
+				return err
+			}
 			switch {
 			case !ok:
 				c.Reason = "gone"
-			case !same(cur, ed.New):
+			case later || !same(cur, ed.New): // changed since, even if back to the same value (review #20)
 				c.Reason = "changed"
 			default:
 				if _, err := e.tx.ExecContext(ctx, `SAVEPOINT undo_one`); err != nil {
@@ -1016,6 +1020,20 @@ func (s *Store) Undo(ctx context.Context, groupID int64) (int64, []Conflict, err
 		conflicts[i].Name = s.targetName(ctx, conflicts[i].Target, conflicts[i].ID, conflicts[i].Want)
 	}
 	return g, conflicts, nil
+}
+
+// laterEdit reports whether a change after group touched the same field and still stands: one not
+// undone, and not itself the undo of a change after group (such a pair cancels out).
+func laterEdit(ctx context.Context, q querier, group, undoing int64, ed Edit) (bool, error) {
+	var one int
+	err := q.QueryRowContext(ctx, `SELECT 1 FROM edits x JOIN edit_groups g ON g.id = x.group_id
+		WHERE x.target = ? AND x.target_id = ? AND x.field = ? AND x.group_id > ? AND x.group_id != ?
+		AND g.undone_by IS NULL AND NOT (g.undo_of IS NOT NULL AND g.undo_of > ?) LIMIT 1`,
+		ed.Target, ed.ID, ed.Field, group, undoing, group).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // ---- the edit log ----
@@ -1194,6 +1212,11 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) ([]string, error) {
 		}
 		if fileID.Valid && fileID.String != "" {
 			drive = append(drive, fileID.String)
+			// Owed to the Drive trash until it is there, in the same transaction (review #26).
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO drive_trash (file_id, created_at) VALUES (?, ?)`,
+				fileID.String, db.Now()); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO edit_groups (source, summary, created_at) VALUES (?, ?, ?)`,

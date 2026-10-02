@@ -189,6 +189,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/rss/items/{id}/download", s.authed(s.downloadRSSItem))
 
 	mux.Handle("POST /api/v1/uploads", s.authed(s.createUpload))
+	mux.Handle("GET /api/v1/uploads", s.authed(s.uploadGroups))
+	mux.Handle("DELETE /api/v1/uploads/groups/{group}", s.authed(s.cancelUploadGroup))
 	mux.Handle("GET /api/v1/uploads/{id}", s.authed(s.getUpload))
 	mux.Handle("PUT /api/v1/uploads/{id}", s.authed(s.appendUpload))
 	mux.Handle("POST /api/v1/uploads/{id}/complete", s.authed(s.completeUpload))

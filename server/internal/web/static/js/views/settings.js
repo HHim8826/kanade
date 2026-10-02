@@ -40,6 +40,7 @@ function DriveSync() {
     <div class="card pad">
       <div class="sub">每 10 分鐘檢查 Drive 的變更：在 Drive 刪除、移到垃圾桶或內容被改寫的曲庫檔案會標成「遺失」（曲庫資料不刪），還原成原本的內容後自動恢復。上次檢查：${when(s.last_checked)}</div>
       ${s.last_error && html`<div class="task-error">${s.last_error}</div>`}
+      ${s.trash_pending > 0 && html`<div class="sub state-failed">${s.trash_pending} 個已永久刪除的檔案還沒移到 Drive 垃圾桶，會自動重試${s.trash_error ? `（上次錯誤：${s.trash_error}）` : ''}。</div>`}
       ${s.baseline_pending && html`<div class="sub state-failed">基準對帳尚未完成：開始同步或變更紀錄過期後，會自動做一次完整對帳；完成前，之前就已在 Drive 刪除的檔案可能還沒標出。</div>`}
       <div class="sub">上次完整對帳：${when(s.last_full)}${res ? `（檢查 ${res.checked} 個，標為遺失 ${res.missing}，恢復 ${res.restored}）` : ''}</div>
       <div class="actions"><button class="btn tonal" disabled=${s.full_running} onClick=${reconcile}><${Icon} name="refresh" />${s.full_running ? '對帳中…' : '完整對帳'}</button>

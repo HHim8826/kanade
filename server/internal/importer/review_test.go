@@ -355,3 +355,38 @@ func TestSplitHoldsItsOutputBound(t *testing.T) {
 		t.Fatalf("songs take %d, bound %d, budget sees %d", used, bound, im.Budget.Used(ctx))
 	}
 }
+
+// "New album" chosen in the preview for files imported before makes that album, even though the
+// files are the same (review #21).
+func TestPreviewNewAlbumOverridesImportIdentity(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	startWorker(t, im)
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "A/1.mp3"), map[string]string{"TIT2": "One", "TPE1": "X", "TALB": "Original", "TRCK": "1"})
+	taggedMP3(t, filepath.Join(src, "A/2.mp3"), map[string]string{"TIT2": "Two", "TPE1": "X", "TALB": "Original", "TRCK": "2"})
+	first, _, _ := im.CreateBatch(ctx, "local", "", src, false)
+	waitState(t, im, first, BatchDone)
+	second, _, _ := im.CreateBatch(ctx, "local", "", src, true)
+	waitState(t, im, second, BatchReview)
+	p, _ := im.Preview(ctx, second)
+	g := group(t, p, "Original")
+	name, yes := "Another Edition", true
+	if err := im.ApplyOp(ctx, second, PlanOp{Op: "group", Group: g.Key, Album: &name, NewAlbum: &yes}); err != nil {
+		t.Fatal(err)
+	}
+	im.Start(ctx, second)
+	waitState(t, im, second, BatchDone)
+	albums, _ := lib.Albums(ctx, 10, 0, false)
+	if len(albums) != 2 {
+		t.Fatalf("albums %+v", albums)
+	}
+	for _, a := range albums {
+		if d, _ := lib.Album(ctx, a.ID); len(d.Entries) != 2 {
+			t.Fatalf("%s has %d entries", a.Title, len(d.Entries))
+		}
+	}
+	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 2 { // the files are shared
+		t.Fatalf("tracks %+v", tracks)
+	}
+}

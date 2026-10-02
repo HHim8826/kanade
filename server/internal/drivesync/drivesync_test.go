@@ -15,14 +15,26 @@ import (
 )
 
 type fakeDrive struct {
-	mu      sync.Mutex
-	changes []gdrive.Change
-	files   []gdrive.File
-	listErr error
-	lists   int
-	block   chan struct{} // when set, List waits for it after taking its snapshot
-	listing chan struct{} // closed once a blocked List has its snapshot
-	expired bool          // the next Changes call fails as an expired position
+	mu       sync.Mutex
+	changes  []gdrive.Change
+	files    []gdrive.File
+	listErr  error
+	lists    int
+	block    chan struct{} // when set, List waits for it after taking its snapshot
+	listing  chan struct{} // closed once a blocked List has its snapshot
+	expired  bool          // the next Changes call fails as an expired position
+	trashed  []string
+	trashErr error
+}
+
+func (f *fakeDrive) Trash(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.trashErr != nil {
+		return f.trashErr
+	}
+	f.trashed = append(f.trashed, id)
+	return nil
 }
 
 func (f *fakeDrive) StartPageToken(context.Context) (string, error) { return "t1", nil }
@@ -200,5 +212,36 @@ func TestChangedContentIsNotVerified(t *testing.T) {
 	s.Full(ctx)
 	if state("a") != library.AssetVerified || state("b") != library.AssetMissing {
 		t.Fatalf("full: a=%s b=%s", state("a"), state("b"))
+	}
+}
+
+// A deleted song's file owed to the Drive trash is moved there by the background retry once Drive
+// answers again (review #26).
+func TestTrashIsRetried(t *testing.T) {
+	ctx := context.Background()
+	s, fd, lib, _ := setup(t)
+	as, _ := lib.CreateAsset(ctx, library.Asset{SHA256: "t1", Size: 1, Format: "flac", Codec: "flac"})
+	lib.MarkVerified(ctx, as.ID, "drive-t1")
+	res, _ := lib.Publish(ctx, as.ID, library.EntryInput{Title: "Gone"})
+	files, err := lib.DeleteTrack(ctx, res.TrackID)
+	if err != nil || len(files) != 1 {
+		t.Fatalf("delete %v %v", files, err)
+	}
+	fd.trashErr = errors.New("drive is down")
+	lib.TrashFailed(ctx, "drive-t1", fd.trashErr) // the request's own try failed
+	if n, last, _ := lib.TrashPending(ctx); n != 1 || last == "" || s.Status().TrashPending != 1 {
+		t.Fatalf("pending %d %q", n, last)
+	}
+	s.DB.Exec(`UPDATE drive_trash SET next_at = 0`)
+	if s.RetryTrash(ctx) != 0 {
+		t.Fatal("retried while drive is down")
+	}
+	fd.trashErr = nil
+	s.DB.Exec(`UPDATE drive_trash SET next_at = 0`)
+	if s.RetryTrash(ctx) != 1 || len(fd.trashed) != 1 || fd.trashed[0] != "drive-t1" {
+		t.Fatalf("not retried: %v", fd.trashed)
+	}
+	if n, _, _ := lib.TrashPending(ctx); n != 0 {
+		t.Fatalf("still pending %d", n)
 	}
 }

@@ -57,6 +57,9 @@ type Plan struct {
 	Track       int    `json:"track"`
 	Kind        string `json:"kind"`
 	NewAlbum    bool   `json:"new_album,omitempty"` // make a new album even if one was made from the same tags
+	// Chosen marks a new album the user asked for in the preview: files imported before then go
+	// into it too, instead of back to their earlier entries (review #21).
+	Chosen bool `json:"chosen,omitempty"`
 
 	// Tagged is what the file's own tags (and folder and file name) said, kept through preview edits:
 	// later imports of the same file are matched by it.
@@ -68,7 +71,7 @@ type Plan struct {
 
 func (p *Plan) input() library.EntryInput {
 	in := library.EntryInput{Title: p.Title, Artist: p.Artist, Album: p.Album, AlbumArtist: p.AlbumArtist, Date: p.Date,
-		DiscNo: p.Disc, TrackNo: p.Track, Kind: p.Kind, NewAlbum: p.NewAlbum}
+		DiscNo: p.Disc, TrackNo: p.Track, Kind: p.Kind, NewAlbum: p.NewAlbum, Chosen: p.NewAlbum && p.Chosen}
 	if p.Album != "" {
 		t, a := p.Tagged, p.Anchor
 		in.Tagged, in.AlbumTags = &t, &a
