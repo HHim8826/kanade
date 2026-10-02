@@ -32,6 +32,7 @@ type Tags struct {
 	TrackTotal  int    `json:"track_total,omitempty"`
 	DiscNo      int    `json:"disc_no,omitempty"`
 	DiscTotal   int    `json:"disc_total,omitempty"`
+	Lyrics      string `json:"lyrics,omitempty"` // embedded lyrics, synced (LRC-style) or plain
 }
 
 type Info struct {
@@ -225,6 +226,8 @@ func (t *Tags) applyField(key, value string) {
 		if t.DiscTotal == 0 {
 			t.DiscTotal, _ = splitNumber(value)
 		}
+	case "LYRICS", "UNSYNCEDLYRICS", "UNSYNCED LYRICS":
+		setIfEmpty(&t.Lyrics)
 	}
 }
 

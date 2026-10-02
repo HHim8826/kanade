@@ -95,7 +95,7 @@ func (s *Store) ResumePosition(ctx context.Context, assetID int64) (int64, error
 	var pos, dur int64
 	var finished int
 	err := s.db.QueryRowContext(ctx, `SELECT position_ms, duration_ms, finished FROM plays
-		WHERE asset_id = ? AND updated_at > ? ORDER BY updated_at DESC LIMIT 1`,
+		WHERE asset_id = ? AND updated_at > ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
 		assetID, db.Now()-resumeWindow.Milliseconds()).Scan(&pos, &dur, &finished)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -120,7 +120,7 @@ type ResumeItem struct {
 func (s *Store) unfinished(ctx context.Context, where string, limit int) ([]ResumeItem, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT p.track_id, p.position_ms, coalesce(p.album_id, 0) FROM plays p
 		JOIN tracks t ON t.id = p.track_id
-		WHERE p.id = (SELECT p2.id FROM plays p2 WHERE p2.asset_id = p.asset_id ORDER BY p2.updated_at DESC LIMIT 1)
+		WHERE p.id = (SELECT p2.id FROM plays p2 WHERE p2.asset_id = p.asset_id ORDER BY p2.updated_at DESC, p2.id DESC LIMIT 1)
 		AND p.finished = 0 AND p.position_ms >= ? AND (p.duration_ms = 0 OR p.position_ms <= p.duration_ms - ?)
 		AND p.updated_at > ? `+where+` ORDER BY p.updated_at DESC LIMIT ?`,
 		resumeMarginMS, resumeMarginMS, db.Now()-resumeWindow.Milliseconds(), limit)

@@ -5,6 +5,7 @@ import { ErrorBox, Icon, fmtBytes, html, toast } from '../ui.js';
 
 const AUDIO = /\.(flac|mp3|m4a|mp4|aac|ogg|oga|opus|wav|aiff?|ape|tak|wv|tta|dsf|dff|wma)$/i;
 const IMAGE = /\.(jpe?g|png)$/i;
+const SIDECAR = /\.(lrc|cue|log)$/i; // lyrics; CUE sheets and rip logs are kept with the album
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -42,7 +43,7 @@ export function Upload() {
     const folder = files.some((f) => f.webkitRelativePath);
     // From a folder, keep cover and scan images too: the server picks album art from them.
     const list = files
-      .filter((f) => AUDIO.test(f.name) || (folder && IMAGE.test(f.name)))
+      .filter((f) => AUDIO.test(f.name) || SIDECAR.test(f.name) || (folder && IMAGE.test(f.name)))
       .map((f) => ({ file: f, path: f.webkitRelativePath || f.name }));
     setEntries(list);
     setError(null);
@@ -50,6 +51,8 @@ export function Upload() {
   };
 
   const audioCount = entries.filter((e) => AUDIO.test(e.path)).length;
+  const imageCount = entries.filter((e) => IMAGE.test(e.path)).length;
+  const otherCount = entries.length - audioCount - imageCount;
   const totalBytes = entries.reduce((a, e) => a + e.file.size, 0);
 
   const start = async () => {
@@ -79,12 +82,12 @@ export function Upload() {
     <p class="hint">選擇資料夾時會保留資料夾結構，Disc 子資料夾、封面與掃描圖都會用來整理專輯。</p>
     <div class="actions">
       <label class=${'btn tonal' + (busy ? ' disabled' : '')}><${Icon} name="note" />選擇檔案
-        <input type="file" multiple hidden disabled=${busy} accept="audio/*,.flac,.ape,.tak,.wv,.opus" onChange=${pick} /></label>
+        <input type="file" multiple hidden disabled=${busy} accept="audio/*,.flac,.ape,.tak,.wv,.opus,.lrc,.cue,.log" onChange=${pick} /></label>
       <label class=${'btn tonal' + (busy ? ' disabled' : '')}><${Icon} name="album" />選擇資料夾
         <input type="file" hidden disabled=${busy} webkitdirectory onChange=${pick} /></label>
     </div>
     ${entries.length > 0 && html`<div class="card pad">
-      <div class="title">${audioCount} 首音樂${entries.length > audioCount ? `、${entries.length - audioCount} 張圖片` : ''}，共 ${fmtBytes(totalBytes)}</div>
+      <div class="title">${[`${audioCount} 首音樂`, imageCount && `${imageCount} 張圖片`, otherCount && `${otherCount} 個歌詞或附屬檔`].filter(Boolean).join('、')}，共 ${fmtBytes(totalBytes)}</div>
       <ul class="items compact">${entries.slice(0, 50).map((e) => html`<li key=${e.path}><span class="grow path">${e.path}</span><span class="sub">${fmtBytes(e.file.size)}</span></li>`)}</ul>
       ${entries.length > 50 && html`<div class="sub">…還有 ${entries.length - 50} 個檔案</div>`}
       ${busy

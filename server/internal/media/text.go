@@ -1,12 +1,14 @@
 package media
 
 import (
+	"bytes"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/text/encoding/charmap"
 	"golang.org/x/text/encoding/japanese"
+	xunicode "golang.org/x/text/encoding/unicode"
 )
 
 // Text encodings reported in Info.Encoding (decision D2).
@@ -49,6 +51,26 @@ func plausibleJapanese(s string) bool {
 		}
 	}
 	return wide > 0 && halfKana <= wide/2
+}
+
+// DecodeText decodes a whole text file (LRC, CUE, LOG, M3U) by decision D2: a BOM decides
+// (EAC logs are often UTF-16LE); otherwise valid UTF-8, then plausible CP932, then CP1252.
+func DecodeText(b []byte) (string, string) {
+	var dec interface{ Bytes([]byte) ([]byte, error) }
+	switch {
+	case bytes.HasPrefix(b, []byte{0xEF, 0xBB, 0xBF}):
+		return string(b[3:]), EncUTF8
+	case bytes.HasPrefix(b, []byte{0xFF, 0xFE}):
+		dec = xunicode.UTF16(xunicode.LittleEndian, xunicode.ExpectBOM).NewDecoder()
+	case bytes.HasPrefix(b, []byte{0xFE, 0xFF}):
+		dec = xunicode.UTF16(xunicode.BigEndian, xunicode.ExpectBOM).NewDecoder()
+	}
+	if dec != nil {
+		if out, err := dec.Bytes(b); err == nil {
+			return string(out), "utf-16"
+		}
+	}
+	return DecodeLegacy(b)
 }
 
 // UTF8OrLegacy is for formats that require UTF-8 (Vorbis comments, MP4) but sometimes do not get it.

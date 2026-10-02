@@ -2,7 +2,7 @@ import { coverURL, get, post, streamURL } from './api.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
-// Queue item: { assetId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? }
+// Queue item: { assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? }
 export const player = createStore({
   queue: [],
   index: -1,
@@ -24,14 +24,14 @@ export const current = () => {
 // From an album entry or a track list item to a queue item.
 export function fromEntry(e, album) {
   return {
-    assetId: e.asset.id, title: e.title, artist: e.artist, album: album.title, albumId: album.id,
+    assetId: e.asset.id, trackId: e.track_id, title: e.title, artist: e.artist, album: album.title, albumId: album.id,
     coverId: album.cover_id, durationMs: e.asset.duration_ms, asset: e.asset, kind: e.kind,
   };
 }
 
 export function fromTrack(t) {
   return {
-    assetId: t.asset.id, title: t.title, artist: t.artist, album: t.album, albumId: t.album_id,
+    assetId: t.asset.id, trackId: t.id, title: t.title, artist: t.artist, album: t.album, albumId: t.album_id,
     coverId: t.cover_id, durationMs: t.asset.duration_ms, asset: t.asset, kind: t.kind,
   };
 }
@@ -112,11 +112,26 @@ export function shuffled(items) {
   return a;
 }
 
-export function enqueue(item) {
+// enqueue adds one item or a list at the end of the queue.
+export function enqueue(items) {
+  const list = Array.isArray(items) ? items : [items];
   const s = player.get();
-  if (s.index < 0) return playQueue([item]);
-  player.set({ queue: [...s.queue, item] });
-  toast(`已加入佇列：${item.title}`);
+  if (!list.length) return;
+  if (s.index < 0) return playQueue(list);
+  player.set({ queue: [...s.queue, ...list] });
+  toast(list.length > 1 ? `已將 ${list.length} 首加入佇列` : `已加入佇列：${list[0].title}`);
+}
+
+// playNext puts items right after the current track.
+export function playNext(items) {
+  const list = Array.isArray(items) ? items : [items];
+  const s = player.get();
+  if (!list.length) return;
+  if (s.index < 0) return playQueue(list);
+  const queue = [...s.queue];
+  queue.splice(s.index + 1, 0, ...list);
+  player.set({ queue });
+  toast(list.length > 1 ? `接下來播放 ${list.length} 首` : `下一首播放：${list[0].title}`);
 }
 
 export function toggle() {

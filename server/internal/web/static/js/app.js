@@ -1,9 +1,11 @@
 import { render } from '../vendor/preact.module.js';
 import { useEffect, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
+import { loadFavorites } from './actions.js';
 import { player } from './player.js';
 import { href, useRoute } from './router.js';
-import { Boundary, Icon, Spinner, Toasts, html } from './ui.js';
+import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
+import { History, Playlist } from './views/collections.js';
 import { Album, Artist, Home, Library, Search } from './views/library.js';
 import { Login } from './views/login.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
@@ -27,6 +29,8 @@ function Page({ route, onLogout }) {
     case 'library': return html`<${Library} tab=${arg || 'albums'} />`;
     case 'album': return html`<${Album} id=${arg} />`;
     case 'artist': return html`<${Artist} id=${arg} name=${route.query.get('name')} />`;
+    case 'playlist': return html`<${Playlist} id=${arg} />`;
+    case 'history': return html`<${History} />`;
     case 'tasks': return html`<${Tasks} />`;
     case 'upload': return html`<${Upload} />`;
     case 'settings': return html`<${Settings} onLogout=${onLogout} />`;
@@ -43,10 +47,14 @@ function App() {
   }, []);
   // Leaving a page closes the full-screen player, so it never hides the page you went to.
   useEffect(() => player.set({ nowPlayingOpen: false }), [route]);
+  useEffect(() => {
+    if (auth === 'in') loadFavorites();
+  }, [auth]);
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist'].includes(section)) || (key === 'tasks' && section === 'upload');
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist'].includes(section))
+    || (key === 'tasks' && section === 'upload') || (key === '' && section === 'history');
   return html`
     <nav class="nav" aria-label="主要">
       ${nav.map(([key, icon, label]) => html`<a key=${key} href=${href(key)} class=${active(key) ? 'active' : ''} aria-current=${active(key) ? 'page' : undefined}>
@@ -55,6 +63,8 @@ function App() {
     <main class="content"><${Boundary} key=${location.hash}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></main>
     <${PlayerBar} />
     <${NowPlaying} />
+    <${MenuHost} />
+    <${DialogHost} />
     <${Toasts} />`;
 }
 

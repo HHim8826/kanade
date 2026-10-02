@@ -333,11 +333,34 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		return out, err
 	}
 	out.trackID, out.entry = res.TrackID, res.EntryID
+	im.importLyrics(ctx, it.path, res.TrackID, info)
 	out.state = StatePublished
 	if !res.Created {
 		out.state = StateDuplicate
 	}
 	return out, nil
+}
+
+// importLyrics keeps the file's own lyrics, and a same-named .lrc next to it (decision D2 §5).
+// The .lrc goes second so it wins, unless it is plain text and the embedded lyrics are timed.
+func (im *Importer) importLyrics(ctx context.Context, path string, trackID int64, info *media.Info) {
+	if info.Tags.Lyrics != "" {
+		im.lib.SetLyrics(ctx, trackID, library.LyricsEmbedded, info.Tags.Lyrics)
+	}
+	base := strings.TrimSuffix(path, filepath.Ext(path))
+	for _, ext := range []string{".lrc", ".LRC", ".Lrc"} {
+		st, err := os.Stat(base + ext)
+		if err != nil || st.Size() > 256<<10 {
+			continue
+		}
+		if b, err := os.ReadFile(base + ext); err == nil {
+			text, _ := media.DecodeText(b)
+			if _, err := im.lib.SetLyrics(ctx, trackID, library.LyricsLRC, text); err != nil {
+				im.log.Warn("store lyrics", "track", trackID, "err", err)
+			}
+		}
+		return
+	}
 }
 
 var (

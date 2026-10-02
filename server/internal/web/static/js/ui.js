@@ -30,6 +30,18 @@ const icons = {
   back: 'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
   expand: 'M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z',
   refresh: 'M17.65 6.35A7.96 7.96 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z',
+  favorite: 'M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z',
+  favoriteOff: 'M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z',
+  more: 'M12 8c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm0 2c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2zm0 6c-1.1 0-2 .9-2 2s.9 2 2 2 2-.9 2-2-.9-2-2-2z',
+  playlistAdd: 'M14 10H2v2h12v-2zm0-4H2v2h12V6zm4 8v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zM2 16h8v-2H2v2z',
+  playNext: 'M3 10h11v2H3v-2zm0-4h11v2H3V6zm0 8h7v2H3v-2zm13-1v8l6-4-6-4z',
+  lyrics: 'M14 17H4v2h10v-2zm6-8H4v2h16V9zM4 15h16v-2H4v2zM4 5v2h16V5H4z',
+  history: 'M13 3a9 9 0 0 0-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42A8.954 8.954 0 0 0 13 21a9 9 0 0 0 0-18zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z',
+  delete: 'M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z',
+  edit: 'M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z',
+  drag: 'M20 9H4v2h16V9zM4 15h16v-2H4v2z',
+  up: 'M4 12l1.41 1.41L11 7.83V20h2V7.83l5.58 5.59L20 12l-8-8-8 8z',
+  down: 'M20 12l-1.41-1.41L13 16.17V4h-2v12.17l-5.58-5.59L4 12l8 8 8-8z',
 };
 
 export function Icon({ name, size = 24, label }) {
@@ -37,9 +49,9 @@ export function Icon({ name, size = 24, label }) {
     role=${label ? 'img' : undefined} aria-label=${label}><path d=${icons[name]} /></svg>`;
 }
 
-export function IconButton({ icon, label, onClick, disabled, filled, size = 24 }) {
-  return html`<button class=${'icon-btn' + (filled ? ' filled' : '')} type="button" title=${label} aria-label=${label}
-    onClick=${onClick} disabled=${disabled}><${Icon} name=${icon} size=${size} /></button>`;
+export function IconButton({ icon, label, onClick, disabled, filled, size = 24, className = '', pressed }) {
+  return html`<button class=${'icon-btn' + (filled ? ' filled' : '') + (className ? ' ' + className : '')} type="button" title=${label}
+    aria-label=${label} aria-pressed=${pressed} onClick=${onClick} disabled=${disabled}><${Icon} name=${icon} size=${size} /></button>`;
 }
 
 export function Cover({ id, size = 300, alt = '', className = '' }) {
@@ -139,7 +151,61 @@ export function Toasts() {
   </div>`;
 }
 
+// ---- menus ----
+// One popover menu at a time, anchored to the button that opened it. items: { icon, label, onClick }
+// (falsy entries are skipped, so callers can write `cond && {...}`).
+
+const menus = createStore({ menu: null });
+
+export function openMenu(e, items) {
+  e.stopPropagation();
+  const r = e.currentTarget.getBoundingClientRect();
+  menus.set({ menu: { rect: { top: r.top, bottom: r.bottom, right: r.right }, items: items.filter(Boolean) } });
+}
+
+const closeMenu = () => menus.set({ menu: null });
+
+export function MenuHost() {
+  const { menu } = useStore(menus);
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e) => e.key === 'Escape' && closeMenu();
+    addEventListener('keydown', onKey);
+    addEventListener('resize', closeMenu);
+    addEventListener('hashchange', closeMenu);
+    return () => {
+      removeEventListener('keydown', onKey);
+      removeEventListener('resize', closeMenu);
+      removeEventListener('hashchange', closeMenu);
+    };
+  }, [menu]);
+  if (!menu) return null;
+  const { rect, items } = menu;
+  const width = 240, height = items.length * 48 + 16;
+  const left = Math.max(8, Math.min(rect.right - width, innerWidth - width - 8));
+  const below = innerHeight - rect.bottom > height + 8 || rect.top < height + 8;
+  const style = { left: left + 'px', width: width + 'px', ...(below ? { top: rect.bottom + 4 + 'px' } : { bottom: innerHeight - rect.top + 4 + 'px' }) };
+  return html`<div class="menu-scrim" onClick=${closeMenu} onWheel=${closeMenu}>
+    <ul class="menu" role="menu" style=${style} onClick=${(e) => e.stopPropagation()}>
+      ${items.map((it, i) => html`<li key=${i} role="none"><button role="menuitem" onClick=${() => { closeMenu(); it.onClick(); }}>
+        <${Icon} name=${it.icon} /><span>${it.label}</span></button></li>`)}
+    </ul>
+  </div>`;
+}
+
 // ---- dialog ----
+// showDialog(render) puts one dialog on screen; render receives close().
+
+const dialogs = createStore({ render: null });
+
+export function showDialog(render) {
+  dialogs.set({ render });
+}
+
+export function DialogHost() {
+  const { render } = useStore(dialogs);
+  return render ? render(() => dialogs.set({ render: null })) : null;
+}
 
 export function Dialog({ title, onClose, children, actions }) {
   useEffect(() => {

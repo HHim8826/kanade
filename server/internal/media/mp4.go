@@ -161,7 +161,7 @@ func mediaHeaderTimes(b []byte) (scale, dur uint64) {
 
 var ilstNames = map[string]string{
 	"\xa9nam": "TITLE", "\xa9ART": "ARTIST", "\xa9alb": "ALBUM", "aART": "ALBUMARTIST",
-	"\xa9day": "DATE", "\xa9gen": "GENRE",
+	"\xa9day": "DATE", "\xa9gen": "GENRE", "\xa9lyr": "LYRICS",
 }
 
 func parseIlst(ilst []byte, info *Info) {

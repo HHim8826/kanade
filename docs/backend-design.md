@@ -4,8 +4,8 @@
 
 ## 程式與部署形態
 
-- 單一 Go 執行檔 `ser1ka-music`（`server/`），純 Go、不需 cgo，可交叉編譯 amd64／arm64。
-- `ser1ka-music serve --data DIR --listen 127.0.0.1:8080`：主服務。開發期經 Cloudflare Tunnel 對外為 `music.ser1ka.com`。
+- 單一 Go 執行檔 `kanade`（`server/`），純 Go、不需 cgo，可交叉編譯 amd64／arm64。
+- `kanade serve --data DIR --listen 127.0.0.1:8080`：主服務。開發期經 Cloudflare Tunnel 對外為 `music.ser1ka.com`。
 - 主服務自行管理 aria2 子程序（D5）：產生設定與 RPC 密鑰、只綁 loopback、異常退出時退避重啟。
 - 首頁 `/` 與 `/privacy` 由主服務提供（D4），取代 `deploy/landing`。
 
@@ -60,6 +60,10 @@ DIR/
 | `drive_folders` | 路徑到 Drive 資料夾 ID 的快取 |
 | `search_index` | FTS5 trigram：曲名、歌手、專輯名 |
 | `users`、`sessions`、`settings`、`credentials` | 帳號、登入 token（只存雜湊）、設定、OAuth token |
+| `plays` | 播放紀錄（D9）：session、音檔、歌曲、從哪張專輯播放、位置、實際聽的時間、是否計次、是否聽完 |
+| `favorite_tracks`、`favorite_albums` | 收藏 |
+| `playlists`、`playlist_items` | 歌單；條目有獨立 ID、歌曲、可選專輯與音檔版本、位置，允許重複 |
+| `lyrics` | 每首歌曲一份歌詞：來源（內嵌／LRC／手動）、是否有時間軸 |
 
 精確去重鍵是 `sha256`＋`size`（唯一約束），上傳完成以 Drive 回傳的 `sha256Checksum` 驗證（P0 第 1 節）。
 
@@ -95,6 +99,14 @@ DIR/
 | `GET /home` | 首頁資料：繼續播放、最近播放、最近加入、未聽完的廣播劇、任務摘要、待整理（D9） |
 | `POST /plays` | 回報播放：`session`、`asset_id`、`album_id`、`position_ms`、`listened_ms`、`finished` |
 | `GET /assets/{id}/resume`、`GET /albums/random` | 續播位置；隨機一張音樂專輯 |
+| `GET /favorites`、`GET /favorites/ids` | 收藏的歌曲與專輯；只取 ID（客戶端據此標示愛心） |
+| `PUT`／`DELETE /favorites/tracks/{id}`、`/favorites/albums/{id}` | 收藏、取消收藏 |
+| `GET`／`POST /playlists` | 歌單清單；建立（`name`、`description`、可帶初始 `items`） |
+| `GET`／`PATCH`／`DELETE /playlists/{id}` | 歌單內容、改名與說明、刪除 |
+| `POST /playlists/{id}/items`、`DELETE /playlists/{id}/items/{item}` | 加入 `{"items": [{"track_id", "album_id", "asset_id"}]}`；移除一個條目 |
+| `PUT /playlists/{id}/order` | `{"items": [條目 ID...]}`，必須剛好是歌單現有的全部條目 |
+| `GET`／`PUT`／`DELETE /tracks/{id}/lyrics` | 歌詞；手動輸入或刪除 |
+| `GET /history?limit&before`、`GET /history/top?days` | 播放記錄（略過不到 10 秒的跳過）；最常播放 |
 
 ## 階段
 
@@ -136,13 +148,20 @@ DIR/
 - 參考客戶端：`server/scripts/upload-folder.py`（可從電腦上傳資料夾，也是 App 的行為範本）。實測經 `music.ser1ka.com` 隧道上傳 106 MiB 約 10.8 MiB/s，中斷後續傳、匯入、封面選擇與暫存清除皆正確。
 - 發現：網域上的 Cloudflare 機器人防護會擋 Python 預設 User-Agent（回傳非 JSON 錯誤頁）；客戶端需帶自己的 User-Agent。Android App 開發時需確認其 User-Agent 不被擋。
 
+### P2-1 個人化（2026-10-02）
+
+- 遷移 6：收藏、歌單、歌詞三組表。部署前備份資料庫到 `var/backups/`。
+- 歌詞來源與優先序：手動 > 有時間軸的匯入 > 純文字的匯入；匯入不會覆蓋手動輸入，手動清空即刪除。內嵌歌詞取自 Vorbis `LYRICS`／`UNSYNCEDLYRICS`、ID3 `USLT`、MP4 `©lyr`；之後找同主檔名的 `.lrc`（≤ 256 KB，編碼依 D2 第 4 點）。遷移時從 `import_items.info` 回填已入庫歌曲的內嵌歌詞（現有曲庫沒有）。
+- 網頁端：歌曲列「更多」選單（下一首播放、加入佇列、加入歌單、收藏、前往專輯）；專輯頁收藏與整張加入歌單；曲庫新增「歌單」「收藏」分頁；歌單頁可改名、刪除、拖曳或用選單排序；正在播放頁可收藏、切換「播放佇列／歌詞」，有時間軸的歌詞逐行同步、點一行跳到該處；播放記錄頁（近 30 天最常播放、依日期分組的最近播放）。網頁上傳會一併送出 `.lrc`、`.cue`、`.log`。
+- 實測（Chrome，桌面與手機寬度）：上述操作逐一走過，重新整理後排序保留，無主控台錯誤；測試資料與測試帳號已刪除。
+
 ## 使用方式（開發環境）
 
 ```bash
 # 啟動（工作目錄 server/）
-SER1KA_DATA=/data/music-platform/var nohup ./bin/ser1ka-music serve >> /data/music-platform/var/server.log 2>&1 &
+KANADE_DATA=/data/music-platform/var nohup ./bin/kanade serve >> /data/music-platform/var/server.log 2>&1 &
 # 帳號
-printf '%s\n' '新密碼至少10字' | SER1KA_DATA=... ./bin/ser1ka-music user passwd admin
+printf '%s\n' '新密碼至少10字' | KANADE_DATA=... ./bin/kanade user passwd admin
 # 從電腦上傳資料夾並匯入
 python3 scripts/upload-folder.py "某專輯資料夾" --token <登入取得的 token>
 ```

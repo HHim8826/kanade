@@ -166,3 +166,44 @@ func TestTruncatedFilesDoNotPanic(t *testing.T) {
 		}
 	}
 }
+
+func TestLyricsInID3(t *testing.T) {
+	// USLT: encoding, language, content descriptor (empty here), text. UTF-16 with BOM.
+	text := []byte{0xFF, 0xFE}
+	for _, r := range "[00:01.00]歌詞\n[00:02.00]two" {
+		text = append(text, byte(r), byte(r>>8))
+	}
+	payload := append([]byte{1, 'j', 'p', 'n', 0xFF, 0xFE, 0, 0}, text...)
+	body := id3Frame("USLT", payload)
+	n := len(body)
+	header := []byte{'I', 'D', '3', 3, 0, 0, byte(n >> 21 & 0x7f), byte(n >> 14 & 0x7f), byte(n >> 7 & 0x7f), byte(n & 0x7f)}
+	audio, err := os.ReadFile("testdata/tone-notag.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := append(append(header, body...), audio...)
+	info, err := Probe(bytes.NewReader(file), int64(len(file)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Tags.Lyrics != "[00:01.00]歌詞\n[00:02.00]two" {
+		t.Fatalf("lyrics %q", info.Tags.Lyrics)
+	}
+}
+
+func TestDecodeText(t *testing.T) {
+	sjis, _ := japanese.ShiftJIS.NewEncoder().Bytes([]byte("[00:01.00]春の歌"))
+	if s, enc := DecodeText(sjis); s != "[00:01.00]春の歌" || enc != EncCP932 {
+		t.Fatalf("cp932: %q %s", s, enc)
+	}
+	utf16 := []byte{0xFF, 0xFE}
+	for _, r := range "EAC ログ" {
+		utf16 = append(utf16, byte(r), byte(r>>8))
+	}
+	if s, _ := DecodeText(utf16); s != "EAC ログ" {
+		t.Fatalf("utf-16le: %q", s)
+	}
+	if s, _ := DecodeText(append([]byte{0xEF, 0xBB, 0xBF}, "bom"...)); s != "bom" {
+		t.Fatalf("utf-8 bom: %q", s)
+	}
+}

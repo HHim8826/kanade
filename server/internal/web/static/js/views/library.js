@@ -1,67 +1,21 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
-import { fromEntry, fromTrack, playQueue, player, shuffled, toggle } from '../player.js';
+import { addToPlaylist, toggleFav, useFav } from '../actions.js';
+import { enqueue, fromEntry, fromTrack, playNext, playQueue, player, shuffled, toggle } from '../player.js';
 import { href } from '../router.js';
 import { useStore } from '../store.js';
-import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, toast, useLoad } from '../ui.js';
-
-function AlbumGrid({ albums }) {
-  if (!albums.length) return html`<${Empty} icon="album">還沒有專輯。到「任務」上傳音樂或加入下載。<//>`;
-  return html`<div class="grid">
-    ${albums.map((a) => html`<a key=${a.id} class="card album-card" href=${href('album/' + a.id)}>
-      <${Cover} id=${a.cover_id} alt="" />
-      <div class="card-text">
-        <div class="title" title=${a.title}>${a.title}</div>
-        <div class="sub">${a.album_artist || '未知歌手'}</div>
-      </div>
-    </a>`)}
-  </div>`;
-}
-
-// TrackList plays the whole list starting from the row that was tapped.
-export function TrackList({ items, showNumber, showAlbum }) {
-  const { queue, index } = useStore(player);
-  const playingId = queue[index]?.assetId;
-  return html`<ol class="tracks">
-    ${items.map((it, i) => html`<li key=${it.key || it.assetId + '-' + i}>
-      <button class=${'track' + (it.assetId === playingId ? ' current' : '')} onClick=${() => playQueue(items, i)}>
-        ${showNumber ? html`<span class="num">${it.number || ''}</span>` : html`<${Cover} id=${it.coverId} size=${96} className="thumb" />`}
-        <span class="track-text">
-          <span class="title">${it.title}</span>
-          <span class="sub">${[it.artist || '未知歌手', showAlbum && it.album].filter(Boolean).join(' · ')}</span>
-        </span>
-        <span class="meta"><span class="quality">${fmtQuality(it.asset)}</span><span>${fmtTime(it.durationMs)}</span></span>
-      </button>
-    </li>`)}
-  </ol>`;
-}
+import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
+import { FavoritesTab, PlaylistsTab } from './collections.js';
+import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 
 // Albums in one horizontally scrolling row (home page shelves).
-function Shelf({ title, albums }) {
+function Shelf({ title, albums, more }) {
   if (!albums || !albums.length) return null;
-  return html`<h2 class="section-title">${title}</h2>
+  return html`<div class="section-head"><h2 class="section-title">${title}</h2>${more}</div>
     <div class="shelf">${albums.map((a) => html`<a key=${a.id} class="card album-card" href=${href('album/' + a.id)}>
       <${Cover} id=${a.cover_id} alt="" />
       <div class="card-text"><div class="title" title=${a.title}>${a.title}</div><div class="sub">${a.album_artist || '未知歌手'}</div></div>
     </a>`)}</div>`;
-}
-
-// Resume a half-heard track inside the album it was played from, so the queue continues naturally.
-// A finished track moves on to the next one (back to the start after the album's last track).
-async function resume(item) {
-  if (item.album_id) {
-    try {
-      const a = await get('/albums/' + item.album_id);
-      const items = a.entries.map((e) => fromEntry(e, a));
-      const i = items.findIndex((q) => q.assetId === item.asset.id);
-      if (i >= 0 && item.finished) return playQueue(items, i + 1 < items.length ? i + 1 : 0);
-      if (i >= 0) {
-        items[i] = { ...items[i], resumeMs: item.position_ms };
-        return playQueue(items, i);
-      }
-    } catch { /* fall back to the single track */ }
-  }
-  playQueue([{ ...fromTrack(item), resumeMs: item.finished ? 0 : item.position_ms }], 0);
 }
 
 // The top card: what is playing in this tab, or else the latest playback, from any device.
@@ -95,7 +49,7 @@ function LastPlayedCard({ item }) {
       <${ProgressLine} position=${item.finished ? dur : item.position_ms} duration=${dur} />
       <div class="sub">${item.finished ? fmtTime(dur) : `${fmtTime(item.position_ms)} / ${fmtTime(dur)}`}</div>
     </div>
-    <${IconButton} icon=${item.finished && item.album_id ? 'next' : 'play'} label=${action} filled size=${28} onClick=${() => resume(item)} />
+    <${IconButton} icon=${item.finished && item.album_id ? 'next' : 'play'} label=${action} filled size=${28} onClick=${() => playInAlbum(item)} />
   </div>`;
 }
 
@@ -144,9 +98,10 @@ export function Home() {
       <span class="sub">任務 ›</span>
     </a>`}
     ${empty && html`<${Empty} icon="library">曲庫還是空的。到「任務」新增下載，或上傳音樂。<//>`}
-    ${d && html`<${Shelf} title="最近播放" albums=${d.recently_played} />`}
+    ${d && html`<${Shelf} title="最近播放" albums=${d.recently_played}
+      more=${html`<a class="btn text" href=${href('history')}><${Icon} name="history" />播放記錄</a>`} />`}
     ${spoken.length > 0 && html`<h2 class="section-title">未聽完的廣播劇</h2>
-      <ul class="list">${spoken.map((t) => html`<li key=${t.id}><button class="row plain wide" onClick=${() => resume(t)}>
+      <ul class="list">${spoken.map((t) => html`<li key=${t.id}><button class="row plain wide" onClick=${() => playInAlbum(t)}>
         <${Cover} id=${t.cover_id} size=${96} className="thumb" />
         <span class="grow track-text"><span class="title">${t.title}</span><span class="sub">${t.album || t.artist}</span>
           <${ProgressLine} position=${t.position_ms} duration=${t.asset.duration_ms} /></span>
@@ -165,10 +120,11 @@ export function Home() {
   </section>`;
 }
 
-const tabs = [['albums', '專輯'], ['artists', '歌手'], ['tracks', '歌曲']];
+const tabs = [['albums', '專輯'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏']];
+const tabURL = { playlists: '/playlists', favorites: '/favorites' };
 
 export function Library({ tab = 'albums' }) {
-  const data = useLoad(() => get(`/${tab}?limit=500`), [tab]);
+  const data = useLoad(() => get(tabURL[tab] || `/${tab}?limit=500`), [tab]);
   return html`<section>
     <h1 class="page-title">曲庫</h1>
     <nav class="tabs" role="tablist">
@@ -183,6 +139,8 @@ export function Library({ tab = 'albums' }) {
     ${data.data && tab === 'tracks' && (data.data.length
       ? html`<${TrackList} items=${data.data.map(fromTrack)} showAlbum />`
       : html`<${Empty}>還沒有歌曲。<//>`)}
+    ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
+    ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
   </section>`;
 }
 
@@ -204,6 +162,12 @@ export function Album({ id }) {
         <div class="actions">
           <button class="btn filled" onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放</button>
           <button class="btn tonal" onClick=${() => playQueue(shuffled(items), 0)}><${Icon} name="shuffle" />隨機播放</button>
+          <${AlbumFavorite} id=${a.id} />
+          <${IconButton} icon="more" label="更多" onClick=${(e) => openMenu(e, [
+            { icon: 'playNext', label: '下一首播放', onClick: () => playNext(items) },
+            { icon: 'queue', label: '加入佇列', onClick: () => enqueue(items) },
+            { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist(items) },
+          ])} />
         </div>
       </div>
     </header>
@@ -212,6 +176,12 @@ export function Album({ id }) {
       <${TrackList} items=${items.filter((i) => i.disc === d)} showNumber />
     </div>`)}
   </section>`;
+}
+
+function AlbumFavorite({ id }) {
+  const on = useFav('album', id);
+  return html`<${IconButton} icon=${on ? 'favorite' : 'favoriteOff'} label=${on ? '取消收藏專輯' : '收藏專輯'} pressed=${on}
+    className=${on ? 'fav-on' : ''} onClick=${() => toggleFav('album', id)} />`;
 }
 
 export function Artist({ id, name }) {

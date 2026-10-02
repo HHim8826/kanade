@@ -213,6 +213,14 @@ func parseID3v2(r io.ReaderAt, size int64, info *Info) (int64, error) {
 					info.Tags.applyField(name, v)
 				}
 			}
+		case (id == "USLT" || id == "ULT") && len(data) > 4: // encoding, language, descriptor, text
+			descEnd := 4 + skipEncodedString(data[4:], data[0])
+			vals, raw, enc := decodeID3Text(append([]byte{data[0]}, data[descEnd:]...))
+			info.addLegacy(id, raw, enc)
+			if text := strings.Join(vals, "\n"); text != "" {
+				info.addRaw(id, text)
+				info.Tags.applyField("LYRICS", text)
+			}
 		case id == "APIC" && len(data) > 2:
 			marker := data[0]
 			mimeEnd := bytes.IndexByte(data[1:], 0)

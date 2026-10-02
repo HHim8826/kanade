@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/text/encoding/japanese"
+
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
@@ -282,5 +284,27 @@ func TestSpokenWordDetection(t *testing.T) {
 		if got := entryInput(c.rel, &media.Info{Tags: c.tags}).Kind; got != c.kind {
 			t.Errorf("%s (%+v): kind %q, want %q", c.rel, c.tags, got, c.kind)
 		}
+	}
+}
+
+func TestLyricsFromLRCFile(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "01 song.mp3"), map[string]string{"TIT2": "Song", "TPE1": "A"})
+	sjis, _ := japanese.ShiftJIS.NewEncoder().Bytes([]byte("[00:01.00]一行目\r\n[00:02.00]二行目\r\n"))
+	os.WriteFile(filepath.Join(src, "01 song.lrc"), sjis, 0o644)
+	batch, _, err := im.CreateBatch(ctx, "local", "", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := runUntilDone(t, im, batch)
+	if len(b.Items) != 1 || b.Items[0].State != StatePublished { // the .lrc is not an import item
+		t.Fatalf("items %+v", b.Items)
+	}
+	tracks, _ := lib.Tracks(ctx, 10, 0)
+	l, err := lib.Lyrics(ctx, tracks[0].ID)
+	if err != nil || l == nil || !l.Synced || l.Source != library.LyricsLRC || l.Text != "[00:01.00]一行目\n[00:02.00]二行目" {
+		t.Fatalf("lyrics %+v %v", l, err)
 	}
 }
