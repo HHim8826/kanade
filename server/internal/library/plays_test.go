@@ -70,9 +70,9 @@ func TestContinueAndSpoken(t *testing.T) {
 	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 600_000, ListenedMS: 600_000})
 	s.RecordPlay(ctx, PlayReport{Session: "b", AssetID: song, AlbumID: musicAlbum, PositionMS: 10_000, ListenedMS: 10_000})
 
-	// The song is newer but only 10 s in, so "continue" is the drama at 10 minutes.
+	// "Continue" is simply the latest playback: the song, 10 s in, in its album.
 	c, err := s.Continue(ctx)
-	if err != nil || c == nil || c.Title != "Episode 1" || c.PositionMS != 600_000 || c.Kind != "spoken" {
+	if err != nil || c == nil || c.Title != "Song" || c.PositionMS != 10_000 || c.AlbumID != musicAlbum || c.Finished {
 		t.Fatalf("continue = %+v %v", c, err)
 	}
 	if pos, _ := s.ResumePosition(ctx, drama); pos != 600_000 {
@@ -83,8 +83,11 @@ func TestContinueAndSpoken(t *testing.T) {
 		t.Fatalf("unfinished spoken = %d", len(spoken))
 	}
 	s.RecordPlay(ctx, PlayReport{Session: "c", AssetID: drama, PositionMS: 1_800_000, ListenedMS: 1_200_000, Finished: true})
-	if c, _ := s.Continue(ctx); c != nil {
-		t.Fatalf("finished drama still offered: %+v", c)
+	if c, _ := s.Continue(ctx); c == nil || c.Title != "Episode 1" || !c.Finished {
+		t.Fatalf("after finishing the drama, continue = %+v (want it, marked finished)", c)
+	}
+	if spoken, _ := s.UnfinishedSpoken(ctx, 10); len(spoken) != 0 {
+		t.Fatalf("finished drama still listed as unfinished: %+v", spoken)
 	}
 	recent, _ := s.RecentlyPlayedAlbums(ctx, 10)
 	if len(recent) != 1 || recent[0].ID != musicAlbum { // the drama plays had no album context

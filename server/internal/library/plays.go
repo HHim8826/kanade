@@ -112,6 +112,8 @@ func (s *Store) ResumePosition(ctx context.Context, assetID int64) (int64, error
 type ResumeItem struct {
 	TrackItem
 	PositionMS int64 `json:"position_ms"`
+	// Finished: played to the end (or within the last 30 s), so "continue" means the next track.
+	Finished bool `json:"finished"`
 }
 
 // unfinished lists the latest unfinished playback per file, newest first.
@@ -138,33 +140,53 @@ func (s *Store) unfinished(ctx context.Context, where string, limit int) ([]Resu
 	rows.Close()
 	out := []ResumeItem{}
 	for _, h := range hits {
-		items, err := scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id = ?`, h.track))
+		it, err := s.resumeItem(ctx, h.track, h.pos, h.album)
 		if err != nil {
 			return nil, err
 		}
-		if len(items) == 0 {
-			continue
+		if it != nil {
+			out = append(out, *it)
 		}
-		it := ResumeItem{TrackItem: items[0], PositionMS: h.pos}
-		if h.album != 0 { // resume in the album it was played from
-			var title string
-			var cover int64
-			if s.db.QueryRowContext(ctx, `SELECT title, coalesce(cover_id, 0) FROM albums WHERE id = ?`, h.album).Scan(&title, &cover) == nil {
-				it.AlbumID, it.Album, it.CoverID = h.album, title, cover
-			}
-		}
-		out = append(out, it)
 	}
 	return out, nil
 }
 
-// Continue is the most recent unfinished playback, for the home page.
-func (s *Store) Continue(ctx context.Context) (*ResumeItem, error) {
-	list, err := s.unfinished(ctx, "", 1)
-	if err != nil || len(list) == 0 {
+// resumeItem describes a track at a position, inside the album it was played from when known.
+func (s *Store) resumeItem(ctx context.Context, trackID, pos, albumID int64) (*ResumeItem, error) {
+	items, err := scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id = ?`, trackID))
+	if err != nil || len(items) == 0 {
 		return nil, err
 	}
-	return &list[0], nil
+	it := ResumeItem{TrackItem: items[0], PositionMS: pos}
+	if albumID != 0 {
+		var title string
+		var cover int64
+		if s.db.QueryRowContext(ctx, `SELECT title, coalesce(cover_id, 0) FROM albums WHERE id = ?`, albumID).Scan(&title, &cover) == nil {
+			it.AlbumID, it.Album, it.CoverID = albumID, title, cover
+		}
+	}
+	return &it, nil
+}
+
+// Continue is the latest playback, finished or not (decision D9, revised after use): the home page
+// picks up where listening stopped, or with the next track when that one was played to the end.
+func (s *Store) Continue(ctx context.Context) (*ResumeItem, error) {
+	var track, pos, album, dur int64
+	var finished int
+	err := s.db.QueryRowContext(ctx, `SELECT track_id, position_ms, coalesce(album_id, 0), duration_ms, finished
+		FROM plays WHERE updated_at > ? ORDER BY updated_at DESC, id DESC LIMIT 1`,
+		db.Now()-resumeWindow.Milliseconds()).Scan(&track, &pos, &album, &dur, &finished)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	it, err := s.resumeItem(ctx, track, pos, album)
+	if it != nil {
+		it.Finished = finished == 1 || (dur > 0 && pos > dur-resumeMarginMS)
+	}
+	return it, err
 }
 
 // UnfinishedSpoken lists drama CDs and radio left partway.

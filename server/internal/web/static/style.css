@@ -232,7 +232,8 @@ body.locked { overflow: hidden; }
 .resume-card { display: flex; align-items: center; gap: 16px; padding: 12px 16px 12px 12px; margin-bottom: 12px; background: var(--secondary-container); color: var(--on-secondary-container); }
 .resume-card .sub { color: inherit; opacity: .8; }
 .cover.resume-cover { width: 88px; height: 88px; flex: none; }
-.resume-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.resume-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; text-align: left; }
+.resume-open { flex: 1; min-width: 0; display: flex; align-items: center; gap: 16px; padding: 0; border: 0; background: none; font: inherit; color: inherit; cursor: pointer; }
 .resume-text .title { font-size: 17px; font-weight: 600; }
 .summary-card { display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-bottom: 12px; }
 .pill { display: inline-block; padding: 2px 10px; margin: 2px 6px 2px 0; border-radius: 12px; font-size: 13px; background: var(--surface-container-high); }

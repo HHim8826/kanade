@@ -43,9 +43,14 @@ let session = null;
 function report(finished = false, keepalive = false) {
   if (!session) return;
   const p = session;
+  const position = Math.round(audio.currentTime * 1000), heard = Math.round(p.heard);
+  // Nothing new (say, a paused tab going to the background): stay quiet, or this old playback
+  // would become the "latest" one on the home page over what was played since on another device.
+  if (!finished && p.sent && p.sent.position === position && p.sent.heard === heard) return;
+  p.sent = { position, heard };
   post('/plays', {
     session: p.id, asset_id: p.item.assetId, album_id: p.item.albumId || 0,
-    position_ms: Math.round(audio.currentTime * 1000), listened_ms: Math.round(p.heard), finished,
+    position_ms: position, listened_ms: heard, finished,
   }, { keepalive }).catch(() => {});
 }
 
@@ -87,6 +92,7 @@ audio.addEventListener('timeupdate', () => {
   session.last = t;
 });
 audio.addEventListener('seeking', () => session && (session.last = null));
+audio.addEventListener('playing', () => report()); // the home page shows the latest playback from its start
 setInterval(() => !audio.paused && report(), 15000);
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && report(false, true));
 addEventListener('pagehide', () => report(false, true));

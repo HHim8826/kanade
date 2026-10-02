@@ -1,6 +1,6 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
-import { fromEntry, fromTrack, playQueue, player, shuffled } from '../player.js';
+import { fromEntry, fromTrack, playQueue, player, shuffled, toggle } from '../player.js';
 import { href } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, toast, useLoad } from '../ui.js';
@@ -47,19 +47,56 @@ function Shelf({ title, albums }) {
 }
 
 // Resume a half-heard track inside the album it was played from, so the queue continues naturally.
+// A finished track moves on to the next one (back to the start after the album's last track).
 async function resume(item) {
   if (item.album_id) {
     try {
       const a = await get('/albums/' + item.album_id);
       const items = a.entries.map((e) => fromEntry(e, a));
       const i = items.findIndex((q) => q.assetId === item.asset.id);
+      if (i >= 0 && item.finished) return playQueue(items, i + 1 < items.length ? i + 1 : 0);
       if (i >= 0) {
         items[i] = { ...items[i], resumeMs: item.position_ms };
         return playQueue(items, i);
       }
     } catch { /* fall back to the single track */ }
   }
-  playQueue([{ ...fromTrack(item), resumeMs: item.position_ms }], 0);
+  playQueue([{ ...fromTrack(item), resumeMs: item.finished ? 0 : item.position_ms }], 0);
+}
+
+// The top card: what is playing in this tab, or else the latest playback, from any device.
+function NowCard() {
+  const s = useStore(player);
+  const item = s.queue[s.index];
+  return html`<div class="card resume-card">
+    <button class="resume-open" onClick=${() => player.set({ nowPlayingOpen: true })} aria-label="開啟正在播放">
+      <${Cover} id=${item.coverId} size=${300} className="resume-cover" />
+      <span class="resume-text">
+        <span class="overline">${s.playing || s.buffering ? '正在播放' : '已暫停'}</span>
+        <span class="title">${item.title}</span>
+        <span class="sub">${[item.artist, item.album].filter(Boolean).join(' · ')}</span>
+        <${ProgressLine} position=${s.time} duration=${s.duration} />
+        <span class="sub">${fmtTime(s.time * 1000)} / ${fmtTime(s.duration * 1000)}</span>
+      </span>
+    </button>
+    <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} filled size=${28} onClick=${toggle} />
+  </div>`;
+}
+
+function LastPlayedCard({ item }) {
+  const dur = item.asset.duration_ms;
+  const action = !item.finished ? (item.kind === 'spoken' ? '繼續收聽' : '繼續播放') : item.album_id ? '播放下一首' : '重新播放';
+  return html`<div class="card resume-card">
+    <${Cover} id=${item.cover_id} size=${300} className="resume-cover" />
+    <div class="resume-text">
+      <div class="overline">${item.finished ? '上次聽完' : action}</div>
+      <div class="title">${item.title}</div>
+      <div class="sub">${[item.artist, item.album].filter(Boolean).join(' · ')}</div>
+      <${ProgressLine} position=${item.finished ? dur : item.position_ms} duration=${dur} />
+      <div class="sub">${item.finished ? fmtTime(dur) : `${fmtTime(item.position_ms)} / ${fmtTime(dur)}`}</div>
+    </div>
+    <${IconButton} icon=${item.finished && item.album_id ? 'next' : 'play'} label=${action} filled size=${28} onClick=${() => resume(item)} />
+  </div>`;
 }
 
 async function playRandomAlbum() {
@@ -83,28 +120,20 @@ const downloadLabels = { metadata: '取得清單', selecting: '等待選檔', qu
 export function Home() {
   const home = useLoad(() => get('/home'), []);
   const d = home.data;
+  const live = useStore(player, (s) => s.queue[s.index]); // re-renders on track change, not on every tick
   const busy = d && (Object.keys(d.tasks.downloads).length > 0 || d.tasks.importing > 0);
   const att = d && d.attention;
   const empty = d && !d.recently_added.length;
-  // The track in the "continue" card is not repeated in the drama list below it.
-  const spoken = d ? d.spoken.filter((t) => !d.continue || t.id !== d.continue.id) : [];
+  // The track in the top card is not repeated in the drama list below it.
+  const shown = live ? live.assetId : d && d.continue ? d.continue.asset.id : 0;
+  const spoken = d ? d.spoken.filter((t) => t.asset.id !== shown) : [];
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">首頁</h1>
       <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="shuffle" />隨便聽一張</button>
     </div>
     ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
-    ${d && d.continue && html`<div class="card resume-card">
-      <${Cover} id=${d.continue.cover_id} size=${300} className="resume-cover" />
-      <div class="resume-text">
-        <div class="overline">${d.continue.kind === 'spoken' ? '繼續收聽' : '繼續播放'}</div>
-        <div class="title">${d.continue.title}</div>
-        <div class="sub">${[d.continue.artist, d.continue.album].filter(Boolean).join(' · ')}</div>
-        <${ProgressLine} position=${d.continue.position_ms} duration=${d.continue.asset.duration_ms} />
-        <div class="sub">${fmtTime(d.continue.position_ms)} / ${fmtTime(d.continue.asset.duration_ms)}</div>
-      </div>
-      <${IconButton} icon="play" label="繼續播放" filled size=${28} onClick=${() => resume(d.continue)} />
-    </div>`}
+    ${live ? html`<${NowCard} />` : d && d.continue && html`<${LastPlayedCard} item=${d.continue} />`}
     ${(busy || (att && att.failed_imports > 0)) && html`<a class="card summary-card" href=${href('tasks')}>
       <${Icon} name="tasks" />
       <span class="grow">
