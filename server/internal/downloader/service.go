@@ -106,7 +106,9 @@ var btih = regexp.MustCompile(`(?i)^magnet:\?.*xt=urn:btih:`)
 func (s *Service) SetLowDisk(on bool) { s.lowDisk.Store(on) }
 
 // PauseForDisk pauses every transfer that writes to disk (seeding goes on), marking them so that
-// ResumeAfterDisk picks them up again.
+// ResumeAfterDisk picks them up again. The mark is written before aria2 is told, and taken back if
+// aria2 refuses, so the database never claims a pause that did not happen; an error leaves the rest
+// for the guard's next check.
 func (s *Service) PauseForDisk(ctx context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -121,21 +123,43 @@ func (s *Service) PauseForDisk(ctx context.Context) (int, error) {
 	var list []dl
 	for rows.Next() {
 		var d dl
-		if rows.Scan(&d.id, &d.gid, &d.state) == nil {
-			list = append(list, d)
+		if err := rows.Scan(&d.id, &d.gid, &d.state); err != nil {
+			rows.Close()
+			return 0, err
 		}
+		list = append(list, d)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	paused := 0
 	for _, d := range list {
+		r, err := s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, paused_by = 'disk', error = ?, updated_at = ? WHERE id = ? AND state = ?`,
+			StatePaused, "paused: the disk is nearly full; it continues by itself once space is freed", db.Now(), d.id, d.state)
+		if err != nil {
+			return paused, err
+		}
+		if n, err := r.RowsAffected(); err != nil || n == 0 {
+			continue // changed meanwhile
+		}
 		if d.state == StateDownloading && d.gid != "" {
 			if err := s.aria.RPC.Call(ctx, "forcePause", nil, d.gid); err != nil && !IsNotFound(err) {
-				return 0, err
+				s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, paused_by = '', error = '', updated_at = ? WHERE id = ?`,
+					d.state, db.Now(), d.id)
+				return paused, err
 			}
 		}
-		s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, paused_by = 'disk', error = ?, updated_at = ? WHERE id = ?`,
-			StatePaused, "paused: the disk is nearly full; it continues by itself once space is freed", db.Now(), d.id)
+		paused++
 	}
-	return len(list), nil
+	return paused, nil
+}
+
+// DiskPaused counts the downloads the disk guard has paused, so a restarted guard knows space was low.
+func (s *Service) DiskPaused(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM downloads WHERE state = ? AND paused_by = 'disk'`, StatePaused).Scan(&n)
+	return n, err
 }
 
 // ResumeAfterDisk queues again what the disk guard paused.

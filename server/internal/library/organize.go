@@ -1139,6 +1139,12 @@ func (s *Store) targetName(ctx context.Context, target string, id int64, row *st
 
 // ---- permanent deletion ----
 
+// AlbumTrackIDs lists the album's tracks, including those whose file is missing from Drive, which
+// album pages leave out.
+func (s *Store) AlbumTrackIDs(ctx context.Context, albumID int64) ([]int64, error) {
+	return idsTx(ctx, s.db, `SELECT track_id FROM album_entries WHERE album_id = ? GROUP BY track_id ORDER BY min(id)`, albumID)
+}
+
 // DeleteTrack removes a track for good, with its entries, playlist items, favorite, lyrics and
 // plays. Files that no other track uses leave the library; their Drive file IDs are returned so the
 // caller can move them to the Drive trash. This cannot be undone and is logged as an empty action.

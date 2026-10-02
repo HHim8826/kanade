@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -134,7 +135,7 @@ func TestFarSeekStartsSecondFillerWithoutRefetching(t *testing.T) {
 
 func TestBudgetEvictsIdleFiles(t *testing.T) {
 	const size = 4 * blockSize
-	c, _ := newCache(t, size, 2*size, 0)
+	c, src := newCache(t, 3*size, 2*size, 0)
 	for _, id := range []string{"a", "b"} {
 		get(c, id, size, "")
 	}
@@ -150,8 +151,70 @@ func TestBudgetEvictsIdleFiles(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("files in cache = %d, want 2 within budget", n)
 	}
-	if rec := get(c, "big", 3*size, ""); rec.Code != http.StatusServiceUnavailable {
-		t.Fatalf("file over budget: %d", rec.Code)
+	// A file larger than the whole cache is passed straight through.
+	rec := get(c, "big", 3*size, "")
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), src.data) || c.Used() > 2*size {
+		t.Fatalf("file over budget: %d, %d bytes, used %d", rec.Code, rec.Body.Len(), c.Used())
+	}
+}
+
+// The budget holds even when the cached files were used moments ago, and with files in use a new
+// one is passed through rather than cached.
+func TestBudgetIsHard(t *testing.T) {
+	const size = 2 * blockSize
+	c, src := newCache(t, size, size, 0)
+	get(c, "a", size, "")
+	rec := get(c, "b", size, "") // a was just played: still dropped, since b does not fit beside it
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), src.data) || c.Used() > size {
+		t.Fatalf("recently used: %d, used %d", rec.Code, c.Used())
+	}
+	held, err := c.acquire("b", size) // b is being played
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = get(c, "c", size, "bytes=10-99")
+	if rec.Code != http.StatusPartialContent || !bytes.Equal(rec.Body.Bytes(), src.data[10:100]) || c.Used() > size {
+		t.Fatalf("pass-through: %d, used %d", rec.Code, c.Used())
+	}
+	c.mu.Lock()
+	_, cached := c.files["c"]
+	c.mu.Unlock()
+	if cached {
+		t.Fatal("c was cached over the budget")
+	}
+	c.release(held)
+	if err := c.Prefetch("d", size); err != nil || c.Used() > size {
+		t.Fatalf("prefetch: %v, used %d", err, c.Used())
+	}
+	// Low disk: the same limits, and nothing idle is kept.
+	c.SetLean(true)
+	get(c, "e", size, "")
+	if c.Used() > size {
+		t.Fatalf("lean: used %d", c.Used())
+	}
+}
+
+// A file whose Drive content changed is dropped, at once or after its last reader.
+func TestForget(t *testing.T) {
+	const size = 2 * blockSize
+	c, src := newCache(t, size, 2*size, 0)
+	get(c, "a", size, "")
+	c.Forget("a")
+	if c.Used() != 0 {
+		t.Fatalf("used %d after forget", c.Used())
+	}
+	held, _ := c.acquire("a", size)
+	c.Forget("a")
+	if rec := get(c, "a", size, ""); !bytes.Equal(rec.Body.Bytes(), src.data) || c.Used() != 2*size {
+		t.Fatalf("fresh copy beside the old one: used %d", c.Used()) // both counted
+	}
+	old := held.f.Name()
+	c.release(held)
+	if c.Used() != size {
+		t.Fatalf("old copy kept: used %d", c.Used())
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("old file still on disk: %v", err)
 	}
 }
 
@@ -171,5 +234,41 @@ func TestClientDisconnectStopsWaiting(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("request kept waiting after the client left")
+	}
+}
+
+// Playing, prefetching, trimming and forgetting at once stays within the budget (run with -race).
+func TestConcurrentUseKeepsBudget(t *testing.T) {
+	const size = blockSize
+	c, src := newCache(t, size, 2*size, time.Millisecond)
+	var wg sync.WaitGroup
+	var over atomic.Bool
+	for g := 0; g < 8; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 30; i++ {
+				id := fmt.Sprint((g + i) % 5)
+				switch i % 6 {
+				case 0:
+					c.Prefetch(id, size)
+				case 1:
+					c.Trim()
+				case 2:
+					c.Forget(id)
+				default:
+					if rec := get(c, id, size, "bytes=0-1023"); !bytes.Equal(rec.Body.Bytes(), src.data[:1024]) {
+						t.Errorf("wrong bytes for %s: %d", id, rec.Code)
+					}
+				}
+				if c.Used() > 2*size {
+					over.Store(true)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	if over.Load() {
+		t.Fatal("went over the budget")
 	}
 }

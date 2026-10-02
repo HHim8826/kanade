@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
@@ -56,6 +57,7 @@ type Importer struct {
 	progress     map[int64][2]int64       // item ID -> bytes sent, total
 	covers       map[string]int64         // directory -> cover ID, for the current run
 	driveDirs    map[string][]gdrive.File // inbox folder -> its files, for the current batch
+	inboxWaiting atomic.Int64             // new inbox files the last scan left for later
 	albumArtists map[string]string        // batch|album folder|album -> decided album artist
 
 	// OnBatchDone runs once when a batch has no pending items left, or is canceled; failed counts
@@ -323,6 +325,11 @@ func (im *Importer) batchDone(ctx context.Context, batchID int64) {
 	im.mu.Lock()
 	clear(im.driveDirs) // the next inbox batch lists folders afresh
 	im.mu.Unlock()
+	if kind == "inbox" {
+		if err := im.tidyInbox(ctx, batchID); err != nil {
+			im.log.Warn("tidy inbox", "batch", batchID, "err", err)
+		}
+	}
 	if im.OnBatchDone != nil {
 		im.OnBatchDone(ctx, kind, source, failed)
 	}

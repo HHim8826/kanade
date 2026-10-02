@@ -19,7 +19,10 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"time"
+
+	"github.com/HHim8826/kanade/server/internal/proc"
 )
 
 // RPC is a minimal aria2 JSON-RPC client.
@@ -220,6 +223,7 @@ func (a *Aria2) runOnce(ctx context.Context) error {
 	}
 	a.RPC.url = fmt.Sprintf("http://127.0.0.1:%d/jsonrpc", port)
 	cmd := exec.Command(a.bin, "--conf-path="+conf, "--stop-with-process="+strconv.Itoa(os.Getpid()))
+	proc.DieWithParent(cmd, syscall.SIGTERM) // also when the server is killed outright: aria2 saves its session and exits
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {

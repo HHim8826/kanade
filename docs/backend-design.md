@@ -19,15 +19,17 @@ DIR/
   cache/              串流快取（D7）
   thumbs/             封面縮圖
   aria2/              aria2 設定、session 檔、日誌
+  logs/               服務日誌 kanade.log（10 MB 輪替、保留 5 份，P2-6）
 ```
 
 ### Drive 內的位置
 
-所有寫入都在平台根資料夾 `ser1ka Music` 之下（D1）：
+所有寫入都在平台根資料夾 `Kanade` 之下（D1）：
 
 - `library/<專輯歌手>/<專輯>/`：音檔。路徑取第一次匯入時的資料，之後不因修改資料而搬移；資料庫才是唯一依據。
 - `covers/`：封面。
 - `sidecars/`：CUE、LOG 等旁附檔。
+- `inbox/`：收件匣（D6，P2-6）。放進來的音樂就地歸檔進 `library/`；曲庫已有的移到 `inbox/重複`，處理完剩下的移到 `inbox/已處理`。
 
 ## 套件分層（`server/internal/`）
 
@@ -44,7 +46,11 @@ DIR/
 | `ffmpeg` | FFmpeg 子程序：轉 FLAC、依 CUE 分軌、PCM MD5 驗證（P2-4） |
 | `identify` | MusicBrainz 查詢與差異比對（P2-2） |
 | `rss` | RSS／Atom 解析、輪詢、規則、自動下載（P2-5） |
-| `stream` | D7 播放快取 |
+| `stream` | D7 播放快取（硬性容量上限，放不下時直接轉送） |
+| `drivesync` | Drive 變更與完整對帳、基準對帳、收件匣排程（P2-6） |
+| `diskguard` | 低磁碟監控：清快取、暫停下載、拒絕新上傳／下載（P2-6） |
+| `logfile` | 日誌檔輪替（P2-6） |
+| `proc` | 讓 aria2、FFmpeg 子程序隨主程序結束（P2-6） |
 | `api` | HTTP 路由、驗證中介層、頁面 |
 
 ## 資料模型（計畫書 §4 三層）
@@ -132,6 +138,10 @@ DIR/
 | `GET /albums/{id}/identify`、`GET`／`POST /albums/{id}/identify/{release}` | MusicBrainz 候選；差異；套用勾選的 `keys` |
 | `GET`／`PATCH /artists/{id}` | 歌手與歌曲、別名；改名（`name`）、別名（`aliases`） |
 | `GET /edits?limit&before`、`GET /edits/{id}`、`POST /edits/{id}/undo` | 修改紀錄、單筆明細、撤回（部分欄位保留時回傳 `conflicts`；全部無法撤回為 409） |
+| `GET /drive/sync` | 同步狀態：上次變更檢查、上次完整對帳與結果、是否進行中、基準對帳是否未完成、收件匣上次檢查 |
+| `POST /drive/reconcile` | 在背景開始完整對帳（202；已在進行時 409） |
+| `POST /drive/inbox` | 立即檢查收件匣：`{"files": 排入匯入的數量, "waiting": 剛放進來、等下次的數量}` |
+| `GET /library/missing` | 音檔在 Drive 遺失的歌曲 |
 
 ## 階段
 
@@ -216,10 +226,19 @@ DIR/
 - 測試：以真實 Nyaa feed（2026-10-02 取得、裁成兩條）為解析樣本；Atom、Shift-JIS feed、base32 magnet、只有 info hash、只有網頁、不是 feed 的 HTML；規則（全半形、平片假名、排除優先）；基準、自動下載只對之後的新條目、條件式請求 304、手動下載、關閉再開啟自動下載重設基準、站內搜尋、失敗退避與恢復。
 - 實測（Chrome，桌面與手機寬度）：以 Nyaa 範本（無損、關鍵字 ARIA）新增來源，第一次更新取得 75 條；篩選、站內搜尋「Euforia」、來源頁立即更新、編輯規則與自動下載選項都正常。沒有按「下載」、也沒有儲存自動下載，避免實際下載受版權保護的內容；下載流程由單元測試與先前的合法測試 torrent（B3）涵蓋。測試來源已刪除。
 
+### P2-6 Drive 與資源（2026-10-02）
+
+- 遷移 11：`downloads.paused_by`（因磁碟暫停的標記）、`import_items.drive_id`／`drive_parent`／`drive_size`（收件匣項目）。部署前備份到 `var/backups/db-20261002-pre-0011.sqlite`。
+- 新套件 `drivesync`、`diskguard`、`logfile`、`proc`；`gdrive` 加上 Changes、清單、移動與 Range 讀取（`ReaderAt`）；`library.ObserveDriveFile` 依 checksum 與大小決定 verified／missing。
+- 設定 `drive_changes_token`（變更位置）、`drive_sync_baseline`（`done` 表示已有基準對帳）。
+- 測試：變更與完整對帳、基準對帳（首次與位置過期）、完整與增量對帳交錯時保留較新的觀測、同 ID 內容改寫不被信任；收件匣就地歸檔、重複移出、等待新檔案、上限只算可匯入的新檔案、掃描後被替換的檔案以新內容匯入、整理到 `inbox/已處理`；磁碟保護（快取足夠、暫停、邊界、重啟後維持）、暫停寫入失敗時回報且不啟動下載；快取硬性上限、轉送、Forget、並行使用（`-race`）。
+- 實測與重啟恢復結果見 `p2-design.md` P2-6。
+- 審查 issue #3、#33–#39 的修正包含在本階段。
+
 ## 使用方式（開發環境）
 
 ```bash
-# 啟動（工作目錄 server/）
+# 啟動（工作目錄 server/）；日誌寫到 var/logs/kanade.log，server.log 只留啟動前的輸出
 KANADE_DATA=/data/music-platform/var nohup ./bin/kanade serve >> /data/music-platform/var/server.log 2>&1 &
 # 帳號
 printf '%s\n' '新密碼至少10字' | KANADE_DATA=... ./bin/kanade user passwd admin

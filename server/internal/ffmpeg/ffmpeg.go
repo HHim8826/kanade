@@ -18,6 +18,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
+
+	"github.com/HHim8826/kanade/server/internal/proc"
 )
 
 // Tool is an FFmpeg installation.
@@ -58,11 +61,17 @@ func isExec(p string) bool {
 func (t *Tool) Path() string { return t.ffmpeg }
 
 // command builds an FFmpeg or FFprobe run at low priority.
+// It is killed if the server dies, so a restarted import never races a leftover run writing the
+// same output.
 func (t *Tool) command(ctx context.Context, bin string, args ...string) *exec.Cmd {
+	var cmd *exec.Cmd
 	if t.nice != "" {
-		return exec.CommandContext(ctx, t.nice, append([]string{"-n", "10", bin}, args...)...)
+		cmd = exec.CommandContext(ctx, t.nice, append([]string{"-n", "10", bin}, args...)...)
+	} else {
+		cmd = exec.CommandContext(ctx, bin, args...)
 	}
-	return exec.CommandContext(ctx, bin, args...)
+	proc.DieWithParent(cmd, syscall.SIGKILL)
+	return cmd
 }
 
 func (t *Tool) run(ctx context.Context, args ...string) error {

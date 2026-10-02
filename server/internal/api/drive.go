@@ -145,7 +145,7 @@ func (s *Server) driveInbox(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"files": n})
+	writeJSON(w, http.StatusOK, map[string]int{"files": n, "waiting": s.importer.InboxWaiting()})
 }
 
 func (s *Server) missing(w http.ResponseWriter, r *http.Request) {

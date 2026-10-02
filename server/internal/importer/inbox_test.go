@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
@@ -150,6 +151,35 @@ func TestInboxImportsInPlace(t *testing.T) {
 		t.Fatalf("asset %+v", a)
 	}
 	_ = f2
+	// What the batch left (lyrics, cover, notes) went to inbox/已處理 with its folder.
+	if p := dd.parentOf(album); p != "folder:inbox/"+inboxProcessed {
+		t.Fatalf("finished folder is in %q", p)
+	}
+
+	// A folder still receiving files waits for the next scan.
+	late := dd.add(inbox, "Still Copying", nil)
+	fresh := dd.add(late, "01.mp3", two)
+	dd.mu2.Lock()
+	m := dd.meta[fresh]
+	m.CreatedTime = time.Now().UTC().Format(time.RFC3339)
+	dd.meta[fresh] = m
+	dd.mu2.Unlock()
+	if n, _ := im.ScanInbox(ctx); n != 0 || im.InboxWaiting() != 1 {
+		t.Fatalf("queued %d, waiting %d", n, im.InboxWaiting())
+	}
+	dd.mu2.Lock()
+	m.CreatedTime = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	dd.meta[fresh] = m
+	dd.mu2.Unlock()
+	if n, _ := im.ScanInbox(ctx); n != 1 || im.InboxWaiting() != 0 {
+		t.Fatalf("settled folder: queued %d", n)
+	}
+	im.db.QueryRow(`SELECT max(id) FROM import_batches WHERE kind = 'inbox'`).Scan(&batch)
+	waitState(t, im, batch, BatchDone)
+	// Its file was a duplicate (set aside in inbox/重複), and the empty folder is tidied away.
+	if p := dd.parentOf(late); p != "folder:inbox/"+inboxProcessed {
+		t.Fatalf("settled folder is in %q", p)
+	}
 
 	// The same bytes dropped in again are set aside, not deleted and not imported twice.
 	again := dd.add(inbox, "copy.mp3", one)
@@ -167,4 +197,62 @@ func TestInboxImportsInPlace(t *testing.T) {
 func sha(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
+}
+
+// Covers, scans and files already handled do not use up the scan's limits.
+func TestInboxLimitCountsOnlyNewImportableFiles(t *testing.T) {
+	ctx := context.Background()
+	im, _, _ := setup(t)
+	dd := newInboxDrive()
+	im.drive = dd
+	inbox, _ := im.drive.Folder(ctx, InboxFolder)
+	scans := dd.add(inbox, "Scans", nil)
+	for i := 0; i < inboxBatchMax+100; i++ {
+		dd.add(scans, fmt.Sprintf("%04d.jpg", i), []byte{byte(i)})
+	}
+	tmp := t.TempDir()
+	taggedMP3(t, filepath.Join(tmp, "1.mp3"), map[string]string{"TIT2": "Late", "TPE1": "A", "TALB": "B"})
+	one, _ := os.ReadFile(filepath.Join(tmp, "1.mp3"))
+	dd.add(inbox, "late.mp3", one)
+	if n, err := im.ScanInbox(ctx); err != nil || n != 1 {
+		t.Fatalf("queued %d, %v", n, err)
+	}
+}
+
+// A file replaced after the scan is imported as what it is now, never under the scanned checksum.
+func TestInboxUsesCurrentContent(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	dd := newInboxDrive()
+	im.drive = dd
+	inbox, _ := im.drive.Folder(ctx, InboxFolder)
+	tmp := t.TempDir()
+	taggedMP3(t, filepath.Join(tmp, "old.mp3"), map[string]string{"TIT2": "Old", "TPE1": "A", "TALB": "B"})
+	taggedMP3(t, filepath.Join(tmp, "new.mp3"), map[string]string{"TIT2": "New", "TPE1": "A", "TALB": "B"})
+	old, _ := os.ReadFile(filepath.Join(tmp, "old.mp3"))
+	cur, _ := os.ReadFile(filepath.Join(tmp, "new.mp3"))
+	id := dd.add(inbox, "song.mp3", old)
+	if n, _ := im.ScanInbox(ctx); n != 1 {
+		t.Fatal("not queued")
+	}
+	dd.mu2.Lock() // replaced in Drive before the import gets to it
+	dd.files[id] = cur
+	m := dd.meta[id]
+	m.SHA256Checksum, m.Size = sha(cur), fmt.Sprint(len(cur))
+	dd.meta[id] = m
+	dd.mu2.Unlock()
+	startWorker(t, im)
+	var batch int64
+	im.db.QueryRow(`SELECT max(id) FROM import_batches`).Scan(&batch)
+	waitState(t, im, batch, BatchDone)
+	if a, _ := lib.AssetByHash(ctx, sha(old), int64(len(old))); a != nil {
+		t.Fatalf("published under the old checksum: %+v", a)
+	}
+	a, _ := lib.AssetByHash(ctx, sha(cur), int64(len(cur)))
+	if a == nil || a.State != library.AssetVerified || a.DriveFileID != id {
+		t.Fatalf("asset %+v", a)
+	}
+	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 || tracks[0].Title != "New" {
+		t.Fatalf("tracks %+v", tracks)
+	}
 }

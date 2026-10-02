@@ -2,6 +2,7 @@ package importer
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
@@ -23,11 +25,19 @@ import (
 // and, already being in Drive, moved into library/ on the Drive side instead of uploaded; Drive's
 // own SHA-256 finds files the library has. Files that need FFmpeg, CUE sheets and logs, and ZIPs
 // are fetched to staging first and then take the usual way. Nothing in the inbox is deleted:
-// duplicates are moved to inbox/重複.
+// duplicates are moved to inbox/重複, and what a finished batch leaves behind (originals that were
+// converted, covers, lyrics, skipped files) to inbox/已處理.
 
 const (
 	InboxFolder     = "inbox"
 	inboxDuplicates = "重複"
+	inboxProcessed  = "已處理"
+	// inboxSettle is how long a top-level folder must go without new files before it is imported,
+	// so an album still being copied in is not split across batches.
+	inboxSettle = 5 * time.Minute
+	// At most this many new files are looked at per scan and queued per batch.
+	inboxScanMax  = 20000
+	inboxBatchMax = 2000
 )
 
 // driveFiles is what the inbox needs from Drive beyond uploading; *gdrive.Client has it.
@@ -43,7 +53,8 @@ func (im *Importer) df() (driveFiles, bool) {
 	return d, ok
 }
 
-// ScanInbox queues the inbox's new files as one batch and says how many there were.
+// ScanInbox queues the inbox's new files as one batch and says how many there were. Files under
+// a top-level entry that changed in the last few minutes wait for the next scan (InboxWaiting).
 func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 	df, ok := im.df()
 	if !ok {
@@ -53,11 +64,32 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, err
 	}
+	known := map[string]bool{}
+	rows, err := im.db.QueryContext(ctx, `SELECT drive_id FROM import_items WHERE drive_id != ''`)
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		known[id] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	type found struct {
 		f           gdrive.File
 		rel, parent string
 	}
+	// Only files that can be imported and are new count toward the limits, so covers, scans and
+	// files already handled never crowd out the rest; what is over the batch limit waits for the
+	// next scan.
 	var files []found
+	newest := map[string]time.Time{} // per top-level folder, or loose file
 	var walk func(folder, prefix string, depth int) error
 	walk = func(folder, prefix string, depth int) error {
 		list, err := df.Children(ctx, folder)
@@ -66,7 +98,7 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 		}
 		for _, f := range list {
 			if f.MimeType == gdrive.FolderMime {
-				if (prefix == "" && f.Name == inboxDuplicates) || depth >= 8 {
+				if (prefix == "" && (f.Name == inboxDuplicates || f.Name == inboxProcessed)) || depth >= 8 {
 					continue
 				}
 				if err := walk(f.ID, prefix+f.Name+"/", depth+1); err != nil {
@@ -74,8 +106,13 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 				}
 				continue
 			}
-			if len(files) < 5000 {
-				files = append(files, found{f, prefix + f.Name, folder})
+			rel := prefix + f.Name
+			top, _, _ := strings.Cut(rel, "/")
+			if t, err := time.Parse(time.RFC3339, f.CreatedTime); err == nil && t.After(newest[top]) {
+				newest[top] = t
+			}
+			if !known[f.ID] && roleOf(rel) != "" && len(files) < inboxScanMax {
+				files = append(files, found{f, rel, folder})
 			}
 		}
 		return nil
@@ -83,24 +120,16 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 	if err := walk(root, "", 0); err != nil {
 		return 0, err
 	}
-	known := map[string]bool{}
-	rows, err := im.db.QueryContext(ctx, `SELECT drive_id FROM import_items WHERE drive_id != ''`)
-	if err != nil {
-		return 0, err
-	}
-	for rows.Next() {
-		var id string
-		if rows.Scan(&id) == nil {
-			known[id] = true
-		}
-	}
-	rows.Close()
 	var fresh []found
+	waiting := 0
 	for _, f := range files {
-		if !known[f.f.ID] && roleOf(f.rel) != "" {
+		if top, _, _ := strings.Cut(f.rel, "/"); time.Since(newest[top]) < inboxSettle {
+			waiting++
+		} else if len(fresh) < inboxBatchMax {
 			fresh = append(fresh, f)
 		}
 	}
+	im.inboxWaiting.Store(int64(waiting))
 	if len(fresh) == 0 {
 		return 0, nil
 	}
@@ -128,6 +157,110 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 	}
 	im.Wake()
 	return len(fresh), nil
+}
+
+// InboxWaiting is how many new inbox files the last scan left for later, as they were still
+// arriving.
+func (im *Importer) InboxWaiting() int { return int(im.inboxWaiting.Load()) }
+
+// tidyInbox moves what a finished inbox batch leaves behind into inbox/已處理: each top-level
+// folder whose importable files have all been imported, set aside or skipped, and the loose files
+// of the batch still in the inbox. Folders with failed files, or files no batch has handled yet,
+// stay where they are. Nothing is deleted.
+func (im *Importer) tidyInbox(ctx context.Context, batchID int64) error {
+	df, ok := im.df()
+	if !ok {
+		return nil
+	}
+	rows, err := im.db.QueryContext(ctx, `SELECT rel_path, drive_id, state FROM import_items WHERE batch_id = ? AND drive_id != ''`, batchID)
+	if err != nil {
+		return err
+	}
+	tops, loose := map[string]bool{}, map[string]bool{}
+	for rows.Next() {
+		var rel, id, state string
+		if err := rows.Scan(&rel, &id, &state); err != nil {
+			rows.Close()
+			return err
+		}
+		if top, _, nested := strings.Cut(rel, "/"); nested {
+			tops[top] = true
+		} else if inboxFinal[state] {
+			loose[id] = true
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || (len(tops) == 0 && len(loose) == 0) {
+		return err
+	}
+	root, err := im.drive.Folder(ctx, InboxFolder)
+	if err != nil {
+		return err
+	}
+	list, err := df.Children(ctx, root)
+	if err != nil {
+		return err
+	}
+	dest := ""
+	for _, f := range list {
+		if f.MimeType == gdrive.FolderMime {
+			if !tops[f.Name] || f.Name == inboxDuplicates || f.Name == inboxProcessed {
+				continue
+			}
+			if done, err := im.inboxFinished(ctx, df, f.ID, 0); err != nil || !done {
+				if err != nil {
+					return err
+				}
+				continue
+			}
+		} else if !loose[f.ID] {
+			continue
+		}
+		if dest == "" {
+			if dest, err = im.drive.Folder(ctx, InboxFolder+"/"+inboxProcessed); err != nil {
+				return err
+			}
+		}
+		if err := df.Move(ctx, f.ID, dest, []string{root}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// inboxFinal are the item states after which an inbox file needs nothing more.
+var inboxFinal = map[string]bool{StatePublished: true, StateDuplicate: true, StateSkipped: true,
+	StateExcluded: true, StateExpanded: true, StateSplit: true}
+
+// inboxFinished says whether every importable file below an inbox folder has been handled.
+func (im *Importer) inboxFinished(ctx context.Context, df driveFiles, folder string, depth int) (bool, error) {
+	if depth >= 8 {
+		return false, nil
+	}
+	list, err := df.Children(ctx, folder)
+	if err != nil {
+		return false, err
+	}
+	for _, f := range list {
+		if f.MimeType == gdrive.FolderMime {
+			if done, err := im.inboxFinished(ctx, df, f.ID, depth+1); err != nil || !done {
+				return false, err
+			}
+			continue
+		}
+		if roleOf(f.Name) == "" {
+			continue
+		}
+		var state string
+		err := im.db.QueryRowContext(ctx, `SELECT state FROM import_items WHERE drive_id = ? ORDER BY id DESC LIMIT 1`, f.ID).Scan(&state)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return false, err
+		}
+		if !inboxFinal[state] {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func roleOf(name string) string {
@@ -234,15 +367,31 @@ func (im *Importer) probeDrive(ctx context.Context, driveID string, size int64) 
 func (im *Importer) processDrive(ctx context.Context, it *item) (outcome, error) {
 	var out outcome
 	df, _ := im.df()
-	sha := it.sha
-	if sha == "" {
-		f, err := df.GetFile(ctx, it.driveID, "id,sha256Checksum")
+	// The file may have been replaced since the scan: take its identity now, and check it again
+	// once its tags are read, so new bytes are never published under an old checksum.
+	identity := func() (string, int64, []string, error) {
+		f, err := df.GetFile(ctx, it.driveID, "id,size,parents,sha256Checksum")
 		if err != nil {
-			return out, err
+			return "", 0, nil, err
 		}
-		if sha = strings.ToLower(f.SHA256Checksum); sha == "" {
-			return out, errors.New("Drive has not computed this file's checksum yet; retry in a while")
+		sha := strings.ToLower(f.SHA256Checksum)
+		if sha == "" {
+			return "", 0, nil, errors.New("Drive has not computed this file's checksum yet; retry in a while")
 		}
+		return sha, f.SizeBytes(), f.Parents, nil
+	}
+	sha, size, parents, err := identity()
+	if err != nil {
+		return out, err
+	}
+	if sha != it.sha || size != it.driveSize {
+		im.log.Info("inbox: file changed since the scan", "file", it.driveID)
+		it.sha, it.driveSize = sha, size
+		it.plan = nil // made from the old bytes' tags
+		im.db.ExecContext(ctx, `UPDATE import_items SET sha256 = ?, drive_size = ? WHERE id = ?`, sha, size, it.id)
+	}
+	if len(parents) > 0 {
+		it.driveParent = parents[0]
 	}
 	out.sha = sha
 	info, err := im.probeDrive(ctx, it.driveID, it.driveSize)
@@ -257,6 +406,11 @@ func (im *Importer) processDrive(ctx context.Context, it *item) (outcome, error)
 	if !info.Playable {
 		out.state, out.msg = StateSkipped, unplayable(info)
 		return out, nil
+	}
+	if again, againSize, _, err := identity(); err != nil {
+		return out, err
+	} else if again != sha || againSize != size {
+		return out, errors.New("the file changed in Drive while it was being read; retry to import the new version")
 	}
 	asset, err := im.lib.AssetByHash(ctx, sha, it.driveSize)
 	if err != nil {

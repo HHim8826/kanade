@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/library"
 )
@@ -59,7 +60,7 @@ func (s *Server) editTrack(w http.ResponseWriter, r *http.Request) {
 // Drive, which is only clutter, so it is logged and counted, not fatal.
 func (s *Server) trashFiles(r *http.Request, ids []string) (trashed, failed int) {
 	for _, id := range ids {
-		if err := s.drive.Trash(r.Context(), id); err != nil {
+		if err := s.drive.Trash(r.Context(), id); err != nil && !gdrive.IsNotFound(err) { // not found: already deleted in Drive
 			s.log.Warn("trash drive file", "file", id, "err", err)
 			failed++
 			continue
@@ -230,6 +231,11 @@ func (s *Server) deleteAlbum(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, library.ErrNotFound)
 		return
 	}
+	tracks, err := s.lib.AlbumTrackIDs(ctx, id) // with the ones missing from Drive
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
 	g, err := s.lib.RemoveEntries(ctx, id, nil)
 	if err != nil {
 		s.libError(w, r, err)
@@ -239,8 +245,8 @@ func (s *Server) deleteAlbum(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("tracks") == "1" {
 		var files []string
 		deleted := 0
-		for _, e := range d.Entries {
-			t, err := s.lib.Track(ctx, e.TrackID)
+		for _, tid := range tracks {
+			t, err := s.lib.Track(ctx, tid)
 			if err != nil {
 				s.internal(w, r, err)
 				return
@@ -248,7 +254,7 @@ func (s *Server) deleteAlbum(w http.ResponseWriter, r *http.Request) {
 			if t == nil || len(t.Entries) > 0 {
 				continue // already gone, or still on another album
 			}
-			f, err := s.lib.DeleteTrack(ctx, e.TrackID)
+			f, err := s.lib.DeleteTrack(ctx, tid)
 			if err != nil {
 				s.libError(w, r, err)
 				return

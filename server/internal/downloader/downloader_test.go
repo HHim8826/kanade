@@ -363,3 +363,43 @@ func TestAutoSelectTakesSuggestedFiles(t *testing.T) {
 		}
 	}
 }
+
+// A pause for low disk that cannot be written is reported, not claimed, and while space is low the
+// scheduler starts nothing, even a download whose pause was never recorded.
+func TestDiskPauseWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	tmp := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d, _ := db.Open(ctx, filepath.Join(tmp, "db.sqlite"))
+	defer d.Close()
+	aria := &Aria2{RPC: &RPC{url: "http://127.0.0.1:1/jsonrpc", http: http.DefaultClient}} // unreachable: any call fails
+	svc := NewService(d, aria, nil, filepath.Join(tmp, "downloads"), 2<<30, 0, log)
+	if _, err := d.Exec(`INSERT INTO downloads (source, name, state, gid, dir, files, created_at, updated_at)
+		VALUES ('test', 'q', 'queued', 'g1', ?, '[]', 0, 0)`, tmp); err != nil {
+		t.Fatal(err)
+	}
+	d.Exec(`CREATE TRIGGER no_pause BEFORE UPDATE OF state ON downloads WHEN NEW.state = 'paused'
+		BEGIN SELECT RAISE(FAIL, 'simulated write failure'); END`)
+	svc.SetLowDisk(true)
+	if n, err := svc.PauseForDisk(ctx); err == nil || n != 0 {
+		t.Fatalf("pause reported %d, %v", n, err)
+	}
+	svc.tick(ctx)
+	var state string
+	d.QueryRow(`SELECT state FROM downloads`).Scan(&state)
+	if state != StateQueued {
+		t.Fatalf("started while the disk is low: %s", state)
+	}
+	// Once writes work again the pause is recorded, and resuming finds it.
+	d.Exec(`DROP TRIGGER no_pause`)
+	if n, err := svc.PauseForDisk(ctx); err != nil || n != 1 {
+		t.Fatalf("pause: %d %v", n, err)
+	}
+	if n, _ := svc.DiskPaused(ctx); n != 1 {
+		t.Fatalf("disk paused = %d", n)
+	}
+	svc.SetLowDisk(false)
+	if n, err := svc.ResumeAfterDisk(ctx); err != nil || n != 1 {
+		t.Fatalf("resume: %d %v", n, err)
+	}
+}

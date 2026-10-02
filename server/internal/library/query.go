@@ -149,6 +149,11 @@ const trackSQL = `SELECT t.id, t.title, t.artist,
 		WHERE ta.track_id = t.id AND x.state = 'verified' ORDER BY ta.asset_id LIMIT 1)
 	LEFT JOIN albums fa ON fa.id = (SELECT e.album_id FROM album_entries e WHERE e.track_id = t.id ORDER BY e.id LIMIT 1)`
 
+// trackDetailSQL is trackSQL that also takes a file missing from Drive when there is no other, so
+// such a track can still be edited or deleted.
+var trackDetailSQL = strings.Replace(trackSQL, `x.state = 'verified' ORDER BY ta.asset_id`,
+	`x.state IN ('verified', 'missing') ORDER BY x.state = 'verified' DESC, ta.asset_id`, 1)
+
 func scanTracks(rows *sql.Rows, err error) ([]TrackItem, error) {
 	if err != nil {
 		return nil, err
@@ -241,17 +246,19 @@ type TrackDetail struct {
 	Version     string       `json:"version"`
 	MBRecording string       `json:"mb_recording,omitempty"`
 	Aliases     []string     `json:"aliases"`
-	Entries     []TrackEntry `json:"entries"` // every album the track is on
+	Entries     []TrackEntry `json:"entries"`           // every album the track is on
+	Missing     bool         `json:"missing,omitempty"` // its file is gone from Drive
 }
 
 // Track is one track with what its edit dialog shows; nil when there is no such track.
 func (s *Store) Track(ctx context.Context, id int64) (*TrackDetail, error) {
-	items, err := scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id = ?`, id))
+	items, err := scanTracks(s.db.QueryContext(ctx, trackDetailSQL+` WHERE t.id = ?`, id))
 	if err != nil || len(items) == 0 {
 		return nil, err
 	}
 	d := &TrackDetail{TrackItem: items[0], Entries: []TrackEntry{}}
-	if err := s.db.QueryRowContext(ctx, `SELECT version, mb_recording FROM tracks WHERE id = ?`, id).Scan(&d.Version, &d.MBRecording); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT t.version, t.mb_recording, a.state = ? FROM tracks t, assets a WHERE t.id = ? AND a.id = ?`,
+		AssetMissing, id, d.Asset.ID).Scan(&d.Version, &d.MBRecording, &d.Missing); err != nil {
 		return nil, err
 	}
 	if d.Aliases, err = aliasNames(ctx, s.db, "track", id); err != nil {

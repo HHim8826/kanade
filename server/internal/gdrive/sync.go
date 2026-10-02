@@ -29,7 +29,7 @@ type Change struct {
 	File    *File  `json:"file"`
 }
 
-const listFields = "id,name,mimeType,size,parents,trashed,md5Checksum,sha256Checksum"
+const listFields = "id,name,mimeType,size,parents,trashed,md5Checksum,sha256Checksum,createdTime"
 
 // Changes lists what changed in the Drive since token and returns the token to continue from.
 func (c *Client) Changes(ctx context.Context, token string) ([]Change, string, error) {

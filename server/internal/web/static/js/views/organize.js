@@ -180,6 +180,7 @@ function TrackEditor({ id, close }) {
       <button class="btn text" onClick=${close}>取消</button>
       <button class="btn filled" disabled=${busy} onClick=${save}>儲存</button>`}>
     ${t.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${t.error} onRetry=${t.reload} />`}
+    ${d && d.missing && html`<div class="task-error">這首歌的音檔已從 Google Drive 遺失，暫時無法播放。從 Drive 垃圾桶還原後會自動恢復；不要了的話可以永久刪除。</div>`}
     ${f && html`<div class="form-grid">
       <${Field} label="曲名" value=${f.title} onInput=${set('title')} wide />
       <${Field} label="歌手" value=${f.artist} onInput=${set('artist')} />

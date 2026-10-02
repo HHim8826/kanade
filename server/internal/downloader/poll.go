@@ -65,7 +65,7 @@ func (s *Service) tick(ctx context.Context) {
 			active = true
 		}
 	}
-	if !active { // one download at a time (plan §6); start the oldest queued one
+	if !active && !s.lowDisk.Load() { // one download at a time (plan §6); start the oldest queued one
 		for _, r := range list {
 			if r.State != StateQueued {
 				continue

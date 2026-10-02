@@ -296,3 +296,33 @@ func TestDeleteTrackKeepsSharedFiles(t *testing.T) {
 		t.Fatalf("shared file was released: %v %v", files, err)
 	}
 }
+
+func TestMissingTrackCanBeEditedAndDeleted(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	kept := publish(t, s, "m1", EntryInput{Title: "Kept", Album: "Gone", AlbumArtist: "A", TrackNo: 1})
+	lost := publish(t, s, "m2", EntryInput{Title: "Lost", Album: "Gone", AlbumArtist: "A", TrackNo: 2})
+	if n, missing, err := s.ObserveDriveFile(ctx, DriveObservation{ID: "drive-m2"}); n != 1 || !missing || err != nil {
+		t.Fatalf("mark: %d %v %v", n, missing, err)
+	}
+	tr, err := s.Track(ctx, lost.TrackID)
+	if err != nil || tr == nil || !tr.Missing {
+		t.Fatalf("missing track: %+v %v", tr, err)
+	}
+	if tr, _ := s.Track(ctx, kept.TrackID); tr == nil || tr.Missing {
+		t.Fatalf("kept track: %+v", tr)
+	}
+	album := albumOf(t, s, lost.EntryID)
+	if d, _ := s.Album(ctx, album); len(d.Entries) != 1 {
+		t.Fatalf("album page shows %d entries", len(d.Entries))
+	}
+	if ids, err := s.AlbumTrackIDs(ctx, album); err != nil || len(ids) != 2 {
+		t.Fatalf("album tracks %v %v", ids, err)
+	}
+	if files, err := s.DeleteTrack(ctx, lost.TrackID); err != nil || len(files) != 1 {
+		t.Fatalf("delete: %v %v", files, err)
+	}
+	if m, _ := s.Missing(ctx); len(m) != 0 {
+		t.Fatalf("still listed as missing: %+v", m)
+	}
+}

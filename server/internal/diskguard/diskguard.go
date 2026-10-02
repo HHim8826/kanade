@@ -22,6 +22,7 @@ type Downloads interface {
 	SetLowDisk(on bool)
 	PauseForDisk(ctx context.Context) (int, error)
 	ResumeAfterDisk(ctx context.Context) (int, error)
+	DiskPaused(ctx context.Context) (int, error) // paused by an earlier guard, before a restart
 }
 
 type Uploads interface {
@@ -41,8 +42,9 @@ type Guard struct {
 	UL      Uploads
 	Log     *slog.Logger
 
-	mu     sync.Mutex
-	status Status
+	mu      sync.Mutex
+	status  Status
+	resumed bool // the state left by a previous run has been looked at
 }
 
 // Status is what the task page shows.
@@ -85,6 +87,20 @@ func (g *Guard) Check(ctx context.Context) {
 	defer g.mu.Unlock()
 	st := &g.status
 	st.FreeBytes, st.ReserveBytes = free, g.Reserve
+	if !g.resumed { // downloads still paused for disk: space was low before a restart, keep holding
+		n, err := g.DL.DiskPaused(ctx)
+		if err != nil {
+			g.Log.Warn("disk guard: reading paused downloads", "err", err)
+			return
+		}
+		g.resumed = true
+		if n > 0 {
+			st.Low, st.Since, st.Stopped, st.Paused = true, db.Now(), true, n
+			g.Cache.SetLean(true)
+			g.DL.SetLowDisk(true)
+			g.UL.SetLowDisk(true)
+		}
+	}
 	switch {
 	case free < g.Reserve:
 		if !st.Low {
@@ -118,7 +134,6 @@ func (g *Guard) Check(ctx context.Context) {
 		g.Cache.SetLean(false)
 		g.DL.SetLowDisk(false)
 		g.UL.SetLowDisk(false)
-		// Also after a restart: downloads the guard paused before it continue now.
 		if n, err := g.DL.ResumeAfterDisk(ctx); err != nil {
 			g.Log.Warn("resuming downloads", "err", err)
 		} else if n > 0 {

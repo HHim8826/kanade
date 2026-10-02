@@ -28,6 +28,7 @@ type File struct {
 	Trashed        bool     `json:"trashed"`
 	MD5Checksum    string   `json:"md5Checksum"`
 	SHA256Checksum string   `json:"sha256Checksum"`
+	CreatedTime    string   `json:"createdTime"` // RFC 3339, when it appeared in this Drive
 }
 
 func (f File) SizeBytes() int64 { n, _ := strconv.ParseInt(f.Size, 10, 64); return n }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -90,19 +91,61 @@ func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, 
 	return err
 }
 
-// MarkDriveFile records what Drive says about a library file: gone (deleted or trashed) makes a
-// verified asset missing, and a missing one that is there again verified. It reports a change.
-func (s *Store) MarkDriveFile(ctx context.Context, driveID string, gone bool) (bool, error) {
-	from, to := AssetVerified, AssetMissing
-	if !gone {
-		from, to = AssetMissing, AssetVerified
-	}
-	r, err := s.db.ExecContext(ctx, `UPDATE assets SET state = ? WHERE drive_file_id = ? AND state = ?`, to, driveID, from)
+// DriveObservation is what Drive says about one library file.
+type DriveObservation struct {
+	ID      string
+	Present bool   // exists and is not in the trash
+	SHA256  string // hex; "" when Drive did not say
+	Size    int64  // 0 when Drive did not say
+}
+
+// ObserveDriveFile records what Drive says about a library file. A file that is there with the
+// asset's content keeps (or gets back) verified; one that is gone, or whose bytes were replaced
+// under the same file ID, is missing: the library never trusts content it has not checked. It
+// reports how many assets changed state and whether they are now missing.
+func (s *Store) ObserveDriveFile(ctx context.Context, o DriveObservation) (changed int, missing bool, err error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, sha256, size, state FROM assets WHERE drive_file_id = ? AND state IN (?, ?)`,
+		o.ID, AssetVerified, AssetMissing)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
-	n, _ := r.RowsAffected()
-	return n > 0, nil
+	type asset struct {
+		id         int64
+		sha, state string
+		size       int64
+	}
+	var list []asset
+	for rows.Next() {
+		var a asset
+		if err := rows.Scan(&a.id, &a.sha, &a.size, &a.state); err != nil {
+			rows.Close()
+			return 0, false, err
+		}
+		list = append(list, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	for _, a := range list {
+		same := o.Present && (o.SHA256 == "" || strings.EqualFold(o.SHA256, a.sha)) && (o.Size <= 0 || o.Size == a.size)
+		to := AssetVerified
+		if !same {
+			to = AssetMissing
+		}
+		missing = !same
+		if a.state == to {
+			continue
+		}
+		r, err := s.db.ExecContext(ctx, `UPDATE assets SET state = ? WHERE id = ? AND state = ?`, to, a.id, a.state)
+		if err != nil {
+			return changed, missing, err
+		}
+		if n, _ := r.RowsAffected(); n > 0 {
+			changed++
+		}
+	}
+	return changed, missing, nil
 }
 
 // DriveFiles lists the Drive file IDs of library files that should be there (verified or missing).

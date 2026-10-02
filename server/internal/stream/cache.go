@@ -1,6 +1,10 @@
 // Package stream serves audio to players from a local cache that is filled from Drive in the
 // background (decision D7): playing a track downloads the whole file once, so seeks after the
 // first few seconds are local reads instead of 0.6-second Drive round trips.
+//
+// The budget is a hard limit on the space the cached files may take (their full sizes, as each
+// grows to it). When files being played leave no room, a request is passed straight through from
+// Drive instead of cached, and a prefetch is skipped.
 package stream
 
 import (
@@ -47,9 +51,11 @@ type Cache struct {
 	log    *slog.Logger
 	Stats  Stats
 
-	mu    sync.Mutex
-	files map[string]*file
-	lean  atomic.Bool // low disk: keep only what is being played
+	mu      sync.Mutex
+	files   map[string]*file
+	retired map[*file]bool // forgotten while being read; still counted until the last reader leaves
+	seq     int64          // names cache files, so a new copy never reuses an old one's
+	lean    atomic.Bool    // low disk: keep only what is being played
 }
 
 // NewCache starts with an empty cache directory: block maps are not persisted, so a
@@ -61,7 +67,7 @@ func NewCache(src Source, dir string, budget int64, log *slog.Logger) (*Cache, e
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	return &Cache{src: src, dir: dir, budget: budget, log: log, files: map[string]*file{}}, nil
+	return &Cache{src: src, dir: dir, budget: budget, log: log, files: map[string]*file{}, retired: map[*file]bool{}}, nil
 }
 
 type filler struct {
@@ -82,27 +88,35 @@ type file struct {
 	failures int
 	lastErr  error
 	lastUse  time.Time
-	readers  int
+	readers  int  // requests and prefetches holding it; it is not dropped while held
+	stale    bool // its Drive file changed: dropped once the last reader leaves, never handed out again
 }
 
-func (c *Cache) open(id string, size int64) (*file, error) {
+// errFull means the file does not fit in the budget beside the files in use.
+var errFull = errors.New("the stream cache is full")
+
+// acquire returns the cached file for id, adding it if room can be made, and holds it (readers)
+// until release. errFull: no room, even after dropping everything not in use.
+func (c *Cache) acquire(id string, size int64) (*file, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cf, ok := c.files[id]; ok {
+		cf.mu.Lock()
+		defer cf.mu.Unlock()
 		if cf.size != size {
 			return nil, fmt.Errorf("cached size %d differs from %d", cf.size, size)
 		}
+		cf.readers++
+		cf.lastUse = time.Now()
 		return cf, nil
 	}
 	if size > c.budget {
-		return nil, errors.New("file is larger than the stream cache")
+		return nil, errFull
 	}
-	if c.lean.Load() {
-		c.evictLocked(c.budget) // everything idle goes before another file comes in
-	} else {
-		c.evictLocked(size)
+	if !c.evictLocked(size, c.lean.Load()) { // lean: everything not in use goes first
+		return nil, errFull
 	}
-	f, err := os.OpenFile(filepath.Join(c.dir, strings.NewReplacer("/", "_", "..", "_").Replace(id)), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	f, err := os.OpenFile(c.path(id), os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -110,57 +124,128 @@ func (c *Cache) open(id string, size int64) (*file, error) {
 		f.Close()
 		return nil, err
 	}
-	cf := &file{c: c, id: id, size: size, f: f, have: make([]bool, (size+blockSize-1)/blockSize), lastUse: time.Now()}
+	cf := &file{c: c, id: id, size: size, f: f, have: make([]bool, (size+blockSize-1)/blockSize), lastUse: time.Now(), readers: 1}
 	cf.cond = sync.NewCond(&cf.mu)
 	c.files[id] = cf
 	return cf, nil
 }
 
-// evictLocked drops idle files, least recently used first, until need more bytes fit.
-func (c *Cache) evictLocked(need int64) {
-	var used int64
-	list := make([]*file, 0, len(c.files))
-	for _, cf := range c.files {
-		used += cf.size
-		list = append(list, cf)
-	}
-	sort.Slice(list, func(i, j int) bool { return list[i].lastUse.Before(list[j].lastUse) })
-	for _, cf := range list {
-		if used+need <= c.budget {
-			return
-		}
-		cf.mu.Lock()
-		busy := cf.readers > 0 || time.Since(cf.lastUse) < idleGrace
-		if !busy {
-			for _, fl := range cf.fillers {
-				fl.cancel()
-			}
-		}
-		cf.mu.Unlock()
-		if busy {
-			continue
-		}
-		cf.f.Close()
-		os.Remove(cf.f.Name())
-		delete(c.files, cf.id)
-		used -= cf.size
+func (c *Cache) path(id string) string {
+	c.seq++
+	return filepath.Join(c.dir, strings.NewReplacer("/", "_", "..", "_").Replace(id)+"."+strconv.FormatInt(c.seq, 10))
+}
+
+// release lets go of a file from acquire.
+func (c *Cache) release(cf *file) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cf.mu.Lock()
+	cf.readers--
+	cf.lastUse = time.Now()
+	drop := cf.stale && cf.readers == 0
+	cf.mu.Unlock()
+	if drop {
+		c.dropLocked(cf)
 	}
 }
 
-// Trim drops every idle file and returns how many bytes of cache that freed (the disk guard).
+// usedLocked is the space taken by every cached file, forgotten ones still being read included.
+func (c *Cache) usedLocked() int64 {
+	var used int64
+	for _, cf := range c.files {
+		used += cf.size
+	}
+	for cf := range c.retired {
+		used += cf.size
+	}
+	return used
+}
+
+// evictLocked drops files nobody holds, least recently used first, until need more bytes fit:
+// first those idle for a while, then, if that is not enough, recently used ones too. With all, it
+// drops every file nobody holds. It reports whether need fits.
+func (c *Cache) evictLocked(need int64, all bool) bool {
+	type entry struct {
+		cf      *file
+		lastUse time.Time
+		readers int
+	}
+	used := c.usedLocked()
+	list := make([]entry, 0, len(c.files))
+	for _, cf := range c.files {
+		cf.mu.Lock() // lastUse and readers change under the file's own lock
+		list = append(list, entry{cf, cf.lastUse, cf.readers})
+		cf.mu.Unlock()
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].lastUse.Before(list[j].lastUse) })
+	for pass := 0; pass < 2; pass++ {
+		for i, e := range list {
+			if !all && used+need <= c.budget {
+				return true
+			}
+			// Nobody can take a reader while c.mu is held, so a file seen free stays free.
+			if e.cf == nil || e.readers > 0 || (pass == 0 && time.Since(e.lastUse) < idleGrace) {
+				continue
+			}
+			c.dropLocked(e.cf)
+			used -= e.cf.size
+			list[i].cf = nil
+		}
+	}
+	return used+need <= c.budget
+}
+
+// dropLocked removes a file from the cache, stopping its downloads.
+func (c *Cache) dropLocked(cf *file) {
+	cf.mu.Lock()
+	for _, fl := range cf.fillers {
+		fl.cancel()
+	}
+	cf.mu.Unlock()
+	cf.f.Close()
+	os.Remove(cf.f.Name())
+	if c.files[cf.id] == cf {
+		delete(c.files, cf.id)
+	}
+	delete(c.retired, cf)
+}
+
+// Used is the space the cached files take once complete; never more than the budget.
+func (c *Cache) Used() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.usedLocked()
+}
+
+// Trim drops every file nobody is using and returns how many bytes of cache that freed (the disk
+// guard).
 func (c *Cache) Trim() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	var before int64
-	for _, cf := range c.files {
-		before += cf.size
+	before := c.usedLocked()
+	c.evictLocked(0, true)
+	return before - c.usedLocked()
+}
+
+// Forget drops what is cached of a Drive file whose content changed or that is gone: at once, or
+// when its last reader leaves. Later requests fetch it afresh.
+func (c *Cache) Forget(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cf, ok := c.files[id]
+	if !ok {
+		return
 	}
-	c.evictLocked(c.budget)
-	var after int64
-	for _, cf := range c.files {
-		after += cf.size
+	cf.mu.Lock()
+	cf.stale = true
+	held := cf.readers > 0
+	cf.mu.Unlock()
+	if !held {
+		c.dropLocked(cf)
+		return
 	}
-	return before - after
+	delete(c.files, id)
+	c.retired[cf] = true
 }
 
 // SetLean keeps the cache to the files being played while the disk is low; prefetching stops.
@@ -171,13 +256,16 @@ func (c *Cache) Prefetch(id string, size int64) error {
 	if c.lean.Load() {
 		return nil
 	}
-	cf, err := c.open(id, size)
+	cf, err := c.acquire(id, size)
+	if errors.Is(err, errFull) {
+		return nil // no room: the track will be passed through when played
+	}
 	if err != nil {
 		return err
 	}
+	defer c.release(cf)
 	cf.mu.Lock()
 	defer cf.mu.Unlock()
-	cf.lastUse = time.Now()
 	if !cf.have[0] && !cf.coveredLocked(0) {
 		cf.startFillerLocked(0)
 	}
@@ -263,16 +351,8 @@ func (cf *file) fill(ctx context.Context, fl *filler) {
 }
 
 // copyRange writes bytes [start, end] to w as they become available.
+// The caller holds the file (acquire).
 func (cf *file) copyRange(ctx context.Context, w io.Writer, start, end int64) error {
-	cf.mu.Lock()
-	cf.readers++
-	cf.mu.Unlock()
-	defer func() {
-		cf.mu.Lock()
-		cf.readers--
-		cf.lastUse = time.Now()
-		cf.mu.Unlock()
-	}()
 	stop := context.AfterFunc(ctx, func() {
 		cf.mu.Lock()
 		cf.cond.Broadcast()
@@ -361,23 +441,51 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 		http.Error(w, err.Error(), http.StatusRequestedRangeNotSatisfiable)
 		return
 	}
-	cf, err := c.open(id, size)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	status := http.StatusOK
 	if partial {
 		h.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, size))
 		status = http.StatusPartialContent
 	}
+	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	if r.Method == http.MethodHead {
 		w.WriteHeader(status)
 		return
 	}
+	cf, err := c.acquire(id, size)
+	if errors.Is(err, errFull) {
+		c.passThrough(w, r, id, start, end, status)
+		return
+	}
+	if err != nil {
+		h.Del("Content-Length")
+		h.Del("Content-Range")
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer c.release(cf)
 	w.WriteHeader(status)
 	if err := cf.copyRange(r.Context(), w, start, end); err != nil && r.Context().Err() == nil {
 		c.log.Warn("stream", "file", id, "err", err)
+	}
+}
+
+// passThrough serves a range straight from Drive, without caching, when the cache has no room.
+func (c *Cache) passThrough(w http.ResponseWriter, r *http.Request, id string, start, end int64, status int) {
+	c.Stats.SourceRequests.Add(1)
+	resp, err := c.src.OpenRange(r.Context(), id, start, end)
+	if err != nil {
+		h := w.Header()
+		h.Del("Content-Length")
+		h.Del("Content-Range")
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(status)
+	n, err := io.Copy(w, io.LimitReader(resp.Body, end-start+1))
+	c.Stats.SourceBytes.Add(n)
+	c.Stats.ServedBytes.Add(n)
+	if err != nil && r.Context().Err() == nil {
+		c.log.Warn("stream pass-through", "file", id, "err", err)
 	}
 }
