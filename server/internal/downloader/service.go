@@ -68,6 +68,7 @@ type View struct {
 	FilesRemoved  bool       `json:"files_removed"`
 	CreatedAt     int64      `json:"created_at"`
 	CompletedAt   int64      `json:"completed_at,omitempty"`
+	AutoSelect    bool       `json:"auto_select,omitempty"` // started by an RSS rule: takes the suggested files itself
 	Files         []FileView `json:"files,omitempty"`
 }
 
@@ -98,9 +99,11 @@ func (s *Service) poke() {
 
 var btih = regexp.MustCompile(`(?i)^magnet:\?.*xt=urn:btih:`)
 
-// Add starts a download from a magnet link, a .torrent URL or an uploaded .torrent.
-// Torrents become paused aria2 tasks right away; magnets first fetch their metadata.
-func (s *Service) Add(ctx context.Context, uri string, torrent []byte) (int64, error) {
+// Add starts a download from a magnet link, a .torrent URL or .torrent bytes (uploaded, or fetched
+// by the caller; uri then names where they came from). Torrents become paused aria2 tasks right
+// away; magnets first fetch their metadata. With auto the suggested files are chosen as soon as the
+// file list is known (RSS auto-download); otherwise the task waits for the user.
+func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool) (int64, error) {
 	if !s.aria.Ready() {
 		return 0, ErrNotReady
 	}
@@ -109,7 +112,9 @@ func (s *Service) Add(ctx context.Context, uri string, torrent []byte) (int64, e
 	magnet := false
 	switch {
 	case len(torrent) > 0:
-		source = "upload"
+		if source == "" {
+			source = "upload"
+		}
 	case btih.MatchString(uri):
 		magnet = true
 	case strings.HasPrefix(uri, "https://"), strings.HasPrefix(uri, "http://"):
@@ -126,8 +131,8 @@ func (s *Service) Add(ctx context.Context, uri string, torrent []byte) (int64, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := db.Now()
-	r, err := s.db.ExecContext(ctx, `INSERT INTO downloads (source, state, dir, created_at, updated_at) VALUES (?, ?, '', ?, ?)`,
-		source, StateMetadata, now, now)
+	r, err := s.db.ExecContext(ctx, `INSERT INTO downloads (source, state, dir, auto_select, created_at, updated_at) VALUES (?, ?, '', ?, ?, ?)`,
+		source, StateMetadata, auto, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -190,14 +195,14 @@ type row struct {
 }
 
 const rowCols = `id, source, name, info_hash, meta_gid, gid, state, dir, files, total_bytes, done_bytes, uploaded_bytes,
-	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0)`
+	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select`
 
 func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	var r row
 	var files string
 	err := sc.Scan(&r.ID, &r.Source, &r.Name, &r.InfoHash, &r.metaGID, &r.gid, &r.State, &r.dir, &files, &r.TotalBytes,
 		&r.DoneBytes, &r.UploadedBytes, &r.DownSpeed, &r.UpSpeed, &r.Peers, &r.Error, &r.ImportBatchID, &r.FilesRemoved,
-		&r.CreatedAt, &r.CompletedAt)
+		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect)
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +285,10 @@ func freeSpace(dir string) int64 {
 func (s *Service) Select(ctx context.Context, id int64, indexes []int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.selectLocked(ctx, id, indexes)
+}
+
+func (s *Service) selectLocked(ctx context.Context, id int64, indexes []int) error {
 	r, err := s.load(ctx, id)
 	if err != nil {
 		return err

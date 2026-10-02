@@ -381,3 +381,24 @@ button.plain { border: 0; background: none; font: inherit; color: inherit; text-
 .import-items .row-more { width: 40px; height: 40px; flex: none; color: var(--on-surface-variant); }
 .path.small { font-size: 11px; opacity: .8; }
 .import-review .page-head > .grow { flex: 1 1 14em; }
+
+/* ---- RSS (P2-5) ---- */
+.toolbar .search-field.small { flex: 1 1 260px; margin: 0; }
+.check-field { display: inline-flex; align-items: center; gap: 8px; font-size: 14px; color: var(--on-surface); cursor: pointer; }
+.check-field input { width: 18px; height: 18px; accent-color: var(--primary); }
+.form-grid .check-field { margin-bottom: 4px; }
+.form-grid.three { grid-template-columns: 1fr 1fr 2fr; }
+@media (max-width: 560px) { .form-grid.three { grid-template-columns: 1fr; } }
+.template { margin-bottom: 16px; background: var(--surface-container); }
+.template .title { margin-bottom: 8px; }
+.feed-items { list-style: none; margin: 0; padding: 0; }
+.feed-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 4px; border-top: 1px solid var(--outline-variant); }
+.feed-item .title { overflow-wrap: anywhere; line-height: 1.4; }
+.feed-item .pill { font-size: 12px; margin: 2px 0; }
+.feed-actions { display: flex; gap: 4px; flex: none; margin-left: auto; }
+.live-results { margin-bottom: 16px; }
+.source-list .rules { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+details.auth { margin: 4px 0 8px; }
+details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-size: 14px; padding: 8px 0; }
+.feed-item > .grow { flex: 1 1 260px; }
+.feed-item .title { white-space: normal; overflow: visible; text-overflow: clip; }

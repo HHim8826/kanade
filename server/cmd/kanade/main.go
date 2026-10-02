@@ -29,6 +29,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
 )
@@ -152,13 +153,15 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	mb := identify.New(strings.TrimRight(cfg.PublicURL, "/") + "/")
 	mb.Log = log
+	feeds := rss.New(d, downloads, strings.TrimRight(cfg.PublicURL, "/")+"/", log)
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log,
-		Identify: mb})
+		Identify: mb, RSS: feeds})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
 	go downloads.Run(ctx)
+	go feeds.Run(ctx)
 
 	has, err := authSvc.HasUsers(ctx)
 	if err != nil {

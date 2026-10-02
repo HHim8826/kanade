@@ -43,6 +43,7 @@ DIR/
 | `downloader` | aria2 子程序與 JSON-RPC |
 | `ffmpeg` | FFmpeg 子程序：轉 FLAC、依 CUE 分軌、PCM MD5 驗證（P2-4） |
 | `identify` | MusicBrainz 查詢與差異比對（P2-2） |
+| `rss` | RSS／Atom 解析、輪詢、規則、自動下載（P2-5） |
 | `stream` | D7 播放快取 |
 | `api` | HTTP 路由、驗證中介層、頁面 |
 
@@ -70,6 +71,7 @@ DIR/
 | `edit_groups`、`edits` | 修改紀錄：每個操作一組，逐欄記舊值與新值，供撤回 |
 | `sidecars` | 與專輯一起保存的 CUE、LOG：Drive file ID、SHA-256、所屬專輯 |
 | `import_sources` | 轉換或分軌的來源檔（SHA-256＋大小）與由它產生的音檔，用於再次匯入時略過 |
+| `rss_sources`、`rss_items` | RSS 來源（網址、間隔、規則、自動下載、認證、輪詢狀態）與條目（GUID、下載連結、info hash、大小、做種數、對應的下載） |
 
 精確去重鍵是 `sha256`＋`size`（唯一約束），上傳完成以 Drive 回傳的 `sha256Checksum` 驗證（P0 第 1 節）。
 
@@ -107,6 +109,9 @@ DIR/
 | `PUT /uploads/{id}?offset=N` | 送一個分塊（最多 32 MB）；位移不符回 409 與伺服器已收到的位元組數 |
 | `GET /uploads/{id}`、`POST /uploads/{id}/complete` | 進度；完成（驗證大小與 SHA-256） |
 | `GET /tasks` | 任務中心：下載與匯入批次 |
+| `GET`／`POST /rss/sources`、`PATCH`／`DELETE /rss/sources/{id}` | RSS 來源（密碼與 Cookie 只回報是否已設定） |
+| `POST /rss/sources/{id}/refresh`、`GET /rss/sources/{id}/search?q=` | 立即更新；站內搜尋（不入庫） |
+| `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、是否已下載）；從條目或站內搜尋結果開始下載 |
 | `GET /home` | 首頁資料：繼續播放、最近播放、最近加入、未聽完的廣播劇、任務摘要、待整理（D9） |
 | `POST /plays` | 回報播放：`session`、`asset_id`、`album_id`、`position_ms`、`listened_ms`、`finished` |
 | `GET /assets/{id}/resume`、`GET /albums/random` | 續播位置；隨機一張音樂專輯 |
@@ -203,6 +208,13 @@ DIR/
 - 事前驗證（實際執行）：24-bit WAV／ALAC 轉 FLAC 後仍為 24-bit、PCM MD5 相同；以原位元深度解碼的 PCM MD5 等於 FLAC STREAMINFO 的 MD5；`atrim` 依取樣數切割、各段長度相加等於原檔、串接 MD5 等於原檔。
 - 測試：轉換（WAV 24-bit、WavPack、ALAC、浮點 WAV 被拒）、分軌（EAC 式 .wav 指向 .flac、pregap 歸屬、封面取自原資料夾）、時間對不上的 CUE 讓整軌失敗而不是整張匯成一首、同一來源再次匯入被略過。
 - 實測（Chrome）：伺服器資料夾內放 WavPack 整軌＋CP932 編碼的 CUE（FILE 寫 .wav）、24-bit/96 kHz WAV、浮點 WAV：預覽正確顯示日文曲名、分軌與轉換標示與略過原因；匯入後為 FLAC 44.1/16 三首與 FLAC 96/24 一首，CUE 存為附屬檔，分出的歌曲可以連續播放。測試資料已刪除（Drive 檔案移到垃圾桶），曲庫與測試前備份逐表比對一致。
+
+### P2-5 RSS（2026-10-02）
+
+- 遷移 10：`rss_sources`、`rss_items`、`downloads.auto_select`。部署前備份到 `var/backups/db-20261002-pre-0010.sqlite`。
+- 下載器：`Add` 多了「自動選檔」；取得檔案清單後若為自動下載，直接以預設勾選開始，失敗時留在選檔並寫明原因（以真的 aria2 測試）。
+- 測試：以真實 Nyaa feed（2026-10-02 取得、裁成兩條）為解析樣本；Atom、Shift-JIS feed、base32 magnet、只有 info hash、只有網頁、不是 feed 的 HTML；規則（全半形、平片假名、排除優先）；基準、自動下載只對之後的新條目、條件式請求 304、手動下載、關閉再開啟自動下載重設基準、站內搜尋、失敗退避與恢復。
+- 實測（Chrome，桌面與手機寬度）：以 Nyaa 範本（無損、關鍵字 ARIA）新增來源，第一次更新取得 75 條；篩選、站內搜尋「Euforia」、來源頁立即更新、編輯規則與自動下載選項都正常。沒有按「下載」、也沒有儲存自動下載，避免實際下載受版權保護的內容；下載流程由單元測試與先前的合法測試 torrent（B3）涵蓋。測試來源已刪除。
 
 ## 使用方式（開發環境）
 

@@ -23,6 +23,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
 	"github.com/HHim8826/kanade/server/internal/web"
@@ -44,6 +45,7 @@ type Deps struct {
 	Aria2     *downloader.Aria2
 	Uploads   *uploads.Store
 	Identify  *identify.MusicBrainz
+	RSS       *rss.Service
 	StreamKey []byte // HMAC key for signed stream URLs
 	Log       *slog.Logger
 }
@@ -60,6 +62,7 @@ type Server struct {
 	aria2     *downloader.Aria2
 	uploads   *uploads.Store
 	mb        *identify.MusicBrainz
+	rss       *rss.Service
 	streamKey []byte
 	log       *slog.Logger
 	started   time.Time
@@ -67,7 +70,7 @@ type Server struct {
 
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, rss: d.RSS, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
 }
 
 type ctxKey int
@@ -163,6 +166,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/downloads/{id}/resume", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Resume(r.Context(), id) })))
 	mux.Handle("POST /api/v1/downloads/{id}/cancel", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Cancel(r.Context(), id) })))
 	mux.Handle("GET /api/v1/tasks", s.authed(s.tasks))
+
+	mux.Handle("GET /api/v1/rss/sources", s.authed(s.rssSources))
+	mux.Handle("POST /api/v1/rss/sources", s.authed(s.createRSSSource))
+	mux.Handle("PATCH /api/v1/rss/sources/{id}", s.authed(s.updateRSSSource))
+	mux.Handle("DELETE /api/v1/rss/sources/{id}", s.authed(s.deleteRSSSource))
+	mux.Handle("POST /api/v1/rss/sources/{id}/refresh", s.authed(s.refreshRSSSource))
+	mux.Handle("GET /api/v1/rss/sources/{id}/search", s.authed(s.searchRSSSource))
+	mux.Handle("POST /api/v1/rss/sources/{id}/download", s.authed(s.downloadRSSLink))
+	mux.Handle("GET /api/v1/rss/items", s.authed(s.rssItems))
+	mux.Handle("POST /api/v1/rss/items/{id}/download", s.authed(s.downloadRSSItem))
 
 	mux.Handle("POST /api/v1/uploads", s.authed(s.createUpload))
 	mux.Handle("GET /api/v1/uploads/{id}", s.authed(s.getUpload))

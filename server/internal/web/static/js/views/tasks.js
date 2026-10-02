@@ -40,6 +40,7 @@ export function Tasks() {
     <div class="page-head">
       <h1 class="page-title">任務</h1>
       <div class="actions">
+        <a class="btn tonal" href=${href('feeds')}><${Icon} name="queue" />RSS 訂閱</a>
         <button class="btn tonal" onClick=${() => setAdding(true)}><${Icon} name="download" />新增下載</button>
         <a class="btn tonal" href=${href('upload')}><${Icon} name="upload" />上傳音樂</a>
       </div>

@@ -3,6 +3,7 @@ package downloader
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -158,6 +159,22 @@ func (s *Service) pollMetadata(ctx context.Context, r *row) {
 	r.State = StateSelecting
 	s.db.ExecContext(ctx, `UPDATE downloads SET name = ?, info_hash = ?, files = ?, state = ?, updated_at = ? WHERE id = ?`,
 		name, st.InfoHash, string(data), StateSelecting, db.Now(), r.ID)
+	if r.AutoSelect { // an RSS rule started it: take the suggested files; on a problem, wait for the user
+		var pick []int
+		for _, v := range views {
+			if v.Suggested {
+				pick = append(pick, v.Index)
+			}
+		}
+		err := errors.New("no file is suggested")
+		if len(pick) > 0 {
+			err = s.selectLocked(ctx, r.ID, pick)
+		}
+		if err != nil {
+			s.db.ExecContext(ctx, `UPDATE downloads SET error = ?, updated_at = ? WHERE id = ?`,
+				"automatic selection: "+err.Error()+"; choose the files yourself", db.Now(), r.ID)
+		}
+	}
 }
 
 func (s *Service) pollTransfer(ctx context.Context, r *row) {

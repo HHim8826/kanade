@@ -167,7 +167,7 @@ func TestTorrentToLibrary(t *testing.T) {
 	go svc.Run(ctx)
 	waitFor(t, "aria2", 10*time.Second, aria.Ready)
 
-	id, err := svc.Add(ctx, "", torrent)
+	id, err := svc.Add(ctx, "", torrent, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestSelectionSurvivesAria2Restart(t *testing.T) {
 	done := make(chan struct{})
 	go func() { aria.Run(ariaCtx); close(done) }()
 	waitFor(t, "aria2", 10*time.Second, aria.Ready)
-	id, err := svc.Add(ctx, "", torrent)
+	id, err := svc.Add(ctx, "", torrent, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,4 +310,56 @@ func TestSelectionSurvivesAria2Restart(t *testing.T) {
 		}
 		return v.State == StateSeeding || v.State == StateCompleted
 	})
+}
+
+func TestAutoSelectTakesSuggestedFiles(t *testing.T) {
+	bin := aria2Path(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tmp := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	content := filepath.Join(tmp, "web")
+	os.MkdirAll(filepath.Join(content, "Auto"), 0o755)
+	data, _ := os.ReadFile("../media/testdata/tone.flac")
+	os.WriteFile(filepath.Join(content, "Auto", "a.flac"), data, 0o644)
+	os.WriteFile(filepath.Join(content, "Auto", "extra.mkv"), []byte("not music"), 0o644)
+	web := httptest.NewServer(http.FileServer(http.Dir(content)))
+	defer web.Close()
+	torrent := makeTorrent(t, content, "Auto", web.URL+"/", []string{"a.flac", "extra.mkv"})
+
+	d, _ := db.Open(ctx, filepath.Join(tmp, "db.sqlite"))
+	defer d.Close()
+	for _, sub := range []string{"aria2", "downloads", "staging"} {
+		os.MkdirAll(filepath.Join(tmp, sub), 0o700)
+	}
+	imp := importer.New(d, library.New(d), &localDrive{}, filepath.Join(tmp, "staging"), log)
+	aria, _ := NewAria2(bin, filepath.Join(tmp, "aria2"), filepath.Join(tmp, "downloads"), log)
+	svc := NewService(d, aria, imp, filepath.Join(tmp, "downloads"), 2<<30, 0, log)
+	go imp.Run(ctx)
+	done := make(chan struct{})
+	go func() { aria.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	go svc.Run(ctx)
+	waitFor(t, "aria2", 10*time.Second, aria.Ready)
+
+	id, err := svc.Add(ctx, "https://example.org/auto.torrent", torrent, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v *View
+	waitFor(t, "download without a choice", 30*time.Second, func() bool {
+		v, _ = svc.Get(ctx, id)
+		if v.State == StateFailed {
+			t.Fatalf("failed: %s", v.Error)
+		}
+		return v.State == StateSeeding || v.State == StateCompleted
+	})
+	if !v.AutoSelect || v.Source != "https://example.org/auto.torrent" {
+		t.Fatalf("download %+v", v)
+	}
+	for _, f := range v.Files {
+		if f.Selected != f.Suggested || (f.Path == "Auto/extra.mkv" && f.Selected) {
+			t.Fatalf("file %+v", f)
+		}
+	}
 }

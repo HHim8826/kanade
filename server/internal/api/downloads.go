@@ -42,7 +42,7 @@ func (s *Server) createDownload(w http.ResponseWriter, r *http.Request) {
 		}
 		uri = req.URI
 	}
-	id, err := s.downloads.Add(r.Context(), uri, torrent)
+	id, err := s.downloads.Add(r.Context(), uri, torrent, false)
 	if err != nil {
 		s.downloadError(w, r, err)
 		return

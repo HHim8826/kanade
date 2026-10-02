@@ -1,0 +1,44 @@
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:nyaa="https://nyaa.si/xmlns/nyaa" version="2.0">
+	<channel>
+		<title>Nyaa - &#34;aria&#34; - Torrent File RSS</title>
+		<description>RSS Feed for &#34;aria&#34;</description>
+		<link>https://nyaa.si/</link>
+		<atom:link href="https://nyaa.si/?page=rss" rel="self" type="application/rss+xml" />
+		<item>
+			<title>[2026.03.03]绝区零 Zenless Zone Zero - 天使加载中…^_−☆ Angel Loading...^_-☆【爱芮 ARIA EP】[FLAC 48kHz 24bit]</title>
+				<link>https://nyaa.si/download/2083876.torrent</link>
+				<guid isPermaLink="true">https://nyaa.si/view/2083876</guid>
+				<pubDate>Sun, 08 Mar 2026 03:52:59 -0000</pubDate>
+
+				<nyaa:seeders>10</nyaa:seeders>
+				<nyaa:leechers>1</nyaa:leechers>
+				<nyaa:downloads>738</nyaa:downloads>
+				<nyaa:infoHash>8c09529eac1a3262f7e1fce5ae8e047c3d3e134c</nyaa:infoHash>
+			<nyaa:categoryId>2_1</nyaa:categoryId>
+			<nyaa:category>Audio - Lossless</nyaa:category>
+			<nyaa:size>155.3 MiB</nyaa:size>
+			<nyaa:comments>0</nyaa:comments>
+			<nyaa:trusted>No</nyaa:trusted>
+			<nyaa:remake>No</nyaa:remake>
+			<description><![CDATA[<a href="https://nyaa.si/view/2083876">#2083876 | [2026.03.03]绝区零 Zenless Zone Zero - 天使加载中…^_−☆ Angel Loading...^_-☆【爱芮 ARIA EP】[FLAC 48kHz 24bit]</a> | 155.3 MiB | Audio - Lossless | 8c09529eac1a3262f7e1fce5ae8e047c3d3e134c]]></description>
+		</item>
+		<item>
+			<title>[2025.06.25] ARIA 20周年記念ベストアルバム「ARIA The BEST 2005-2025」(Vol.1~3 - 2025 Remaster) [FLAC 96kHz/24bit]</title>
+				<link>https://nyaa.si/download/1986115.torrent</link>
+				<guid isPermaLink="true">https://nyaa.si/view/1986115</guid>
+				<pubDate>Tue, 24 Jun 2025 22:43:07 -0000</pubDate>
+
+				<nyaa:seeders>14</nyaa:seeders>
+				<nyaa:leechers>0</nyaa:leechers>
+				<nyaa:downloads>2587</nyaa:downloads>
+				<nyaa:infoHash>a03b25bb691951c4f8c2f00a58e9d0e883415185</nyaa:infoHash>
+			<nyaa:categoryId>2_1</nyaa:categoryId>
+			<nyaa:category>Audio - Lossless</nyaa:category>
+			<nyaa:size>3.1 GiB</nyaa:size>
+			<nyaa:comments>0</nyaa:comments>
+			<nyaa:trusted>No</nyaa:trusted>
+			<nyaa:remake>No</nyaa:remake>
+			<description><![CDATA[<a href="https://nyaa.si/view/1986115">#1986115 | [2025.06.25] ARIA 20周年記念ベストアルバム「ARIA The BEST 2005-2025」(Vol.1~3 - 2025 Remaster) [FLAC 96kHz/24bit]</a> | 3.1 GiB | Audio - Lossless | a03b25bb691951c4f8c2f00a58e9d0e883415185]]></description>
+		</item>
+		</channel>
+</rss>

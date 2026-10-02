@@ -8,6 +8,7 @@ import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './u
 import { History, Playlist } from './views/collections.js';
 import { Album, Artist, Home, Library, Search } from './views/library.js';
 import { Login } from './views/login.js';
+import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
 import { Edits } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
@@ -37,6 +38,7 @@ function Page({ route, onLogout }) {
     case 'tasks': return html`<${Tasks} />`;
     case 'upload': return html`<${Upload} />`;
     case 'import': return html`<${ImportReview} id=${arg} />`;
+    case 'feeds': return html`<${Feeds} tab=${route.query.get('tab') || 'items'} q=${route.query.get('q') || ''} />`;
     case 'settings': return html`<${Settings} onLogout=${onLogout} />`;
     default: return html`<p>找不到頁面</p>`;
   }
@@ -58,7 +60,7 @@ function App() {
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
   const section = route.parts[0] || '';
   const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist', 'edits'].includes(section))
-    || (key === 'tasks' && ['upload', 'import'].includes(section)) || (key === '' && section === 'history');
+    || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section)) || (key === '' && section === 'history');
   return html`
     <nav class="nav" aria-label="主要">
       ${nav.map(([key, icon, label]) => html`<a key=${key} href=${href(key)} class=${active(key) ? 'active' : ''} aria-current=${active(key) ? 'page' : undefined}>

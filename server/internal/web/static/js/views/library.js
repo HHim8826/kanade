@@ -266,6 +266,7 @@ export function Search() {
       <input type="search" placeholder="歌名、歌手、專輯" value=${q} onInput=${(e) => setQ(e.target.value)} autofocus />
     </label>
     <${ErrorBox} error=${error} />
+    ${q.trim() && html`<div class="actions"><a class="btn text" href=${href('feeds?q=' + encodeURIComponent(q.trim()))}><${Icon} name="download" />在 RSS 資源中找「${q.trim()}」</a></div>`}
     ${nothing && html`<${Empty} icon="search">找不到「${q}」<//>`}
     ${result?.artists.length > 0 && html`<h2 class="section-title">歌手</h2><ul class="list">
       ${result.artists.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
