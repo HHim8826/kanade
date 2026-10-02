@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -147,6 +148,10 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	aria, err := downloader.NewAria2(cfg.Aria2Path, cfg.Path(config.DirAria2), cfg.Path(config.DirDownloads), log)
 	if err != nil {
 		return err
+	}
+	if cfg.Aria2Path == "" { // everything else works; downloads say the downloader is not running
+		log.Error("aria2c not found: downloads are off. Put aria2c next to kanade, set KANADE_ARIA2 or -aria2, " +
+			"install it in tools/aria2/ of the repository, or on PATH")
 	}
 	downloads := downloader.NewService(d, aria, imp, cfg.Path(config.DirDownloads), *stagingMiB<<20, *reserveGiB<<30, log)
 	ups := uploads.New(d, cfg.Path(config.DirStaging, "uploads"), *stagingMiB<<20)
@@ -300,21 +305,38 @@ func googleCmd(ctx context.Context, cfg config.Config, args []string) error {
 	return nil
 }
 
-// defaultAria2 prefers an aria2c shipped next to this binary, then $KANADE_ARIA2,
-// then the development copy in tools/.
+// defaultAria2 looks for aria2c (review #10): next to this binary, then $KANADE_ARIA2, then
+// tools/aria2/aria2c in the repository the binary or the working directory is in (searching up a
+// few levels), then on PATH. "" when there is none: the server runs without downloads.
 func defaultAria2() string {
+	var dirs []string
 	if exe, err := os.Executable(); err == nil {
-		if p := filepath.Join(filepath.Dir(exe), "aria2c"); fileExists(p) {
+		if p := filepath.Join(filepath.Dir(exe), "aria2c"); isExecutable(p) {
 			return p
 		}
+		dirs = append(dirs, filepath.Dir(exe))
 	}
 	if p := os.Getenv("KANADE_ARIA2"); p != "" {
 		return p
 	}
-	return "/data/music-platform/tools/aria2/aria2c"
+	if wd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, wd)
+	}
+	for _, d := range dirs {
+		for i := 0; i < 4; i++ {
+			if p := filepath.Join(d, "tools", "aria2", "aria2c"); isExecutable(p) {
+				return p
+			}
+			d = filepath.Dir(d)
+		}
+	}
+	if p, err := exec.LookPath("aria2c"); err == nil {
+		return p
+	}
+	return ""
 }
 
-func fileExists(p string) bool {
+func isExecutable(p string) bool {
 	st, err := os.Stat(p)
-	return err == nil && st.Mode().IsRegular()
+	return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0
 }

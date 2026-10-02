@@ -80,9 +80,11 @@ function report(finished = false, keepalive = false) {
   // would become the "latest" one on the home page over what was played since on another device.
   if (!finished && p.sent && p.sent.position === position && p.sent.heard === heard) return;
   p.sent = { position, heard };
+  // seq orders this playback's reports and at dates them, so one that arrives late changes nothing
+  // newer (review #8).
   post('/plays', {
     session: p.id, asset_id: p.item.assetId, album_id: p.item.albumId || 0,
-    position_ms: position, listened_ms: heard, finished,
+    position_ms: position, listened_ms: heard, finished, seq: (p.seq = (p.seq || 0) + 1), at: Date.now(),
   }, { keepalive }).catch(() => {});
 }
 

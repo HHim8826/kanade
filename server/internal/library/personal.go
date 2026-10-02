@@ -406,16 +406,22 @@ type HistoryItem struct {
 
 // History lists playbacks newest first, leaving out skips (under 10 s heard, not finished).
 // before pages by updated_at.
-func (s *Store) History(ctx context.Context, limit int, before int64) ([]HistoryItem, error) {
+// History pages through plays newest first. The cursor is the last row's time and play ID, so rows
+// sharing a millisecond at a page edge are neither lost nor repeated (review #25); beforeID 0 takes
+// every row of that millisecond.
+func (s *Store) History(ctx context.Context, limit int, before, beforeID int64) ([]HistoryItem, error) {
 	if before <= 0 {
-		before = 1<<62 - 1
+		before, beforeID = 1<<62-1, 0
+	}
+	if beforeID <= 0 {
+		beforeID = 1<<62 - 1
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT p.id, p.started_at, p.updated_at, p.listened_ms, p.counted, p.finished,
 		t.id, t.title, t.artist, coalesce(al.title, ''), coalesce(al.id, 0), coalesce(al.cover_id, 0), t.kind, `+briefCols+`
 		FROM plays p JOIN tracks t ON t.id = p.track_id JOIN assets a ON a.id = p.asset_id
 		LEFT JOIN albums al ON al.id = coalesce(p.album_id, (SELECT e.album_id FROM album_entries e WHERE e.track_id = t.id ORDER BY e.id LIMIT 1))
-		WHERE p.updated_at < ? AND (p.listened_ms >= 10000 OR p.finished = 1 OR p.counted = 1)
-		ORDER BY p.updated_at DESC LIMIT ?`, before, limit)
+		WHERE (p.updated_at < ?1 OR (p.updated_at = ?1 AND p.id < ?2)) AND (p.listened_ms >= 10000 OR p.finished = 1 OR p.counted = 1)
+		ORDER BY p.updated_at DESC, p.id DESC LIMIT ?3`, before, beforeID, limit)
 	if err != nil {
 		return nil, err
 	}

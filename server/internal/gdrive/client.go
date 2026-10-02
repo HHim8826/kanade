@@ -52,9 +52,10 @@ type Client struct {
 	redirectURI string
 	http        *http.Client
 
-	mu  sync.Mutex
-	cfg *ClientConfig
-	tok *Token
+	mu      sync.Mutex
+	cfg     *ClientConfig
+	tok     *Token
+	checked map[string]checkedFolder // cached folder ID -> when it was last seen in its parent
 }
 
 func New(d *sql.DB, redirectURI string) *Client {

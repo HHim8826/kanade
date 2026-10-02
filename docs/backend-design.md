@@ -122,7 +122,7 @@ DIR/
 | `POST /rss/sources/{id}/refresh`、`GET /rss/sources/{id}/search?q=` | 立即更新；站內搜尋（不入庫） |
 | `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、是否已下載、自動下載的 `auto_state`：`pending`／`done`／`failed` 與 `auto_error`）；從條目或站內搜尋結果開始下載 |
 | `GET /home` | 首頁資料：繼續播放、最近播放、最近加入、未聽完的廣播劇、任務摘要、待整理（D9） |
-| `POST /plays` | 回報播放：`session`、`asset_id`、`album_id`、`position_ms`、`listened_ms`、`finished` |
+| `POST /plays` | 回報播放：`session`、`asset_id`、`album_id`、`position_ms`、`listened_ms`、`finished`、`seq`（同一次播放遞增）、`at`（用戶端時間，毫秒） |
 | `GET /assets/{id}/resume`、`GET /albums/random` | 續播位置；隨機一張音樂專輯 |
 | `GET /favorites`、`GET /favorites/ids` | 收藏的歌曲與專輯；只取 ID（客戶端據此標示愛心） |
 | `PUT`／`DELETE /favorites/tracks/{id}`、`/favorites/albums/{id}` | 收藏、取消收藏 |
@@ -131,7 +131,7 @@ DIR/
 | `POST /playlists/{id}/items`、`DELETE /playlists/{id}/items/{item}` | 加入 `{"items": [{"track_id", "album_id", "asset_id"}]}`；移除一個條目 |
 | `PUT /playlists/{id}/order` | `{"items": [條目 ID...]}`，必須剛好是歌單現有的全部條目 |
 | `GET`／`PUT`／`DELETE /tracks/{id}/lyrics` | 歌詞；手動輸入或刪除 |
-| `GET /history?limit&before`、`GET /history/top?days` | 播放記錄（略過不到 10 秒的跳過）；最常播放 |
+| `GET /history?limit&before&before_id`、`GET /history/top?days` | 播放記錄（略過不到 10 秒的跳過；游標為上一頁最後一筆的時間與 `play_id`）；最常播放 |
 | `GET`／`PATCH`／`DELETE /tracks/{id}` | 歌曲資訊（含別名、收錄於哪些專輯）；編輯（`title`、`artist`、`version`、`kind`、`aliases`）；永久刪除（音檔移到 Drive 垃圾桶） |
 | `POST /tracks/{id}/restore`、`POST /albums/{id}/restore` | 恢復原標籤 |
 | `PATCH /albums/{id}` | 編輯專輯與其收錄（`title`、`album_artist`、`date`、`catalog`、`edition`、`kind`、`aliases`、`entries`） |
@@ -264,6 +264,14 @@ DIR/
 - 多碟專輯（#13）：點任一碟的歌，佇列是整張專輯，從那首開始，跨碟接續。
 - 登出（#14）：登出前先回報播放進度，再停止音訊、清空佇列與鎖定畫面資訊；在別處登出（API 回 401）時同樣停止。
 - 隨便聽一張（#32）：直接開始播放並留在原頁，提示訊息提供「前往專輯」。
+
+### 審查修正：雜項（2026-10-02）
+
+- 首頁 ETag（#11）：以實際送出的首頁內容（含資產版本路徑）計算，只改 JS／CSS 的版本也會讓舊的驗證值得到 200 與新入口。
+- aria2 路徑（#10）：依序找執行檔旁、`$KANADE_ARIA2`／`-aria2`、執行檔或工作目錄所在 checkout 的 `tools/aria2/aria2c`（往上找幾層）、`PATH`；都沒有時服務照常啟動、只是不能下載，日誌說明安裝方式。
+- 播放回報順序（#8，遷移 15：`plays.seq`、`plays.skew`）：用戶端每次回報帶遞增的 `seq` 與自己的時間 `at`；較舊的回報不改位置與時間，聽了多久、是否計次、是否播完只會增加。時間用用戶端產生回報的時刻（以該次播放第一個回報量得的時差換算成伺服器時間），不晚於收到時、不早於上一次，所以在網路上延遲的回報不會把舊的播放頂成「最近播放」。舊版用戶端（沒有 `seq`）照舊處理。
+- 播放記錄分頁（#25）：游標是最後一筆的時間與播放 ID（`before`、`before_id`），排序同樣以兩者為準。
+- Drive 資料夾快取（#7）：快取的資料夾 ID 使用前確認仍在預期的父資料夾、沒有被丟進垃圾桶（同一個資料夾 5 分鐘內只問一次）；被移走、丟進垃圾桶或刪除時，忘掉它與底下所有快取，在正確的父資料夾重新尋找或建立。
 
 ## 使用方式（開發環境）
 

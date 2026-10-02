@@ -161,7 +161,7 @@ func TestHistoryAndTop(t *testing.T) {
 	s.RecordPlay(ctx, PlayReport{Session: "skip", AssetID: asset, PositionMS: 3000, ListenedMS: 3000})
 	s.RecordPlay(ctx, PlayReport{Session: "full", AssetID: asset, PositionMS: 60000, ListenedMS: 60000, Finished: true})
 	s.RecordPlay(ctx, PlayReport{Session: "again", AssetID: asset, PositionMS: 40000, ListenedMS: 40000})
-	h, err := s.History(ctx, 10, 0)
+	h, err := s.History(ctx, 10, 0, 0)
 	if err != nil || len(h) != 2 || h[0].Album != "Al" {
 		t.Fatalf("history = %+v %v", h, err)
 	}

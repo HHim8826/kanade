@@ -1,10 +1,12 @@
 package web
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func TestVersionedAssets(t *testing.T) {
@@ -34,5 +36,39 @@ func TestVersionedAssets(t *testing.T) {
 	}
 	if rec := get("/app/library/albums"); rec.Code != 200 || !strings.Contains(rec.Body.String(), m[1]) {
 		t.Fatalf("client route should get the shell: %d", rec.Code)
+	}
+}
+
+// A release that changes only a script gives the shell a new validator, so a client holding the
+// old one gets the new shell instead of 304 (review #11).
+func TestShellETagFollowsVersion(t *testing.T) {
+	shell := []byte(`<script type="module" src="/app/{{V}}/js/app.js"></script>`)
+	before := handlerFor(fstest.MapFS{"index.html": {Data: shell}, "js/app.js": {Data: []byte("1")}})
+	after := handlerFor(fstest.MapFS{"index.html": {Data: shell}, "js/app.js": {Data: []byte("1 // changed")}})
+	get := func(h http.Handler, etag string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/app/", nil)
+		if etag != "" {
+			req.Header.Set("If-None-Match", etag)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	old := get(before, "")
+	fresh := get(after, old.Header().Get("ETag"))
+	if fresh.Code != http.StatusOK || fresh.Header().Get("ETag") == old.Header().Get("ETag") || fresh.Body.String() == old.Body.String() {
+		t.Fatalf("old validator: %d %s", fresh.Code, fresh.Header().Get("ETag"))
+	}
+	if again := get(after, fresh.Header().Get("ETag")); again.Code != http.StatusNotModified {
+		t.Fatalf("same version: %d", again.Code)
+	}
+	for _, p := range []string{"/app/index.html", "/app/library"} {
+		req := httptest.NewRequest("GET", p, nil)
+		req.Header.Set("If-None-Match", old.Header().Get("ETag"))
+		rec := httptest.NewRecorder()
+		after.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s with the old validator: %d", p, rec.Code)
+		}
 	}
 }

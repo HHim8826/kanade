@@ -174,7 +174,8 @@ export function History() {
   const loadMore = async () => {
     setMore({ busy: true, done: false });
     try {
-      const next = await get(`/history?limit=50&before=${list[list.length - 1].updated_at}`);
+      const last = list[list.length - 1];
+      const next = await get(`/history?limit=50&before=${last.updated_at}&before_id=${last.play_id}`);
       setPages((p) => [...p, next]);
       setMore({ busy: false, done: next.length < 50 });
     } catch (e) {

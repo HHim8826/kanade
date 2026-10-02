@@ -30,8 +30,12 @@ const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 's
 // index.html (whose no-cache Cloudflare respects) names the current version. Unknown paths
 // without a file extension return the app shell, so reloading a client-side route works.
 func Handler() http.Handler {
-	assets := map[string]asset{}
 	static, _ := fs.Sub(files, "static")
+	return handlerFor(static)
+}
+
+func handlerFor(static fs.FS) http.Handler {
+	assets := map[string]asset{}
 	all := sha256.New()
 	fs.WalkDir(static, ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -54,6 +58,10 @@ func Handler() http.Handler {
 	version := hex.EncodeToString(all.Sum(nil)[:6])
 	shell := assets["index.html"]
 	shell.body = []byte(strings.ReplaceAll(string(shell.body), "{{V}}", "v/"+version))
+	// The validator is of the shell as sent, which names the version: a release that changes only
+	// scripts or styles still changes it (review #11).
+	sum := sha256.Sum256(shell.body)
+	shell.etag = `"` + hex.EncodeToString(sum[:8]) + `"`
 	assets["index.html"] = shell
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

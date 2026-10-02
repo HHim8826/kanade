@@ -2,7 +2,9 @@ package library
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 )
 
 func assetWithDuration(t *testing.T, s *Store, sha string, durationMS int64) int64 {
@@ -98,5 +100,78 @@ func TestContinueAndSpoken(t *testing.T) {
 		if id != musicAlbum {
 			t.Fatalf("random album %d is not the music album", id)
 		}
+	}
+}
+
+// A late or repeated report never takes the position back, a newer one may (seeking back), and a
+// late report of an old playback does not make it the latest (review #8).
+func TestPlayReportsKeepTheirOrder(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	drama := assetWithDuration(t, s, "o1", 30*60_000)
+	s.Publish(ctx, drama, EntryInput{Title: "Drama", Kind: "spoken"})
+	now := time.Now().UnixMilli()
+	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 60_000, ListenedMS: 60_000, Seq: 1, At: now})
+	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 600_000, ListenedMS: 600_000, Seq: 3, At: now + 1})
+	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 300_000, ListenedMS: 300_000, Seq: 2, At: now}) // late
+	if pos, _ := s.ResumePosition(ctx, drama); pos != 600_000 {
+		t.Fatalf("a late report took the position back to %d", pos)
+	}
+	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 100_000, ListenedMS: 600_000, Seq: 4, At: now + 2}) // a seek back
+	if pos, _ := s.ResumePosition(ctx, drama); pos != 100_000 {
+		t.Fatalf("a newer seek back ignored: %d", pos)
+	}
+	var heard int64
+	s.db.QueryRow(`SELECT listened_ms FROM plays WHERE session = 'a'`).Scan(&heard)
+	if heard != 600_000 {
+		t.Fatalf("heard %d", heard)
+	}
+
+	// Another device starts something after; then a report of the first playback, made before
+	// that, arrives late. The newer playback stays the latest.
+	time.Sleep(5 * time.Millisecond)
+	song := assetWithDuration(t, s, "o2", 200_000)
+	s.Publish(ctx, song, EntryInput{Title: "Song"})
+	s.RecordPlay(ctx, PlayReport{Session: "b", AssetID: song, PositionMS: 1000, ListenedMS: 1000, Seq: 1, At: time.Now().UnixMilli()})
+	time.Sleep(5 * time.Millisecond)
+	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 110_000, ListenedMS: 610_000, Seq: 5, At: now + 3})
+	var latest string
+	s.db.QueryRow(`SELECT session FROM plays ORDER BY updated_at DESC, id DESC LIMIT 1`).Scan(&latest)
+	if latest != "b" {
+		t.Fatalf("the late report made %q the latest", latest)
+	}
+}
+
+// Rows sharing a millisecond at a page edge are neither lost nor repeated (review #25).
+func TestHistoryCursorKeepsEqualTimestampRows(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	song := assetWithDuration(t, s, "h1", 200_000)
+	s.Publish(ctx, song, EntryInput{Title: "Song"})
+	for i := 0; i < 51; i++ {
+		s.RecordPlay(ctx, PlayReport{Session: fmt.Sprint("s", i), AssetID: song, PositionMS: 100_000, ListenedMS: 100_000})
+	}
+	s.db.Exec(`UPDATE plays SET updated_at = 1000 + id`)
+	s.db.Exec(`UPDATE plays SET updated_at = 1000 WHERE id IN (1, 2)`) // the two oldest share a millisecond
+	seen := map[int64]bool{}
+	before, beforeID := int64(0), int64(0)
+	for page := 0; page < 10; page++ {
+		h, err := s.History(ctx, 50, before, beforeID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(h) == 0 {
+			break
+		}
+		for _, x := range h {
+			if seen[x.PlayID] {
+				t.Fatalf("play %d twice", x.PlayID)
+			}
+			seen[x.PlayID] = true
+		}
+		before, beforeID = h[len(h)-1].UpdatedAt, h[len(h)-1].PlayID
+	}
+	if len(seen) != 51 {
+		t.Fatalf("saw %d of 51", len(seen))
 	}
 }

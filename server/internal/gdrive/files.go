@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -131,7 +133,11 @@ func (c *Client) Root(ctx context.Context) (string, error) {
 }
 
 // Folder returns the ID of a folder path below the platform root ("library/Artist/Album"),
-// creating missing levels. IDs are cached in drive_folders.
+// creating missing levels. IDs are cached in drive_folders; a cached folder is used only while it
+// is still where the path says, under its parent and not in the trash (checked at most every few
+// minutes). One that was moved out, trashed or deleted is forgotten with everything cached under
+// it, and the path is found or made again under the right parent, so nothing is ever written
+// outside the platform folder (decision D1, review #7).
 func (c *Client) Folder(ctx context.Context, path string) (string, error) {
 	parent, err := c.Root(ctx)
 	if err != nil {
@@ -151,6 +157,19 @@ func (c *Client) Folder(ctx context.Context, path string) (string, error) {
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return "", err
 		}
+		if id != "" {
+			ok, err := c.folderUnder(ctx, id, parent)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				if _, err := c.db.ExecContext(ctx, `DELETE FROM drive_folders WHERE path = ? OR path LIKE ? ESCAPE '\'`,
+					rel, likePrefix(rel)+"/%"); err != nil {
+					return "", err
+				}
+				id = ""
+			}
+		}
 		if id == "" {
 			if id, err = c.findFolder(ctx, parent, name); err != nil {
 				return "", err
@@ -163,8 +182,52 @@ func (c *Client) Folder(ctx context.Context, path string) (string, error) {
 			if _, err := c.db.ExecContext(ctx, `INSERT OR REPLACE INTO drive_folders (path, file_id) VALUES (?, ?)`, rel, id); err != nil {
 				return "", err
 			}
+			c.markChecked(id, parent)
 		}
 		parent = id
 	}
 	return parent, nil
+}
+
+const folderCheckEvery = 5 * time.Minute
+
+// folderUnder reports whether a cached folder still sits in parent and is not trashed.
+func (c *Client) folderUnder(ctx context.Context, id, parent string) (bool, error) {
+	c.mu.Lock()
+	ch, ok := c.checked[id]
+	c.mu.Unlock()
+	if ok && ch.parent == parent && time.Since(ch.at) < folderCheckEvery {
+		return true, nil
+	}
+	f, err := c.GetFile(ctx, id, "id,parents,trashed,mimeType")
+	if IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if f.Trashed || f.MimeType != FolderMime || !slices.Contains(f.Parents, parent) {
+		return false, nil
+	}
+	c.markChecked(id, parent)
+	return true, nil
+}
+
+func (c *Client) markChecked(id, parent string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.checked == nil {
+		c.checked = map[string]checkedFolder{}
+	}
+	c.checked[id] = checkedFolder{parent: parent, at: time.Now()}
+}
+
+type checkedFolder struct {
+	parent string
+	at     time.Time
+}
+
+// likePrefix escapes a path for a LIKE pattern.
+func likePrefix(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

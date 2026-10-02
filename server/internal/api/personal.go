@@ -246,7 +246,8 @@ func (s *Server) setLyrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	limit, _ := pageArgs(r)
 	before, _ := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
-	list, err := s.lib.History(r.Context(), limit, before)
+	beforeID, _ := strconv.ParseInt(r.URL.Query().Get("before_id"), 10, 64)
+	list, err := s.lib.History(r.Context(), limit, before, beforeID)
 	if err != nil {
 		s.internal(w, r, err)
 		return

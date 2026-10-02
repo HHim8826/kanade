@@ -117,9 +117,13 @@ type Aria2 struct {
 	ready               atomic.Bool
 }
 
+// NewAria2 prepares aria2 at bin. With bin "" there is none: Run returns at once and the
+// downloader never becomes ready (downloads are off; the rest of the server works).
 func NewAria2(bin, dataDir, downloadDir string, log *slog.Logger) (*Aria2, error) {
-	if _, err := os.Stat(bin); err != nil {
-		return nil, fmt.Errorf("aria2c not found at %s", bin)
+	if bin != "" {
+		if _, err := os.Stat(bin); err != nil {
+			return nil, fmt.Errorf("aria2c not found at %s", bin)
+		}
 	}
 	raw := make([]byte, 24)
 	if _, err := rand.Read(raw); err != nil {
@@ -192,6 +196,9 @@ func (a *Aria2) writeConfig(port int) (string, error) {
 
 // Run keeps aria2 running until ctx ends.
 func (a *Aria2) Run(ctx context.Context) {
+	if a.bin == "" {
+		return
+	}
 	for attempt := 0; ctx.Err() == nil; attempt++ {
 		started := time.Now()
 		err := a.runOnce(ctx)

@@ -27,7 +27,7 @@ printf '%s\n' 'a long password' | ./bin/kanade user add admin
 ./bin/kanade serve -listen 127.0.0.1:8080 -public-url https://music.example.com
 ```
 
-`serve` expects `aria2c` next to the binary, at `$KANADE_ARIA2`, or in `tools/aria2/`. Connect Google Drive from the web client's settings page. FFmpeg is only used to generate test fixtures (`server/internal/media/testdata/gen.sh`).
+`serve` looks for `aria2c` next to the binary, at `$KANADE_ARIA2` (or `-aria2`), in `tools/aria2/` of the checkout the binary or the working directory is in, and on `PATH`; without it the server runs with downloads off. FFmpeg (`$KANADE_FFMPEG`, `tools/ffmpeg/bin/` beside the data directory, or `PATH`, with `ffprobe` next to it) converts lossless formats to FLAC and splits disc images by their CUE sheets; without it those files are skipped. Connect Google Drive from the web client's settings page.
 
 ## Design notes
 
