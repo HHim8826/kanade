@@ -1354,28 +1354,41 @@ func (s *Service) CollectionPlan(ctx context.Context, id int64, title, artist st
 	for i, b := range batches {
 		args[i] = b
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT i.rel_path, i.state, e.id, e.track_id, e.album_id, e.disc_no, e.track_no, t.title, t.artist,
-		al.title, al.album_artist FROM import_items i JOIN album_entries e ON e.id = i.entry_id JOIN tracks t ON t.id = e.track_id
-		JOIN albums al ON al.id = e.album_id
+	// Songs taken off their album since (or off every album) are found by their track: they join
+	// with their file like the ones the library had from another import.
+	rows, err := s.db.QueryContext(ctx, `SELECT i.rel_path, i.state, i.plan, t.id, t.title, t.artist, e.id, e.album_id, e.disc_no, e.track_no,
+		al.title, al.album_artist FROM import_items i JOIN tracks t ON t.id = i.track_id
+		LEFT JOIN album_entries e ON e.id = i.entry_id LEFT JOIN albums al ON al.id = e.album_id
 		WHERE i.batch_id IN (?`+strings.Repeat(", ?", len(args)-1)+`) AND i.role = 'audio' AND i.state IN ('published', 'duplicate')
 		ORDER BY i.id`, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	seen := map[int64]bool{}
+	seen, added := map[int64]bool{}, map[int64]bool{}
 	emptied := map[int64]library.AlbumBrief{}
 	for rows.Next() {
 		var rel, state string
+		var plan sql.NullString
+		var entry, album, disc, track sql.NullInt64
+		var from, fromArtist sql.NullString
 		var m library.Move
-		if err := rows.Scan(&rel, &state, &m.EntryID, &m.TrackID, &m.From.ID, &m.Disc, &m.Track, &m.Title, &m.Artist,
-			&m.From.Title, &m.From.AlbumArtist); err != nil {
+		if err := rows.Scan(&rel, &state, &plan, &m.TrackID, &m.Title, &m.Artist, &entry, &album, &disc, &track,
+			&from, &fromArtist); err != nil {
 			return nil, err
 		}
-		if seen[m.EntryID] {
-			continue
+		if entry.Valid {
+			if seen[entry.Int64] {
+				continue
+			}
+			seen[entry.Int64] = true
+			m.EntryID, m.Disc, m.Track = entry.Int64, int(disc.Int64), int(track.Int64)
+			m.From = library.AlbumBrief{ID: album.Int64, Title: from.String, AlbumArtist: fromArtist.String}
+		} else { // its own numbers, as it was imported
+			var was struct{ Disc, Track int }
+			json.Unmarshal([]byte(plan.String), &was)
+			m.Disc, m.Track = max(was.Disc, 1), was.Track
 		}
-		seen[m.EntryID] = true
 		if slot, ok := slots[filepath.ToSlash(rel)]; ok {
 			m.Disc, m.Track = slot[0], slot[1]
 		} else { // made here (cut from an image): the section its folder is, its own number
@@ -1385,8 +1398,11 @@ func (s *Service) CollectionPlan(ctx context.Context, id int64, title, artist st
 				}
 			}
 		}
-		if state == "duplicate" { // the library had it from another import: it joins, and stays there too
-			p.Adds = append(p.Adds, library.Add{TrackID: m.TrackID, Title: m.Title, Artist: m.Artist, Disc: m.Disc, Track: m.Track})
+		if state == "duplicate" || !entry.Valid { // it joins, and stays where else it is
+			if !added[m.TrackID] {
+				added[m.TrackID] = true
+				p.Adds = append(p.Adds, library.Add{TrackID: m.TrackID, Title: m.Title, Artist: m.Artist, Disc: m.Disc, Track: m.Track})
+			}
 			continue
 		}
 		p.Moves = append(p.Moves, m)
@@ -1397,6 +1413,20 @@ func (s *Service) CollectionPlan(ctx context.Context, id int64, title, artist st
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	rows.Close()
+	adds := p.Adds[:0]
+	for _, a := range p.Adds { // one already on the collection stays as it is; one on no album is told apart
+		var on, there int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*), count(*) FILTER (WHERE album_id = ?) FROM album_entries WHERE track_id = ?`,
+			p.Target.ID, a.TrackID).Scan(&on, &there); err != nil {
+			return nil, err
+		}
+		if there == 0 {
+			a.Loose = on == 0
+			adds = append(adds, a)
+		}
+	}
+	p.Adds = adds
 	moving := map[int64]int{}
 	for _, m := range p.Moves {
 		moving[m.From.ID]++

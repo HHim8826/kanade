@@ -35,13 +35,14 @@ type Move struct {
 }
 
 // Add is a song of the library that joins an album with its file, as a new entry (a song a source
-// brought that the library had from another import).
+// brought that the library had from another import, or one taken off every album since).
 type Add struct {
 	TrackID int64  `json:"track_id"`
 	Title   string `json:"title"`
 	Artist  string `json:"artist"`
 	Disc    int    `json:"disc"`
 	Track   int    `json:"track"`
+	Loose   bool   `json:"loose,omitempty"` // on no album now
 }
 
 // Plan is what an arrangement does, shown before it is done (merging albums, organizing a source).

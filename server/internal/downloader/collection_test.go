@@ -160,3 +160,100 @@ func TestImportedDownloadBecomesCollection(t *testing.T) {
 		}
 	}
 }
+
+// Songs whose albums were merged and then removed are on no album: the collection still gathers
+// every one of them, each in its section and place, and a second look finds nothing left to add.
+func TestCollectionGathersSongsOnNoAlbum(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tmp := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(tmp, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	lib := library.New(d)
+	imp := importer.New(d, lib, &localDrive{}, filepath.Join(tmp, "staging"), log)
+	go imp.Run(ctx)
+	svc := NewService(d, nil, imp, filepath.Join(tmp, "downloads"), 1<<30, 0, log)
+	dir := filepath.Join(tmp, "downloads", "1")
+	songs := []struct{ path, album string }{
+		{"Coll/Episode 1/01.mp3", "Red"}, {"Coll/Episode 1/02.mp3", "Red"}, {"Coll/Episode 2/01.mp3", "Gold"},
+	}
+	var files []FileView
+	var paths []string
+	for i, s := range songs {
+		p := filepath.Join(dir, filepath.FromSlash(s.path))
+		id3MP3(t, p, map[string]string{"TIT2": fmt.Sprintf("Song %d", i), "TPE1": "A", "TALB": s.album, "TRCK": fmt.Sprint(i + 1)})
+		paths = append(paths, p)
+		files = append(files, FileView{Index: i + 1, Path: s.path, Selected: true, Round: 1})
+	}
+	b, _, err := imp.CreateBatchFiles(ctx, "download", "Coll", dir, paths, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "import", 20*time.Second, func() bool { v, _ := imp.Batch(ctx, b); return v.State == importer.BatchDone })
+	for i := range files {
+		files[i].Batch = b
+	}
+	raw, _ := json.Marshal(files)
+	if _, err := d.Exec(`INSERT INTO downloads (id, source, name, state, dir, files, round, created_at, updated_at)
+		VALUES (1, 'magnet:', 'Coll', 'completed', ?, ?, 1, 0, 0)`, dir, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	list, _ := lib.Albums(ctx, 50, 0, false)
+	var ids []int64
+	for _, a := range list {
+		ids = append(ids, a.ID)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("by tags: %+v", list)
+	}
+	merged, _, err := lib.MergeAlbums(ctx, library.MergeRequest{Albums: ids, Title: "Odd title", AlbumArtist: "A"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.RemoveAlbums(ctx, []int64{merged}); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ := lib.Albums(ctx, 50, 0, false); len(list) != 0 {
+		t.Fatalf("after removing: %+v", list)
+	}
+
+	p, err := svc.CollectionPlan(ctx, 1, "The Collection", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lib.CheckPlan(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Moves) != 0 || len(p.Adds) != 3 || len(p.Emptied) != 0 || p.Sections[1] != "Episode 1" || p.Sections[2] != "Episode 2" {
+		t.Fatalf("plan %+v", p)
+	}
+	for _, a := range p.Adds {
+		if !a.Loose {
+			t.Fatalf("not told apart as on no album: %+v", a)
+		}
+	}
+	album, _, err := lib.Arrange(ctx, p, "collection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := imp.SetScopeAlbum(ctx, importer.CollectionScope(dir, "The Collection"), album, "Various Artists"); err != nil {
+		t.Fatal(err)
+	}
+	dd, _ := lib.Album(ctx, album)
+	want := map[string][2]int{"Song 0": {1, 1}, "Song 1": {1, 2}, "Song 2": {2, 1}}
+	if len(dd.Entries) != 3 {
+		t.Fatalf("collection: %+v", dd.Entries)
+	}
+	for _, e := range dd.Entries {
+		if w := want[e.Title]; e.DiscNo != w[0] || e.TrackNo != w[1] {
+			t.Fatalf("%s at %d-%d, want %v", e.Title, e.DiscNo, e.TrackNo, w)
+		}
+	}
+	if again, err := svc.CollectionPlan(ctx, 1, "The Collection", ""); err != nil || len(again.Adds)+len(again.Moves) != 0 || again.Target.ID != album {
+		t.Fatalf("second look: %+v %v", again, err)
+	}
+}

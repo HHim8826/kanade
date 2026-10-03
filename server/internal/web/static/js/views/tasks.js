@@ -408,6 +408,8 @@ function MakeCollection({ d, close }) {
   const songs = p ? [...p.moves.filter((m) => !m.duplicate), ...(p.adds || [])] : [];
   const discs = p ? [...new Set(songs.map((m) => m.disc))].sort((a, b) => a - b) : [];
   const dups = p ? p.moves.filter((m) => m.duplicate).length : 0;
+  const loose = p ? (p.adds || []).filter((a) => a.loose).length : 0;
+  const others = p ? (p.adds || []).length - loose : 0;
   const [open, setOpen] = useState(0);
   return html`<${Dialog} title="整理成合集" wide onClose=${close} actions=${html`
       <button class="btn text" onClick=${close}>取消</button>
@@ -421,7 +423,7 @@ function MakeCollection({ d, close }) {
     ${!p && !error && html`<${Spinner} />`}
     ${p && html`<p>${p.target.id ? `加入已有的合集「${p.target.title}」` : `新增專輯「${p.target.title}」`}：<b>${songs.length} 首</b>，${discs.length} 個分區。
       ${p.emptied.length ? `${p.emptied.length} 張原本的專輯會清空，之後用它們的標籤匯入的檔案也會歸到合集。` : ''}
-      ${dups ? `${dups} 首已有同一個音檔，不重複加入。` : ''}${(p.adds || []).length ? `${p.adds.length} 首曲庫原本就有（其他來源匯入），會一併加入合集，原處不變。` : ''}
+      ${dups ? `${dups} 首已有同一個音檔，不重複加入。` : ''}${loose ? `${loose} 首目前不在任何專輯，會放進合集。` : ''}${others ? `${others} 首也在其他專輯，會一併加入合集，原處不變。` : ''}
       ${p.sidecars ? `${p.sidecars} 個 CUE／LOG 附屬檔案跟著過去。` : ''}可在修改紀錄撤回。</p>
       <ul class="list sections-preview">${discs.map((n) => {
         const list = songs.filter((m) => m.disc === n).sort((a, b) => a.track - b.track);
