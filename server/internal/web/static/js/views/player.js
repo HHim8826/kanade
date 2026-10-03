@@ -222,6 +222,17 @@ const fmtSec = (sec) => fmtTime(Math.round(sec) * 1000);
 function FoundLyrics({ item, auto, onChosen }) {
   const data = useLoad(() => findLyrics(item.trackId), [item.trackId]);
   const [busy, setBusy] = useState(0);
+  const retry = () => { foundCache.delete(item.trackId); data.reload(); };
+  // The server asked to wait (Retry-After): asked once more by itself after that, at most twice for
+  // a song; leaving the song or the panel cancels it (review #79).
+  const tries = useRef({ track: 0, n: 0 });
+  useEffect(() => {
+    const e = data.error;
+    if (tries.current.track !== item.trackId) tries.current = { track: item.trackId, n: 0 };
+    if (!e || !e.retryAfter || tries.current.n >= 2) return;
+    const t = setTimeout(() => { tries.current.n++; retry(); }, e.retryAfter * 1000);
+    return () => clearTimeout(t);
+  }, [data.error]);
   const list = data.data || [];
   const best = list[0];
   useEffect(() => {
@@ -242,7 +253,10 @@ function FoundLyrics({ item, auto, onChosen }) {
     }
   };
   if (data.loading || (auto && busy)) return html`<div class="found-wait sub"><${Spinner} />正在 LRCLIB 尋找歌詞…</div>`;
-  if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${() => { foundCache.delete(item.trackId); data.reload(); }} />`;
+  if (data.error) {
+    return html`<p class="sub found-none">線上歌詞暫時查不到，不代表 LRCLIB 沒有這首歌的歌詞。</p>
+      <${ErrorBox} error=${data.error} onRetry=${retry} />`;
+  }
   if (!list.length) return html`<p class="sub found-none">LRCLIB 也沒有找到這首歌的歌詞。</p>`;
   return html`<div class="found">
     <p class="sub">LRCLIB 找到 ${list.length} 個可能的歌詞，選一個套用：</p>

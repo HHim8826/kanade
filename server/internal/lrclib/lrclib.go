@@ -68,7 +68,9 @@ func (l *Lyrics) Text() string {
 	return l.Plain
 }
 
-func (c *Client) get(ctx context.Context, path string, q url.Values) ([]byte, error) {
+// get fetches path and reads the answer with decode. Only an answer decode accepts is cached: an
+// error page sent with 200 is asked again next time, not kept for an hour (review #80).
+func (c *Client) get(ctx context.Context, path string, q url.Values, decode func([]byte) error) error {
 	u := c.Base + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
@@ -76,9 +78,26 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) ([]byte, er
 	c.mu.Lock()
 	if e, ok := c.cache[u]; ok && time.Since(e.at) < cacheTTL {
 		c.mu.Unlock()
-		return e.body, nil
+		return decode(e.body)
 	}
 	c.mu.Unlock()
+	body, err := c.fetch(ctx, u)
+	if err != nil {
+		return err
+	}
+	if err := decode(body); err != nil {
+		return fmt.Errorf("LRCLIB: unreadable answer: %w", err)
+	}
+	c.mu.Lock()
+	if len(c.cache) >= 200 {
+		clear(c.cache)
+	}
+	c.cache[u] = cached{body, time.Now()}
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *Client) fetch(ctx context.Context, u string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -105,38 +124,46 @@ func (c *Client) get(ctx context.Context, path string, q url.Values) ([]byte, er
 	if len(body) > 4<<20 {
 		return nil, errors.New("LRCLIB answer too large")
 	}
-	c.mu.Lock()
-	if len(c.cache) >= 200 {
-		clear(c.cache)
-	}
-	c.cache[u] = cached{body, time.Now()}
-	c.mu.Unlock()
 	return body, nil
 }
 
 // Get fetches one record by its ID.
 func (c *Client) Get(ctx context.Context, id int64) (*Lyrics, error) {
-	body, err := c.get(ctx, "/get/"+strconv.FormatInt(id, 10), nil)
+	var l Lyrics
+	err := c.get(ctx, "/get/"+strconv.FormatInt(id, 10), nil, func(body []byte) error {
+		l = Lyrics{}
+		if err := json.Unmarshal(body, &l); err != nil {
+			return err
+		}
+		if l.ID != id {
+			return fmt.Errorf("asked for record %d, got %d", id, l.ID)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	var l Lyrics
-	if err := json.Unmarshal(body, &l); err != nil {
-		return nil, fmt.Errorf("LRCLIB: %w", err)
 	}
 	return &l, nil
 }
 
 func (c *Client) search(ctx context.Context, q url.Values) ([]Lyrics, error) {
-	body, err := c.get(ctx, "/search", q)
-	if err != nil {
-		return nil, err
-	}
 	var list []Lyrics
-	if err := json.Unmarshal(body, &list); err != nil {
-		return nil, fmt.Errorf("LRCLIB: %w", err)
-	}
-	return list, nil
+	err := c.get(ctx, "/search", q, func(body []byte) error {
+		list = nil
+		if !strings.HasPrefix(strings.TrimSpace(string(body)), "[") {
+			return errors.New("not a list")
+		}
+		if err := json.Unmarshal(body, &list); err != nil {
+			return err
+		}
+		for _, l := range list {
+			if l.ID <= 0 {
+				return errors.New("a record without an ID")
+			}
+		}
+		return nil
+	})
+	return list, err
 }
 
 // Song is what is known of the song lyrics are looked for.

@@ -58,3 +58,56 @@ func TestFindRanksAndGets(t *testing.T) {
 		t.Fatalf("not cached: %d", searches.Load())
 	}
 }
+
+// An answer that is not what was asked for (an error page sent with 200, broken JSON, another shape)
+// is not cached: once LRCLIB is back, the same search asks again (review #80).
+func TestBadAnswersAreNotCached(t *testing.T) {
+	ctx := context.Background()
+	for _, bad := range []string{
+		`<!DOCTYPE html><html><title>502 Bad Gateway</title></html>`,
+		`[{"id": 1, "trackName": "Undine"`,
+		`{"message": "busy"}`,
+		`null`,
+		`[{"trackName": "no id"}]`,
+	} {
+		var calls atomic.Int32
+		var good atomic.Bool
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			switch {
+			case !good.Load():
+				w.Write([]byte(bad))
+			case r.URL.Path == "/api/get/7":
+				w.Write([]byte(`{"id": 7, "trackName": "Undine", "plainLyrics": "a"}`))
+			default:
+				w.Write([]byte(`[]`))
+			}
+		}))
+		c := New("https://music.example/")
+		c.Base = srv.URL + "/api"
+		if _, err := c.Find(ctx, Song{Title: "Undine"}); err == nil {
+			t.Fatalf("%q: no error", bad)
+		}
+		if _, err := c.Get(ctx, 7); err == nil {
+			t.Fatalf("%q: get: no error", bad)
+		}
+		good.Store(true)
+		before := calls.Load()
+		if list, err := c.Find(ctx, Song{Title: "Undine"}); err != nil || len(list) != 0 {
+			t.Fatalf("%q: after recovery: %v %v", bad, list, err)
+		}
+		if l, err := c.Get(ctx, 7); err != nil || l.Plain != "a" {
+			t.Fatalf("%q: get after recovery: %v %v", bad, l, err)
+		}
+		if calls.Load() != before+2 {
+			t.Fatalf("%q: asked %d times after recovery", bad, calls.Load()-before)
+		}
+		// The good answers, the empty list too, are cached.
+		c.Find(ctx, Song{Title: "Undine"})
+		c.Get(ctx, 7)
+		if calls.Load() != before+2 {
+			t.Fatalf("%q: good answers not cached", bad)
+		}
+		srv.Close()
+	}
+}

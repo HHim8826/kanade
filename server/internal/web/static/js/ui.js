@@ -108,10 +108,21 @@ export function Empty({ icon = 'note', children }) {
   return html`<div class="empty"><${Icon} name=${icon} size=${48} /><p>${children}</p></div>`;
 }
 
+// ErrorBox shows an error with a retry button; when the server asked to wait (Retry-After), the
+// button counts down first.
 export function ErrorBox({ error, onRetry }) {
+  const [left, setLeft] = useState(0);
+  useEffect(() => {
+    const until = Date.now() + ((error && error.retryAfter) || 0) * 1000;
+    const tick = () => setLeft(Math.max(0, Math.ceil((until - Date.now()) / 1000)));
+    tick();
+    if (until <= Date.now()) return;
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, [error]);
   if (!error) return null;
   return html`<div class="error-box" role="alert"><span>${error.message || String(error)}</span>
-    ${onRetry && html`<button class="btn text" onClick=${onRetry}>重試</button>`}</div>`;
+    ${onRetry && html`<button class="btn text" disabled=${left > 0} onClick=${onRetry}>${left > 0 ? `${left} 秒後可重試` : '重試'}</button>`}</div>`;
 }
 
 // useLoad runs an async loader and keeps loading / error / data together. Data loaded for other
