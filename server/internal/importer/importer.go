@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
@@ -66,6 +67,10 @@ type Importer struct {
 	// discarded; unsaved counts the items whose source must be kept (KeepsSource). Client uploads
 	// use it to clear their staging folder.
 	OnBatchDone func(ctx context.Context, kind, source string, unsaved int)
+	// Refetch asks the download that handed over files (local paths) of batchID to fetch them again
+	// after they were lost, and to retry the batch once it has them: Retry uses it for files that
+	// are gone (review #57). An error says why it cannot.
+	Refetch func(ctx context.Context, batchID int64, paths []string) error
 	// Budget is the staging budget shared with downloads and uploads (plan §6); data about to be
 	// written to the work folder (unpacked archives, FFmpeg output, inbox fetches) is held on it
 	// first. nil means no limit.
@@ -194,41 +199,166 @@ func (im *Importer) Wake() {
 	}
 }
 
+// RetryResult says what a retry did with a batch's failed files.
+type RetryResult struct {
+	Requeued int `json:"requeued"` // queued to be imported again
+	Saved    int `json:"saved"`    // gone, but another import put the same file in the library
+	Fetching int `json:"fetching"` // gone; the download it came from fetches it again, then retries
+	Lost     int `json:"lost"`     // gone for good here: the file says why
+}
+
 // Retry puts a batch's failed items back in the queue (review #18). The batch goes through
 // analysis again, so a file that failed there is fetched, unpacked, converted or cut as it should
 // be (a CUE sheet that was fixed is read again); files that already have a plan keep it, preview
 // edits included, and new songs get groups of their own. Sidecars that found no album are tried
 // again with the rest. An upload that failed resumes where it stopped.
-func (im *Importer) Retry(ctx context.Context, batchID int64) (int, error) {
+//
+// A failed file whose source is gone is not queued only to fail again (review #57): when another
+// import has the same file in the library (a later round of a download brought an earlier round's
+// CUE sheet again), it is marked a duplicate; when it came from a download, Refetch has the
+// download fetch it again, and the download retries the batch once it has it; otherwise it stays
+// failed and says how to get it back.
+func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, error) {
+	var res RetryResult
+	var kind string
+	err := im.db.QueryRowContext(ctx, `SELECT kind FROM import_batches WHERE id = ? AND state = ?`, batchID, BatchDone).Scan(&kind)
+	if errors.Is(err, sql.ErrNoRows) {
+		return res, nil
+	}
+	if err != nil {
+		return res, err
+	}
+	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, source_path, drive_id, error FROM import_items
+		WHERE batch_id = ? AND state = 'failed'`, batchID)
+	if err != nil {
+		return res, err
+	}
+	type file struct {
+		id   int64
+		path string
+	}
+	// A file is gone when it is not there, or was not when the import failed: whatever is there now
+	// was not checked (aria2 may have written a fragment of it for a later round's pieces).
+	var missing []file
+	for rows.Next() {
+		var f file
+		var source, driveID, why string
+		if err := rows.Scan(&f.id, &f.path, &source, &driveID, &why); err != nil {
+			rows.Close()
+			return res, err
+		}
+		if driveID != "" || (source != "" && exists(source)) {
+			continue // an inbox file is fetched from Drive again; a cut or converted one made again
+		}
+		if !exists(f.path) || strings.Contains(why, syscall.ENOENT.Error()) || strings.HasPrefix(why, msgFetching) ||
+			strings.HasPrefix(why, msgGone) {
+			missing = append(missing, f)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return res, err
+	}
+	now := db.Now()
+	var gone []file
+	for _, f := range missing {
+		var saved int
+		if err := im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items WHERE local_path = ? AND id != ?
+			AND state IN ('published', 'duplicate')`, f.path, f.id).Scan(&saved); err != nil {
+			return res, err
+		}
+		if saved == 0 {
+			gone = append(gone, f)
+			continue
+		}
+		if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = '', updated_at = ? WHERE id = ?`,
+			StateDuplicate, now, f.id); err != nil {
+			return res, err
+		}
+		res.Saved++
+	}
+	held := []any{now, batchID, BatchDone}
+	if len(gone) > 0 {
+		paths := make([]string, len(gone))
+		for i, f := range gone {
+			paths[i] = f.path
+		}
+		why := errors.New("nothing keeps a copy of it")
+		if kind == "download" && im.Refetch != nil {
+			why = im.Refetch(ctx, batchID, paths)
+		}
+		msg := msgFetching
+		if why != nil {
+			msg = msgGone + " (" + why.Error() + "): import it again, or discard it"
+			res.Lost = len(gone)
+		} else {
+			res.Fetching = len(gone)
+		}
+		for _, f := range gone {
+			if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET error = ?, updated_at = ? WHERE id = ?`, msg, now, f.id); err != nil {
+				return res, err
+			}
+			held = append(held, f.id)
+		}
+	}
 	tx, err := im.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	defer tx.Rollback()
-	now := db.Now()
 	r, err := tx.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
-		WHERE batch_id = ? AND state = 'failed' AND batch_id IN (SELECT id FROM import_batches WHERE state = ?)`,
-		now, batchID, BatchDone)
+		WHERE batch_id = ? AND state = 'failed' AND batch_id IN (SELECT id FROM import_batches WHERE state = ?)
+		AND id NOT IN (0`+strings.Repeat(", ?", len(held)-3)+`)`, held...)
 	if err != nil {
-		return 0, err
+		return res, err
 	}
 	n, err := r.RowsAffected()
-	if err != nil || n == 0 {
-		return 0, err
+	if err != nil {
+		return res, err
+	}
+	if n == 0 {
+		if res.Saved > 0 {
+			im.batchDone(ctx, batchID) // fewer unsaved files: their sources may go now
+		}
+		return res, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
 		WHERE batch_id = ? AND role = ? AND state = ?`, now, batchID, RoleSidecar, StateSkipped); err != nil {
-		return 0, err
+		return res, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = NULL,
 		options = json_set(coalesce(nullif(options, ''), '{}'), '$.rerun', json('true')) WHERE id = ?`, BatchAnalyzing, batchID); err != nil {
-		return 0, err
+		return res, err
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, err
+		return res, err
 	}
 	im.Wake()
-	return int(n), nil
+	res.Requeued = int(n)
+	return res, nil
+}
+
+// RetryFetched retries a batch after its download fetched the files (local paths) it had lost
+// again, checked against the torrent: they are imported as they are now.
+func (im *Importer) RetryFetched(ctx context.Context, batchID int64, paths []string) (RetryResult, error) {
+	for _, p := range paths {
+		if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET error = 'fetched again', updated_at = ?
+			WHERE batch_id = ? AND local_path = ? AND state = 'failed'`, db.Now(), batchID, p); err != nil {
+			return RetryResult{}, err
+		}
+	}
+	return im.Retry(ctx, batchID)
+}
+
+// What a retry says of a file that is gone (and knows it by when the item is retried again).
+const (
+	msgFetching = "the file was gone: its download is fetching it again, then it is imported"
+	msgGone     = "the file is gone and cannot be had again here"
+)
+
+func exists(p string) bool {
+	_, err := os.Stat(p)
+	return p != "" && err == nil
 }
 
 // Run analyzes new batches and processes the items of running ones, one at a time, until ctx ends

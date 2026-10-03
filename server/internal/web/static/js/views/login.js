@@ -8,10 +8,13 @@ export function Login({ onLogin }) {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  // The passkey button shows only once a passkey was added (in the settings) and the browser can use it.
-  const [passkeys, setPasskeys] = useState(false);
+  // The passkey button shows only once a passkey was added (in the settings) and the browser can use
+  // it. The form shows once that is known, whole, so nothing moves under the user's hands: null is
+  // still asking, for at most three seconds; a failure or no answer shows the password alone.
+  const [passkeys, setPasskeys] = useState(() => (passkeysSupported() ? null : false));
   useEffect(() => {
-    if (passkeysSupported()) get('/passkeys/available', { allow401: true }).then((r) => setPasskeys(r.available), () => {});
+    if (passkeys !== null) return;
+    get('/passkeys/available', { allow401: true, timeout: 3000 }).then((r) => setPasskeys(!!r.available), () => setPasskeys(false));
   }, []);
   const withPasskey = async () => {
     setBusy(true);
@@ -37,6 +40,7 @@ export function Login({ onLogin }) {
       setBusy(false);
     }
   };
+  if (passkeys === null) return html`<main class="login" aria-busy="true"><div class="spinner late"></div></main>`;
   return html`<main class="login">
     <form class="card pad login-card" onSubmit=${submit}>
       <div class="brand"><${Icon} name="library" size=${40} /><h1>Kanade</h1></div>

@@ -158,7 +158,7 @@ func TestInboxImportsInPlace(t *testing.T) {
 	}
 	_ = f2
 	// What the batch left (lyrics, cover, notes) went to inbox/已處理 with its folder.
-	if p := dd.parentOf(album); p != "folder:inbox/"+inboxProcessed {
+	if p := movedTo(dd, album, "folder:inbox/"+inboxProcessed); p != "folder:inbox/"+inboxProcessed {
 		t.Fatalf("finished folder is in %q", p)
 	}
 
@@ -183,7 +183,7 @@ func TestInboxImportsInPlace(t *testing.T) {
 	im.db.QueryRow(`SELECT max(id) FROM import_batches WHERE kind = 'inbox'`).Scan(&batch)
 	waitState(t, im, batch, BatchDone)
 	// Its file was a duplicate (set aside in inbox/重複), and the empty folder is tidied away.
-	if p := dd.parentOf(late); p != "folder:inbox/"+inboxProcessed {
+	if p := movedTo(dd, late, "folder:inbox/"+inboxProcessed); p != "folder:inbox/"+inboxProcessed {
 		t.Fatalf("settled folder is in %q", p)
 	}
 
@@ -261,4 +261,14 @@ func TestInboxUsesCurrentContent(t *testing.T) {
 	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 || tracks[0].Title != "New" {
 		t.Fatalf("tracks %+v", tracks)
 	}
+}
+
+// movedTo waits a little for a file to be moved to want: the batch is done just before its inbox
+// folder is tidied. It returns where the file is.
+func movedTo(dd *inboxDrive, id, want string) string {
+	deadline := time.Now().Add(5 * time.Second)
+	for dd.parentOf(id) != want && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	return dd.parentOf(id)
 }

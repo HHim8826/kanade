@@ -1,4 +1,4 @@
-import { useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
 import { favs, trackMenu } from '../actions.js';
 import { fromEntry, fromTrack, playQueue, player } from '../player.js';
@@ -21,12 +21,6 @@ export function AlbumGrid({ albums, empty = '還沒有專輯。到「任務」�
   </div>`;
 }
 
-const moved = (list, from, to) => {
-  const out = [...list];
-  out.splice(to, 0, ...out.splice(from, 1));
-  return out;
-};
-
 // scrollParent is the nearest element that scrolls vertically.
 function scrollParent(el) {
   for (let p = el.parentElement; p; p = p.parentElement) {
@@ -36,30 +30,38 @@ function scrollParent(el) {
   return null;
 }
 
-// useReorder drags list rows by a handle to a new place, with a mouse, a pen or a finger; the list
-// scrolls while the pointer is held near the edge of its scrolling area. start(e, i) goes on a
-// handle's pointerdown; order(items) is the list as it looks mid-drag; onReorder(from, to) runs on
-// release (a canceled touch puts the row back). Keyboard users have the rows' move entries.
-export function useReorder(onReorder) {
-  const [drag, setDrag] = useState(null); // { from, to } while a row is being dragged
-  const start = (e, from) => {
-    if (e.pointerType === 'mouse' && e.button !== 0) return;
-    e.preventDefault();
-    const handle = e.currentTarget;
-    const scroller = scrollParent(handle.closest('ol'));
+// useReorder drags list rows to a new place: by a row's handle with a mouse, a pen or a finger, or
+// by the row itself with a mouse or a pen (a finger on a row scrolls the list). The rows stay where
+// they are in the page while one is dragged: it follows the pointer and the rows it passes make
+// room, so the browser keeps sending the pointer's events to it. The list scrolls while the pointer
+// is held near the edge of its scrolling area. keys are the rows' keys; onReorder(from, to) runs on
+// release. Escape, a canceled touch, a lost pointer or a change to the list puts the row back.
+// start(e, i) goes on a handle's pointerdown, press(e, i) on a row's; lift(i) is a row's look.
+// Keyboard users have the rows' move entries.
+export function useReorder(keys, onReorder) {
+  const [drag, setDrag] = useState(null); // { from, to, dy, h } while a row is being dragged
+  const stop = useRef(null); // ends the drag under way; stop(true) drops the row where it is
+  const list = keys.join('\n');
+  useEffect(() => () => stop.current && stop.current(false), [list]);
+
+  // begin drags row from, held at y0 and now at y.
+  const begin = (el, pointerId, from, y0, y) => {
+    const ol = el.closest('ol');
+    const scroller = scrollParent(ol);
     const scrolled = () => (scroller ? scroller.scrollTop : 0);
     const top0 = scrolled();
-    // Row middles in the scrolling area's own coordinates, so scrolling while dragging keeps them right.
-    const mids = [...handle.closest('ol').children].map((li) => {
-      const r = li.getBoundingClientRect();
-      return r.top + r.height / 2 + top0;
-    });
-    let to = from, y = e.clientY;
-    handle.setPointerCapture(e.pointerId);
-    setDrag({ from, to });
+    // Rows in the scrolling area's own coordinates, so scrolling while dragging keeps them right.
+    const boxes = [...ol.children].map((li) => li.getBoundingClientRect()).map((r) => ({ top: r.top + top0, bottom: r.bottom + top0 }));
+    const h = boxes[from].bottom - boxes[from].top;
+    const lo = boxes[0].top - boxes[from].top, hi = boxes[boxes.length - 1].bottom - boxes[from].bottom;
+    let to = from;
+    // A row makes room once the dragged row's middle is past its near edge: dropped over a row, the
+    // dragged one takes its place.
     const place = () => {
-      const n = mids.filter((m, k) => k !== from && m < y + scrolled()).length;
-      if (n !== to) setDrag({ from, to: (to = n) });
+      const dy = Math.min(hi, Math.max(lo, y - y0 + scrolled() - top0));
+      const mid = (boxes[from].top + boxes[from].bottom) / 2 + dy;
+      to = dy >= 0 ? from + boxes.filter((b, k) => k > from && b.top < mid).length : from - boxes.filter((b, k) => k < from && b.bottom > mid).length;
+      setDrag({ from, to, dy, h });
     };
     const edge = setInterval(() => {
       if (!scroller) return;
@@ -70,23 +72,82 @@ export function useReorder(onReorder) {
         place();
       }
     }, 16);
-    const move = (ev) => {
+    const mine = (f) => (ev) => ev.pointerId === pointerId && f(ev);
+    const move = mine((ev) => {
       y = ev.clientY;
       place();
-    };
-    const end = (ev) => {
+    });
+    const up = mine(() => end(true));
+    const cancel = mine(() => end(false));
+    const key = (ev) => ev.key === 'Escape' && end(false);
+    const end = (drop) => {
+      stop.current = null;
       clearInterval(edge);
-      handle.removeEventListener('pointermove', move);
-      handle.removeEventListener('pointerup', end);
-      handle.removeEventListener('pointercancel', end);
+      removeEventListener('pointermove', move, true);
+      removeEventListener('pointerup', up, true);
+      removeEventListener('pointercancel', cancel, true);
+      removeEventListener('keydown', key, true);
+      el.removeEventListener('lostpointercapture', cancel);
       setDrag(null);
-      if (ev.type === 'pointerup' && to !== from) onReorder(from, to);
+      if (drop && to !== from) onReorder(from, to);
     };
-    handle.addEventListener('pointermove', move);
-    handle.addEventListener('pointerup', end);
-    handle.addEventListener('pointercancel', end);
+    stop.current = end;
+    addEventListener('pointermove', move, true);
+    addEventListener('pointerup', up, true);
+    addEventListener('pointercancel', cancel, true);
+    addEventListener('keydown', key, true);
+    try {
+      el.setPointerCapture(pointerId);
+      el.addEventListener('lostpointercapture', cancel);
+    } catch { /* the pointer is already up: the window's listeners still end the drag */ }
+    place();
   };
-  return { drag, start, order: (items) => (drag ? moved(items, drag.from, drag.to) : items) };
+
+  const start = (e, from) => {
+    if ((e.pointerType === 'mouse' && e.button !== 0) || stop.current) return;
+    e.preventDefault();
+    begin(e.currentTarget, e.pointerId, from, e.clientY, e.clientY);
+  };
+
+  // A row held and moved a few pixels starts dragging; the click its release makes does not play it.
+  const press = (e, from) => {
+    if (e.pointerType === 'touch' || e.button !== 0 || stop.current) return;
+    const el = e.currentTarget, x0 = e.clientX, y0 = e.clientY, id = e.pointerId;
+    const move = (ev) => {
+      if (ev.pointerId !== id || Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
+      off();
+      getSelection().removeAllRanges();
+      addEventListener('pointerup', released, true);
+      begin(el, id, from, y0, ev.clientY);
+    };
+    const released = (ev) => {
+      if (ev.pointerId !== id) return;
+      removeEventListener('pointerup', released, true);
+      addEventListener('click', swallow, true); // the click comes right after, in the same task
+      setTimeout(() => removeEventListener('click', swallow, true), 0);
+    };
+    const swallow = (ev) => {
+      ev.stopPropagation();
+      ev.preventDefault();
+    };
+    const off = () => {
+      removeEventListener('pointermove', move, true);
+      removeEventListener('pointerup', off, true);
+      removeEventListener('pointercancel', off, true);
+    };
+    addEventListener('pointermove', move, true);
+    addEventListener('pointerup', off, true);
+    addEventListener('pointercancel', off, true);
+  };
+
+  const lift = (i) => {
+    if (!drag) return {};
+    const { from, to, dy, h } = drag;
+    if (i === from) return { class: 'lifted', style: `transform: translateY(${dy}px)` };
+    const by = from < to && i > from && i <= to ? -h : to < from && i >= to && i < from ? h : 0;
+    return { style: by ? `transform: translateY(${by}px)` : '' };
+  };
+  return { drag, start, press, lift };
 }
 
 // DragHandle is the grip a row is dragged by.
@@ -99,14 +160,14 @@ export const DragHandle = ({ onStart, label = '拖曳排序' }) => html`<span cl
 export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onReorder, meta }) {
   const playingId = useStore(player, (s) => s.queue[s.index]?.assetId);
   const favTracks = useStore(favs, (s) => s.tracks);
-  const { drag, start, order } = useReorder(onReorder);
-  const view = order(items);
+  const key = (it, i) => it.key || it.assetId + '-' + i;
+  const { drag, start, press, lift } = useReorder(items.map(key), onReorder);
 
   return html`<ol class=${'tracks' + (drag ? ' dragging' : '')}>
-    ${view.map((it, i) => html`<li key=${it.key || it.assetId + '-' + i} class=${drag && drag.to === i ? 'lifted' : ''}>
+    ${items.map((it, i) => html`<li key=${key(it, i)} ...${lift(i)}>
       <div class=${'track' + (it.assetId === playingId ? ' current' : '')}>
         ${onReorder && html`<${DragHandle} onStart=${(e) => start(e, i)} />`}
-        <button class="track-main" onClick=${() => (queue ? playQueue(queue, Math.max(queue.indexOf(it), 0)) : playQueue(items, i))}>
+        <button class="track-main" onPointerDown=${onReorder && ((e) => press(e, i))} onClick=${() => (queue ? playQueue(queue, Math.max(queue.indexOf(it), 0)) : playQueue(items, i))}>
           ${showNumber ? html`<span class="num">${it.number || ''}</span>` : html`<${Cover} id=${it.coverId} size=${96} className="thumb" />`}
           <span class="track-text">
             <span class="title">${it.title}</span>

@@ -297,7 +297,7 @@ func (s *Server) createImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) imports(w http.ResponseWriter, r *http.Request) {
-	list, err := s.importer.Batches(r.Context(), 50)
+	list, _, err := s.importer.Batches(r.Context(), 50)
 	if err != nil {
 		s.internal(w, r, err)
 		return
@@ -448,10 +448,10 @@ func (s *Server) retryImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	n, err := s.importer.Retry(r.Context(), id)
+	res, err := s.importer.Retry(r.Context(), id)
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"requeued": n})
+	writeJSON(w, http.StatusOK, res)
 }

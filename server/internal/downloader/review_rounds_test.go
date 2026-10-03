@@ -35,6 +35,12 @@ type rig struct {
 // newRig runs aria2, the importer and the downloader on the five test files of the rounds test,
 // served by a local web seed; budget is the staging budget.
 func newRig(t *testing.T, budget int64) *rig {
+	return newRigWith(t, budget, nil, true)
+}
+
+// newRigWith is newRig with more files in the torrent (path -> content), and the importer started
+// only when runImporter (else by the test).
+func newRigWith(t *testing.T, budget int64, extra map[string]string, runImporter bool) *rig {
 	bin := aria2Path(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &rig{ctx: ctx, tmp: t.TempDir()}
@@ -47,6 +53,10 @@ func newRig(t *testing.T, budget int64) *rig {
 		data, _ := os.ReadFile(filepath.Join("../media/testdata", src))
 		os.MkdirAll(filepath.Dir(filepath.Join(content, "Box", dst)), 0o755)
 		os.WriteFile(filepath.Join(content, "Box", dst), data, 0o644)
+		names = append(names, dst)
+	}
+	for dst, body := range extra {
+		os.WriteFile(filepath.Join(content, "Box", dst), []byte(body), 0o644)
 		names = append(names, dst)
 	}
 	sort.Strings(names)
@@ -69,7 +79,10 @@ func newRig(t *testing.T, budget int64) *rig {
 	r.imp = importer.New(r.d, r.lib, &localDrive{}, filepath.Join(r.tmp, "staging"), log)
 	aria, _ := NewAria2(bin, filepath.Join(r.tmp, "aria2"), filepath.Join(r.tmp, "downloads"), log)
 	r.svc = NewService(r.d, aria, r.imp, filepath.Join(r.tmp, "downloads"), budget, 0, log)
-	go r.imp.Run(ctx)
+	r.imp.Refetch = r.svc.Refetch
+	if runImporter {
+		go r.imp.Run(ctx)
+	}
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
 	t.Cleanup(func() { cancel(); <-ariaDone; web.Close(); links.Close(); r.d.Close() })
@@ -223,6 +236,72 @@ func TestImportAdmissionFailureKeepsDownload(t *testing.T) {
 			waitFor(t, "the download to finish", 90*time.Second, func() bool { return r.finished(id) })
 			if n := r.tracks(t); n != 4 {
 				t.Fatalf("tracks %d", n)
+			}
+		})
+	}
+}
+
+// Files lost after a round handed them over (review #57): the import fails for them; its retry has
+// the download fetch them again from the saved torrent, and once a round has them the import that
+// lost them is retried, so the rip log joins its album and the song is imported. Lost in an earlier
+// round, a later round may have written part of them back (its pieces reach into them): they are
+// fetched again all the same, checked against the torrent.
+func TestLostFilesFetchedAgain(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		budget int64
+	}{{"last round", 10 << 20}, {"earlier round", 105_000}} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newRigWith(t, tc.budget, map[string]string{"A/rip.log": "Exact Audio Copy V1.0 beta 3 from 29. August 2011\n"}, false)
+			id := r.add(t, nil)
+			var first int64
+			waitFor(t, "the first round handed over", 30*time.Second, func() bool {
+				v, _ := r.svc.Get(r.ctx, id)
+				if v.State == StateFailed {
+					t.Fatalf("failed: %s", v.Error)
+				}
+				first = v.ImportBatchID
+				return first != 0 && v.State != StateDownloading
+			})
+			dir := filepath.Join(r.tmp, "downloads", fmt.Sprint(id), "Box", "A")
+			for _, name := range []string{"rip.log", "02 tone.mp3"} {
+				if err := os.Remove(filepath.Join(dir, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			go r.imp.Run(r.ctx)
+			waitFor(t, "every round", 90*time.Second, func() bool { return r.finished(id) })
+			b, _ := r.imp.Batch(r.ctx, first)
+			if b.Counts["failed"] != 2 {
+				t.Fatalf("first batch %v", b.Counts)
+			}
+			tracks := r.tracks(t)
+			rounds := func() int { v, _ := r.svc.Get(r.ctx, id); return v.Round }
+			before := rounds()
+
+			res, err := r.imp.Retry(r.ctx, first)
+			if err != nil || res.Fetching != 2 || res.Requeued != 0 {
+				t.Fatalf("retry %+v %v", res, err)
+			}
+			waitFor(t, "fetched again and imported", 60*time.Second, func() bool {
+				b, _ := r.imp.Batch(r.ctx, first)
+				return b.State == "done" && b.Counts["failed"] == 0 && b.Counts["pending"] == 0 && r.finished(id)
+			})
+			b, _ = r.imp.Batch(r.ctx, first)
+			if b.Unsaved != 0 {
+				t.Fatalf("first batch after the retry: %+v", b.Counts)
+			}
+			if got := r.tracks(t); got != tracks+1 {
+				t.Fatalf("tracks %d, want %d", got, tracks+1)
+			}
+			var logs, batches int
+			r.d.QueryRow(`SELECT count(*) FROM sidecars WHERE kind = 'log'`).Scan(&logs)
+			r.d.QueryRow(`SELECT count(*) FROM import_batches`).Scan(&batches)
+			if logs != 1 || batches != before {
+				t.Fatalf("rip logs %d, batches %d for %d rounds: the files fetched again go to the import that lost them", logs, batches, before)
+			}
+			if rounds() != before+1 {
+				t.Fatalf("rounds %d, before %d", rounds(), before)
 			}
 		})
 	}

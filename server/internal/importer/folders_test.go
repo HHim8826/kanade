@@ -98,3 +98,65 @@ func TestNaturalCompare(t *testing.T) {
 		}
 	}
 }
+
+// Folders are told apart by where they were imported from: a folder of the same name in another
+// import is another folder (#52), while the batches of one download share their folders.
+func TestFolderGroupsBySource(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	startWorker(t, im)
+	standalone := func(kind, root string, paths []string, album string) {
+		t.Helper()
+		for i := range paths {
+			paths[i] = filepath.Join(root, paths[i])
+		}
+		batch, _, err := im.CreateBatchFiles(ctx, kind, "same name", root, paths, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, im, batch, BatchReview)
+		p, _ := im.Preview(ctx, batch)
+		if album != "" {
+			if err := im.ApplyOp(ctx, batch, PlanOp{Op: "standalone", Group: group(t, p, album).Key}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := im.Start(ctx, batch); err != nil {
+			t.Fatal(err)
+		}
+		waitState(t, im, batch, BatchDone)
+	}
+	a, b, dl := t.TempDir(), t.TempDir(), t.TempDir()
+	taggedMP3(t, filepath.Join(a, "Release/01.mp3"), map[string]string{"TIT2": "one", "TALB": "Album A", "TPE2": "Artist A"})
+	taggedMP3(t, filepath.Join(b, "Release/02.mp3"), map[string]string{"TIT2": "two", "TPE1": "Artist B"})
+	taggedMP3(t, filepath.Join(dl, "Set/Disc2/a.mp3"), map[string]string{"TIT2": "a", "TALB": "Real", "TPE2": "Z"})
+	taggedMP3(t, filepath.Join(dl, "Set/Disc1/b01.mp3"), map[string]string{"TIT2": "b"})
+	standalone("local", a, []string{"Release/01.mp3"}, "")
+	standalone("local", b, []string{"Release/02.mp3"}, "Release") // the folder rule made "Release": split it off
+	standalone("download", dl, []string{"Set/Disc2/a.mp3"}, "")
+	standalone("download", dl, []string{"Set/Disc1/b01.mp3"}, "Set") // the download's next batch
+
+	groups, err := im.FolderGroups(ctx)
+	if err != nil || len(groups) != 2 {
+		t.Fatalf("groups %+v %v", groups, err)
+	}
+	rel, set := groups[0], groups[1]
+	if rel.Folder != "Release" || rel.Join || rel.Title != "Release" || rel.AlbumArtist != "Artist B" || rel.Source.Kind != "local" ||
+		len(rel.Tracks) != 1 || rel.Tracks[0].Title != "two" {
+		t.Fatalf("the other import's folder: %+v", rel)
+	}
+	if set.Folder != "Set" || !set.Join || set.Title != "Real" || set.Source.Kind != "download" || len(set.Tracks) != 1 || rel.Key == set.Key {
+		t.Fatalf("the download's next batch: %+v", set)
+	}
+	if _, err := im.MakeFolderAlbums(ctx, []FolderChoice{{Key: rel.Key, Title: "Album B", AlbumArtist: "Artist B"}}); err != nil {
+		t.Fatal(err)
+	}
+	albums, _ := lib.Albums(ctx, 10, 0, false)
+	got := map[string]int{}
+	for _, al := range albums {
+		got[al.Title+" / "+al.AlbumArtist] = al.Tracks
+	}
+	if got["Album A / Artist A"] != 1 || got["Album B / Artist B"] != 1 || got["Real / Z"] != 1 {
+		t.Fatalf("albums %v", got)
+	}
+}

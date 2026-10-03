@@ -17,9 +17,9 @@ const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload:
 
 const fmtWhen = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-function usePoll(loader, ms) {
+function usePoll(loader, ms, deps = []) {
   const [state, setState] = useState({ data: null, error: null });
-  const load = useCallback(() => loader().then((data) => setState({ data, error: null }), (error) => setState((s) => ({ ...s, error }))), []);
+  const load = useCallback(() => loader().then((data) => setState({ data, error: null }), (error) => setState((s) => ({ ...s, error }))), deps);
   useEffect(() => {
     load();
     const t = setInterval(() => document.visibilityState === 'visible' && load(), ms);
@@ -33,10 +33,25 @@ function Progress({ value }) {
     <div style=${{ width: `${Math.min(value, 1) * 100}%` }}></div></div>`;
 }
 
+// The task center lists every task under way or waiting for the user, and the finished ones a page
+// at a time; a finished task's record can be removed (the songs, albums and files stay).
 export function Tasks() {
-  const tasks = usePoll(() => get('/tasks'), 2000);
+  const [history, setHistory] = useState(50);
+  const tasks = usePoll(() => get('/tasks?history=' + history), 2000, [history]);
   const [adding, setAdding] = useState(false);
   const [selecting, setSelecting] = useState(null);
+  const t = tasks.data;
+  const clearable = t && (t.downloads.some((d) => d.clearable) || t.imports.some((b) => b.clearable) || t.more_downloads || t.more_imports);
+  const clearAll = () => confirmDialog({
+    title: '清除已結束的記錄', action: '清除',
+    children: html`<p>從任務清單移除所有已結束的下載與匯入記錄。已入庫的歌曲、專輯和 Drive 上的檔案都不受影響；還在進行、做種，或還有檔案沒存進曲庫的任務會留著。</p>`,
+    onConfirm: async () => {
+      const r = await post('/tasks/clear');
+      toast(`已移除 ${r.downloads} 個下載和 ${r.imports} 個匯入的記錄`);
+      tasks.reload();
+    },
+  });
+  const more = html`<button class="btn text more-tasks" onClick=${() => setHistory((h) => h + 50)}>顯示更早的記錄</button>`;
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">任務</h1>
@@ -50,13 +65,16 @@ export function Tasks() {
     ${tasks.data && tasks.data.disk && tasks.data.disk.low && html`<div class="error-box" role="alert"><span>
       磁碟空間不足（剩 ${fmtBytes(tasks.data.disk.free_bytes)}，需保留 ${fmtBytes(tasks.data.disk.reserve_bytes)}）：已清掉播放快取${tasks.data.disk.stopped ? '，並暫停下載、暫不接受新的下載與上傳' : ''}。空間恢復後會自動繼續，不會刪除還沒存進 Drive 的檔案。</span></div>`}
     ${!tasks.data && !tasks.error && html`<${Spinner} />`}
-    ${tasks.data && html`
+    ${t && html`
+      ${clearable && html`<div class="task-tools"><button class="btn text" onClick=${clearAll}><${Icon} name="delete" />清除已結束的記錄</button></div>`}
       <h2 class="section-title">下載</h2>
-      ${tasks.data.downloads.length ? tasks.data.downloads.map((d) => html`<${DownloadCard} key=${d.id} d=${d} onSelect=${() => setSelecting(d.id)} onChange=${tasks.reload} />`)
+      ${t.downloads.length ? t.downloads.map((d) => html`<${DownloadCard} key=${d.id} d=${d} onSelect=${() => setSelecting(d.id)} onChange=${tasks.reload} />`)
         : html`<${Empty} icon="download">沒有下載任務<//>`}
+      ${t.more_downloads && more}
       <h2 class="section-title">匯入</h2>
-      ${tasks.data.imports.length ? tasks.data.imports.map((b) => html`<${ImportCard} key=${b.id} b=${b} onChange=${tasks.reload} />`)
+      ${t.imports.length ? t.imports.map((b) => html`<${ImportCard} key=${b.id} b=${b} onChange=${tasks.reload} />`)
         : html`<${Empty} icon="upload">沒有匯入紀錄<//>`}
+      ${t.more_imports && more}
     `}
     ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(id) => { setAdding(false); tasks.reload(); toast('已加入，正在取得檔案清單'); }} />`}
     ${selecting && html`<${SelectFiles} id=${selecting} onClose=${() => setSelecting(null)} onDone=${() => { setSelecting(null); tasks.reload(); }} />`}
@@ -86,6 +104,7 @@ function DownloadCard({ d, onSelect, onChange }) {
         ${!['completed', 'canceled'].includes(d.state) && (d.state !== 'failed' || !d.files_removed) && html`<${IconButton} icon="close"
           label=${d.state === 'seeding' ? '停止做種' : d.state === 'failed' ? '放棄並清除' : '取消'}
           onClick=${() => confirm(cancelPrompt(d)) && act('cancel')} />`}
+        ${d.clearable && html`<${IconButton} icon="delete" label="移除記錄" onClick=${() => act('clear')} />`}
       </div>
     </div>
     ${(d.state === 'downloading' || d.state === 'paused' || d.state === 'queued' || d.state === 'importing') && html`<${Progress} value=${progress} />`}
@@ -186,6 +205,15 @@ function SelectFiles({ id, onClose, onDone }) {
   <//>`;
 }
 
+// retried says what a retry did: files whose source is gone are not simply queued to fail again
+// (review #57).
+const retried = (r) => [
+  r.requeued && `重新排入 ${r.requeued} 個檔案`,
+  r.saved && `${r.saved} 個檔案的來源已不在，但同一個檔案已由其他批次存進曲庫，標為已存在`,
+  r.fetching && `${r.fetching} 個檔案已不在伺服器上，正從下載重新取得，取得後自動匯入`,
+  r.lost && `${r.lost} 個檔案已不在，也無法重新取得（原因見檔案），請重新匯入或捨棄`,
+].filter(Boolean).join('；') || '沒有可以重試的檔案';
+
 function ImportCard({ b, onChange }) {
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState(null);
@@ -199,7 +227,8 @@ function ImportCard({ b, onChange }) {
   const c = b.counts;
   const total = Object.values(c).reduce((a, n) => a + n, 0);
   const done = total - (c.pending || 0) - (c.uploading || 0);
-  const retry = () => post(`/imports/${b.id}/retry`).then((r) => { toast(`重新排入 ${r.requeued} 個檔案`); onChange(); }, (e) => toast(e.message, 'error'));
+  const clear = () => post(`/imports/${b.id}/clear`).then(onChange, (e) => toast(e.message, 'error'));
+  const retry = () => post(`/imports/${b.id}/retry`).then((r) => { toast(retried(r), r.lost ? 'error' : 'info'); onChange(); }, (e) => toast(e.message, 'error'));
   const kept = { upload: '原始檔留在伺服器的暫存空間', download: '下載的檔案會保留', inbox: '檔案留在 Drive 收件匣' }[b.kind] || '';
   const discard = () => confirmDialog({
     title: '捨棄未存進曲庫的檔案', action: '捨棄', danger: true,
@@ -229,6 +258,7 @@ function ImportCard({ b, onChange }) {
     ${(c.failed > 0 || b.unsaved > 0) && html`<div class="task-actions">
       ${c.failed > 0 && html`<button class="btn text" onClick=${retry}><${Icon} name="refresh" />重試失敗項目</button>`}
       ${b.unsaved > 0 && html`<button class="btn text danger-text" onClick=${discard}><${Icon} name="delete" />捨棄…</button>`}</div>`}
+    ${b.clearable && html`<div class="task-actions"><button class="btn text" onClick=${clear}><${Icon} name="delete" />移除記錄</button></div>`}
     ${open && detail && html`<ul class="items">
       ${detail.items.map((it) => html`<li key=${it.id}>
         <span class="grow path">${it.path}</span>

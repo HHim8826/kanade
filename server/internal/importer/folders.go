@@ -3,9 +3,13 @@ package importer
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"path"
+	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/HHim8826/kanade/server/internal/library"
@@ -14,17 +18,29 @@ import (
 
 // Folder albums for files imported before the folder rule (defaultPlans): standalone tracks without
 // an album tag whose import put them in an album folder that names the album (no file there has an
-// album tag) or whose other files all went to one album.
+// album tag) or whose other files all went to one album. A folder is one folder of one source: the
+// place its files were imported from (a download's folder, which all its batches share; an upload; a
+// folder of the server; the Drive inbox), so two imports that happen to have a folder of the same
+// name are not taken for one album.
 
 // FolderGroup is the standalone tracks of one album folder.
 type FolderGroup struct {
+	Key         string         `json:"key"`    // names the folder of its source
 	Folder      string         `json:"folder"` // as the import saw it, e.g. ARIA/Drama CD/ARIA The STATION Due COUR.1
+	Source      FolderSource   `json:"source"`
 	Title       string         `json:"title"`
 	AlbumArtist string         `json:"album_artist"`
 	AlbumID     int64          `json:"album_id,omitempty"` // the album the tracks go to, when it exists
 	Join        bool           `json:"join"`               // AlbumID is where the folder's tagged files went
 	Tracks      []FolderTrack  `json:"tracks"`
 	tagged      library.Tagged // the identity the rule gives a new album
+}
+
+// FolderSource is the import the folder came from (the first, for a download imported in batches).
+type FolderSource struct {
+	Kind string `json:"kind"` // download | upload | local | inbox
+	Name string `json:"name"`
+	At   int64  `json:"at"`
 }
 
 type FolderTrack struct {
@@ -41,7 +57,8 @@ type FolderTrack struct {
 func (im *Importer) FolderGroups(ctx context.Context) ([]FolderGroup, error) {
 	// Every audio file imported, for the folders that have album tags somewhere, and the latest
 	// import of each standalone track.
-	rows, err := im.db.QueryContext(ctx, `SELECT i.id, i.rel_path, coalesce(i.info, ''), coalesce(i.track_id, 0), coalesce(i.asset_id, 0),
+	rows, err := im.db.QueryContext(ctx, `SELECT i.batch_id, b.kind, b.source, b.created_at, i.local_path, i.source_path,
+		i.rel_path, coalesce(i.info, ''), coalesce(i.track_id, 0), coalesce(i.asset_id, 0),
 		coalesce(b.options, ''), coalesce((SELECT e.album_id FROM album_entries e WHERE e.id = i.entry_id), 0),
 		coalesce(t.title, ''), coalesce(a.duration_ms, 0),
 		t.id IS NOT NULL AND a.id IS NOT NULL AND i.id = (SELECT max(x.id) FROM import_items x WHERE x.track_id = t.id AND x.info IS NOT NULL)
@@ -53,68 +70,110 @@ func (im *Importer) FolderGroups(ctx context.Context) ([]FolderGroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	type row struct {
+		batch, trackID, assetID, entryAlbum, duration int64
+		rel, raw, opts, title                         string
+		standalone                                    bool
+	}
+	var list []row
+	roots := map[int64]string{} // batch -> the place it was imported from
+	sources := map[string]FolderSource{}
+	for rows.Next() {
+		var r row
+		var kind, name, local, source string
+		var at int64
+		if err := rows.Scan(&r.batch, &kind, &name, &at, &local, &source, &r.rel, &r.raw, &r.trackID, &r.assetID, &r.opts,
+			&r.entryAlbum, &r.title, &r.duration, &r.standalone); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		list = append(list, r)
+		if _, ok := roots[r.batch]; ok {
+			continue
+		}
+		// The place is what the file's path has before its path in the import; a file fetched from
+		// the Drive inbox, cut from a CUE image or converted has its own path, so the batch's other
+		// files tell it. All files of the inbox are one place.
+		root := ""
+		for _, p := range []string{local, source} {
+			if p != "" && strings.HasSuffix(filepath.ToSlash(p), "/"+r.rel) {
+				root = kind + ":" + filepath.ToSlash(p)[:len(p)-len(r.rel)]
+			}
+		}
+		if kind == "inbox" {
+			root = "inbox:"
+		}
+		if root != "" {
+			roots[r.batch] = root
+			if old, ok := sources[root]; !ok || at < old.At {
+				sources[root] = FolderSource{Kind: kind, Name: name, At: at}
+			}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	albumsIn := map[string]map[string]bool{} // album tags of each folder
 	wentTo := map[string]map[int64]int{}     // where the folder's tagged files are
 	byFolder := map[string]*FolderGroup{}
 	artists := map[string]map[string]bool{}
 	var order []string
-	for rows.Next() {
-		var id, trackID, assetID, entryAlbum, duration int64
-		var rel, raw, opts, title string
-		var standalone bool
-		if err := rows.Scan(&id, &rel, &raw, &trackID, &assetID, &opts, &entryAlbum, &title, &duration, &standalone); err != nil {
-			return nil, err
-		}
+	for _, r := range list {
 		var info media.Info
-		if json.Unmarshal([]byte(raw), &info) != nil {
+		if json.Unmarshal([]byte(r.raw), &info) != nil {
 			continue
 		}
 		var o batchOptions
-		if json.Unmarshal([]byte(opts), &o) == nil && o.Encoding != "" {
+		if json.Unmarshal([]byte(r.opts), &o) == nil && o.Encoding != "" {
 			info.Redecode(o.Encoding)
 		}
-		root := albumRoot(path.Dir(rel))
+		place, ok := roots[r.batch]
+		if !ok {
+			place = "batch:" + strconv.FormatInt(r.batch, 10)
+		}
+		root := albumRoot(path.Dir(r.rel))
+		k := place + "\x00" + root
 		if info.Tags.Album != "" {
-			if albumsIn[root] == nil {
-				albumsIn[root], wentTo[root] = map[string]bool{}, map[int64]int{}
+			if albumsIn[k] == nil {
+				albumsIn[k], wentTo[k] = map[string]bool{}, map[int64]int{}
 			}
-			albumsIn[root][info.Tags.Album] = true
-			if entryAlbum != 0 {
-				wentTo[root][entryAlbum]++
+			albumsIn[k][info.Tags.Album] = true
+			if r.entryAlbum != 0 {
+				wentTo[k][r.entryAlbum]++
 			}
 			continue
 		}
-		if !standalone {
+		if !r.standalone {
 			continue
 		}
-		g := byFolder[root]
+		g := byFolder[k]
 		if g == nil {
-			g = &FolderGroup{Folder: root, Title: FolderAlbum(root)}
-			byFolder[root] = g
-			artists[root] = map[string]bool{}
-			order = append(order, root)
+			sum := sha256.Sum256([]byte(k))
+			g = &FolderGroup{Key: hex.EncodeToString(sum[:8]), Folder: root, Source: sources[place], Title: FolderAlbum(root)}
+			byFolder[k] = g
+			artists[k] = map[string]bool{}
+			order = append(order, k)
 		}
-		if slices.ContainsFunc(g.Tracks, func(t FolderTrack) bool { return t.TrackID == trackID }) {
+		if slices.ContainsFunc(g.Tracks, func(t FolderTrack) bool { return t.TrackID == r.trackID }) {
 			continue
 		}
-		in := entryInput(rel, &info)
-		g.Tracks = append(g.Tracks, FolderTrack{TrackID: trackID, AssetID: assetID, Title: title, File: path.Base(rel),
-			Disc: max(in.DiscNo, 1), Track: in.TrackNo, DurationMS: duration})
+		in := entryInput(r.rel, &info)
+		g.Tracks = append(g.Tracks, FolderTrack{TrackID: r.trackID, AssetID: r.assetID, Title: r.title, File: path.Base(r.rel),
+			Disc: max(in.DiscNo, 1), Track: in.TrackNo, DurationMS: r.duration})
 		if a := cmp.Or(info.Tags.AlbumArtist, info.Tags.Artist); a != "" {
-			artists[root][a] = true
+			artists[k][a] = true
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	out := []FolderGroup{}
-	for _, root := range order {
-		g := byFolder[root]
+	for _, k := range order {
+		g := byFolder[k]
 		switch {
-		case len(albumsIn[root]) == 1: // join the album the folder's tagged files went to
+		case g.Title == "" || len(albumsIn[k]) > 1: // loose files, or a folder of several albums
+			continue
+		case len(albumsIn[k]) == 1: // join the album the folder's tagged files went to
 			best, n := int64(0), 0
-			for id, c := range wentTo[root] {
+			for id, c := range wentTo[k] {
 				if c > n || (c == n && id < best) {
 					best, n = id, c
 				}
@@ -138,13 +197,11 @@ func (im *Importer) FolderGroups(ctx context.Context) ([]FolderGroup, error) {
 			sortFolderTracks(g.Tracks)
 			out = append(out, *g)
 			continue
-		case len(albumsIn[root]) > 1 || g.Title == "":
-			continue
 		}
-		switch len(artists[root]) {
+		switch len(artists[k]) {
 		case 0:
 		case 1:
-			for a := range artists[root] {
+			for a := range artists[k] {
 				g.AlbumArtist = a
 			}
 		default:
@@ -170,8 +227,10 @@ func sortFolderTracks(tracks []FolderTrack) {
 	})
 }
 
-// FolderChoice is a folder to make an album of, with the title and album artist the user settled on.
+// FolderChoice is a folder to make an album of (by its key; or by its folder, when only one source
+// has that folder), with the title and album artist the user settled on.
 type FolderChoice struct {
+	Key         string `json:"key"`
 	Folder      string `json:"folder"`
 	Title       string `json:"title"`
 	AlbumArtist string `json:"album_artist"`
@@ -185,9 +244,14 @@ func (im *Importer) MakeFolderAlbums(ctx context.Context, choices []FolderChoice
 	}
 	var albums []library.NewAlbum
 	for _, c := range choices {
-		i := slices.IndexFunc(groups, func(g FolderGroup) bool { return g.Folder == c.Folder })
+		i := slices.IndexFunc(groups, func(g FolderGroup) bool { return g.Key == c.Key })
+		if c.Key == "" {
+			if same := slices.DeleteFunc(slices.Clone(groups), func(g FolderGroup) bool { return g.Folder != c.Folder }); len(same) == 1 {
+				i = slices.IndexFunc(groups, func(g FolderGroup) bool { return g.Key == same[0].Key })
+			}
+		}
 		if i < 0 {
-			continue // sorted out meanwhile
+			continue // sorted out meanwhile, or not one folder
 		}
 		g := groups[i]
 		a := library.NewAlbum{Title: cmp.Or(strings.TrimSpace(c.Title), g.Title), AlbumArtist: strings.TrimSpace(c.AlbumArtist), Tagged: g.tagged}

@@ -94,11 +94,11 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /app/", web.Handler())
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 
-	mux.HandleFunc("POST /api/v1/setup", s.setup)
-	mux.HandleFunc("POST /api/v1/login", s.login)
+	mux.Handle("POST /api/v1/setup", sameOrigin(s.setup))
+	mux.Handle("POST /api/v1/login", sameOrigin(s.login))
 	mux.HandleFunc("GET /api/v1/passkeys/available", s.passkeysAvailable)
-	mux.HandleFunc("POST /api/v1/passkeys/login/options", s.passkeyLoginOptions)
-	mux.HandleFunc("POST /api/v1/passkeys/login", s.passkeyLogin)
+	mux.Handle("POST /api/v1/passkeys/login/options", sameOrigin(s.passkeyLoginOptions))
+	mux.Handle("POST /api/v1/passkeys/login", sameOrigin(s.passkeyLogin))
 	mux.Handle("GET /api/v1/passkeys", s.authed(s.listPasskeys))
 	mux.Handle("POST /api/v1/passkeys/options", s.authed(s.passkeyOptions))
 	mux.Handle("POST /api/v1/passkeys", s.authed(s.addPasskey))
@@ -195,6 +195,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/downloads/{id}/cancel", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Cancel(r.Context(), id) })))
 	mux.Handle("POST /api/v1/downloads/{id}/retry", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Retry(r.Context(), id) })))
 	mux.Handle("GET /api/v1/tasks", s.authed(s.tasks))
+	mux.Handle("POST /api/v1/tasks/clear", s.authed(s.clearTasks))
+	mux.Handle("POST /api/v1/downloads/{id}/clear", s.authed(s.clearDownload))
+	mux.Handle("POST /api/v1/imports/{id}/clear", s.authed(s.clearImport))
 
 	mux.Handle("GET /api/v1/rss/sources", s.authed(s.rssSources))
 	mux.Handle("POST /api/v1/rss/sources", s.authed(s.createRSSSource))
@@ -271,6 +274,32 @@ const sessionCookie = "kanade_session"
 // csrfHeader must accompany cookie-authenticated requests that change state. A cross-site page
 // cannot add a custom header without a CORS preflight, which this server never grants.
 const csrfHeader = "X-Requested-With"
+
+// sameOrigin guards the requests made before logging in, which csrfHeader cannot: a page of another
+// site must not log the browser in (to an account of its choosing) or use up the login throttle and
+// passkey requests of its address. Browsers say where a request comes from (Sec-Fetch-Site, else
+// Origin); requests that say nothing, as the apps' do, pass.
+var crossOrigin = http.NewCrossOriginProtection()
+
+func sameOrigin(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := crossOrigin.Check(r); err != nil {
+			writeError(w, http.StatusForbidden, errors.New("requests from another site are not accepted here"))
+			return
+		}
+		next(w, r)
+	})
+}
+
+// cookieLogin refuses a login that asks for the session cookie without csrfHeader, which the web
+// client always sends and a form of another site cannot.
+func cookieLogin(w http.ResponseWriter, r *http.Request, cookie bool) bool {
+	if cookie && r.Header.Get(csrfHeader) != "kanade" {
+		writeError(w, http.StatusForbidden, errors.New("missing "+csrfHeader+" header"))
+		return false
+	}
+	return true
+}
 
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
@@ -395,6 +424,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if !cookieLogin(w, r, req.Cookie) {
+		return
+	}
 	token, err := s.auth.Login(r.Context(), req.Username, req.Password, req.Device, clientIP(r))
 	switch {
 	case errors.Is(err, auth.ErrThrottled):
@@ -414,7 +446,7 @@ func (s *Server) loggedIn(w http.ResponseWriter, token string, cookie bool) {
 		writeJSON(w, http.StatusOK, map[string]string{"token": token})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: 90 * 24 * 3600,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(auth.SessionLifetime / time.Second),
 		HttpOnly: true, Secure: strings.HasPrefix(s.cfg.PublicURL, "https://"), SameSite: http.SameSiteStrictMode})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

@@ -166,7 +166,7 @@ func TestRetryConvertsAfterSpaceFailure(t *testing.T) {
 	full.Lock()
 	noRoom = false
 	full.Unlock()
-	if n, err := im.Retry(ctx, batch); err != nil || n != 1 {
+	if n, err := im.Retry(ctx, batch); err != nil || n.Requeued != 1 {
 		t.Fatalf("retry %d %v", n, err)
 	}
 	waitState(t, im, batch, BatchDone)

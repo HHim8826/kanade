@@ -220,6 +220,8 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
 .drag-handle { display: grid; place-items: center; width: 32px; height: 44px; flex: none; color: var(--outline); cursor: grab; touch-action: none; }
 .tracks.dragging { user-select: none; }
 .tracks.dragging .drag-handle { cursor: grabbing; }
+.tracks.dragging li { transition: transform .15s; }
+.tracks li.lifted { position: relative; z-index: 1; transition: none; }
 .tracks li.lifted .track { background: var(--surface-container-high); box-shadow: 0 2px 8px rgb(0 0 0 / .2); }
 .icon-btn.fav-on { color: var(--primary); }
 .track .num { width: 28px; text-align: right; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; flex: none; }
@@ -245,6 +247,8 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
 .task-head { display: flex; align-items: center; gap: 8px; width: 100%; }
 .task-head.plain { background: none; border: 0; padding: 0; text-align: left; cursor: pointer; }
 .task-actions { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.task-tools { display: flex; justify-content: flex-end; margin: -8px 0 -4px; }
+.more-tasks { display: block; margin: 0 auto 8px; }
 .task-error { color: var(--error); font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
 .chip { display: inline-block; padding: 1px 10px; border-radius: 8px; font-size: 12px; font-weight: 500; background: var(--surface-container-high); }
 .count { font-size: 12px; margin-left: 6px; }
@@ -397,6 +401,9 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .brand { display: flex; align-items: center; gap: 12px; color: var(--primary); margin-bottom: 24px; }
 .brand h1 { font-size: 24px; margin: 0; color: var(--on-surface); }
 .spinner { width: 32px; height: 32px; margin: 32px auto; border-radius: 50%; border: 3px solid var(--surface-container-high); border-top-color: var(--primary); animation: spin .8s linear infinite; }
+/* A spinner for a wait that is usually too short to see: it shows only if the wait goes on. */
+.spinner.late { animation: spin .8s linear infinite, appear 0s .4s backwards; }
+@keyframes appear { from { visibility: hidden; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty { text-align: center; color: var(--on-surface-variant); padding: 32px 16px; }
 .empty .icon { color: var(--outline); }

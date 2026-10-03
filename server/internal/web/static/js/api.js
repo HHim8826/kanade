@@ -24,10 +24,15 @@ export async function api(method, path, body, opts = {}) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
-  const res = await fetch('/api/v1' + path, {
-    method, headers, body: payload, credentials: 'same-origin', signal: opts.signal, keepalive: !!opts.keepalive,
-  });
-  const text = await res.text();
+  // timeout (ms) gives up on a server that does not answer, for reads a page cannot show without.
+  const signal = opts.timeout ? AbortSignal.any([AbortSignal.timeout(opts.timeout), ...(opts.signal ? [opts.signal] : [])]) : opts.signal;
+  let res, text;
+  try {
+    res = await fetch('/api/v1' + path, { method, headers, body: payload, credentials: 'same-origin', signal, keepalive: !!opts.keepalive });
+    text = await res.text();
+  } catch (e) {
+    throw e.name === 'TimeoutError' ? new ApiError(0, '伺服器沒有回應，請稍後再試') : e;
+  }
   let data = null;
   try {
     data = text ? JSON.parse(text) : null;

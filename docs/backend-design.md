@@ -96,7 +96,7 @@ DIR/
 | 方法與路徑 | 用途 |
 |---|---|
 | `POST /setup` | 首次建立管理員；需資料目錄 `setup-code` 檔內的一次性設定碼 |
-| `POST /login`、`POST /logout` | 登入取得 token（失敗 5 次／15 分鐘依 IP 節流）、登出 |
+| `POST /login`、`POST /logout` | 登入取得 token（失敗 5 次／15 分鐘依 IP 節流，驗證中的請求也算）、登出。要 cookie 的登入（`"cookie": true`）需 `X-Requested-With: kanade`；登入路由拒絕瀏覽器標示為跨站的請求（審查 #60） |
 | `GET /passkeys/available`、`POST /passkeys/login/options`、`POST /passkeys/login` | 不需登入：是否有任何 passkey（登入頁據此顯示按鈕）、取得一次性 challenge、以 passkey 的回應登入（同密碼登入的節流與 cookie） |
 | `GET /passkeys`、`POST /passkeys/options`、`POST /passkeys`、`PATCH`／`DELETE /passkeys/{id}` | 列出自己的 passkey；`{"password"}` 確認密碼後取得建立選項（密碼錯回 403）；儲存裝置建立的 passkey；改名、移除 |
 | `GET /status` | Drive 連線、aria2 是否就緒 |
@@ -110,7 +110,7 @@ DIR/
 | `GET /imports/{id}/preview`、`POST /imports/{id}/plan` | 預覽（各組、單曲、其他檔案、偵測到的編碼）；修改計畫（`op`：`group`、`items`、`move`、`standalone`、`folders`、`encoding`、`exclude`、`include`），回傳新的預覽 |
 | `POST /imports/{id}/start`、`POST /imports/{id}/cancel` | 開始執行；取消（只限等待確認或分析中） |
 | `GET /sidecars/{id}` | 下載與專輯一起保存的 CUE／LOG |
-| `GET /imports`、`GET /imports/{id}`、`POST /imports/{id}/retry` | 匯入批次、逐檔狀態與上傳進度（完成的批次另有 `unsaved`：沒存進曲庫、來源保留中的檔案數）、重試失敗項目 |
+| `GET /imports`、`GET /imports/{id}`、`POST /imports/{id}/retry` | 匯入批次、逐檔狀態與上傳進度（完成的批次另有 `unsaved`：沒存進曲庫、來源保留中的檔案數）、重試失敗項目：回應 `{requeued, saved, fetching, lost}`（重新排入、同一檔案已由其他批次入庫、正由下載重新取得、已無法取得，審查 #57） |
 | `POST /imports/{id}/discard` | 捨棄完成批次中沒存進曲庫的檔案（失敗、被略過的音檔），讓來源可以清理：`{"discarded": n}` |
 | `POST /downloads` | `{"uri": "magnet:..."}`／`{"uri": "https://.../x.torrent"}`，或以 `Content-Type: application/x-bittorrent` 直接送 .torrent |
 | `GET /downloads`、`GET /downloads/{id}` | 下載清單；單一下載含檔案清單與預設勾選（`suggested`） |
@@ -121,7 +121,8 @@ DIR/
 | `PUT /uploads/{id}?offset=N` | 送一個分塊（最多 32 MB）；位移不符回 409 與伺服器已收到的位元組數 |
 | `GET /uploads/{id}`、`POST /uploads/{id}/complete` | 進度；完成（驗證大小與 SHA-256；可重送） |
 | `GET /uploads`、`DELETE /uploads/groups/{group}` | 未完成的上傳群組；取消一個群組（正在匯入時 409） |
-| `GET /tasks` | 任務中心：下載與匯入批次 |
+| `GET /tasks?history=N` | 任務中心：所有進行中、等待使用者、失敗或還有檔案沒存進曲庫的下載與匯入，加上最近 N 筆（預設 50）已結束的；`more_downloads`／`more_imports` 表示還有更早的（審查 #58） |
+| `POST /downloads/{id}/clear`、`POST /imports/{id}/clear`、`POST /tasks/clear` | 從任務中心移除已結束的記錄（單筆、全部）：只標記 `cleared_at`，曲庫、檔案與匯入紀錄不動；還在進行、做種、有檔案可重試或沒存進曲庫的不能移除（409，審查 #54） |
 | `GET`／`POST /rss/sources`、`PATCH`／`DELETE /rss/sources/{id}` | RSS 來源（密碼與 Cookie 只回報是否已設定；`auth_origins`：其他也要收到帳密與 Cookie 的網站，每行一個） |
 | `POST /rss/sources/{id}/refresh`、`GET /rss/sources/{id}/search?q=` | 立即更新；站內搜尋（不入庫） |
 | `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、關聯下載的 `download_id` 與 `download_state`、只在完成時為真的 `downloaded`、自動下載的 `auto_state`：`pending`／`done`／`failed` 與 `auto_error`）；從條目或站內搜尋結果開始下載，失敗的下載改為重試，進行中的不重複開始 |
@@ -145,7 +146,7 @@ DIR/
 | `DELETE /albums/{id}[?tracks=1]` | 移除專輯（可撤回）；`tracks=1` 另永久刪除只在這張專輯的歌曲 |
 | `GET /albums/{id}/identify`、`GET`／`POST /albums/{id}/identify/{release}` | MusicBrainz 候選；差異；套用勾選的 `keys` |
 | `POST /albums/{id}/vgmdb`、`POST /albums/{id}/vgmdb/apply` | 用戶端從貼上的 VGMdb 專輯頁讀出的 `album`（名稱、專輯歌手、日期、型號、封面網址、各碟曲名與長度）和這張專輯比對，回傳同 MusicBrainz 的差異；套用勾選的 `keys`，勾了封面才從 media.vgm.io 下載 |
-| `GET`／`POST /organize/folders` | 沒有專輯的歌曲中，資料夾說明了專輯的（見下）；`{"folders": [{folder, title, album_artist}]}` 依資料夾整理，一次可撤回 |
+| `GET`／`POST /organize/folders` | 沒有專輯的歌曲中，資料夾說明了專輯的（見下；每個資料夾有 `key` 與來源 `source`）；`{"folders": [{key, title, album_artist}]}` 依資料夾整理，一次可撤回 |
 | `GET`／`PATCH /artists/{id}` | 歌手與歌曲、別名；改名（`name`）、別名（`aliases`） |
 | `GET /edits?limit&before`、`GET /edits/{id}`、`POST /edits/{id}/undo` | 修改紀錄、單筆明細、撤回（部分欄位保留時回傳 `conflicts`；全部無法撤回為 409） |
 | `GET /drive/sync` | 同步狀態：上次變更檢查、上次完整對帳與結果、是否進行中、基準對帳是否未完成、收件匣上次檢查 |
@@ -364,6 +365,22 @@ DIR/
   - 使用者選擇專輯名稱（預設日文）與作為專輯歌手的製作人員（預設演出者，否則作曲者），伺服器檢查內容後產生與 MusicBrainz 相同的差異清單：曲目依碟號與曲序配對，曲序對不上但數量相同時依順序（例如 DUE14 是第二套的第 1 首），長度相差 5 秒以上的不預設勾選；多數曲目長度不符時，專輯欄位也不預設勾選（MusicBrainz 同樣適用）。VGMdb 沒有每首的歌手，專輯歌手只填到沒有歌手的歌曲。
   - 封面網址只接受 https 的 media.vgm.io（含 medium／thumb）`/albums/…`，套用時下載原尺寸，與其他封面一樣存到 Drive。修改紀錄的來源標為「VGMdb」。
 - 對話框在手機上被不換行的文字撐出畫面：`.scrim` 的格線改為一欄 `minmax(0, 1fr)`，所有對話框都不會超出螢幕寬度。
+
+### 審查修正：登入安全、任務記錄、遺失的附屬檔、資料夾來源與前端（2026-10-03，#51–#63）
+
+- 登入（#60）：
+  - 登入、passkey 登入與其 options、首次設定的路由以 Go 的 `http.CrossOriginProtection` 拒絕瀏覽器標示為跨站的請求（Sec-Fetch-Site，沒有時比對 Origin 與 Host），沒有這些標頭的原生客戶端照常；要 cookie 的登入還需 `X-Requested-With: kanade`。被拒的請求不建立 session、不用掉 challenge 或節流額度。
+  - Session 自建立起 90 天到期（`auth.SessionLifetime`，cookie 同長），使用不延長；到期的在下次驗證時刪除。
+  - 節流計入驗證中的請求：同一位址「近 15 分鐘的失敗＋正在驗證的」達 5 次就拒絕，密碼、passkey 登入與加入 passkey 前的密碼確認共用。
+  - 密碼登入先比對，再在建立 session 的寫入交易內確認密碼雜湊沒變；改密碼與撤銷 sessions 在同一個交易。加入 passkey 的 challenge 記住確認時的密碼雜湊，儲存時在交易內再比對，並在同一交易檢查 20 個的上限。Passkey 登入在交易內重新讀取憑證（仍存在、同一帳號與公鑰），計數器有在用時必須大於目前值，更新計數器與建立 session 一起提交；同時用同一個計數器值的兩次登入只有一次成功，不用計數器（一直是 0）的同步 passkey 不受影響。
+  - 撤銷政策：移除 passkey 之後不能再用它登入，但不撤銷它先前登入的 sessions；改密碼撤銷所有 sessions，並使還沒完成的、以舊密碼確認的 passkey 加入失效，既有的 passkey 保留。
+- 任務中心（#58、#54，遷移 22：`downloads.cleared_at`、`import_batches.cleared_at`）：未完成的任務（進行中、等待選檔或確認、失敗、還有檔案沒存進曲庫）一定列出，已結束的分頁載入（「顯示更早的記錄」）。已結束的記錄可單筆「移除記錄」或「清除已結束的記錄」，只是不再列出：曲庫、Drive 檔案、匯入紀錄（原標籤恢復與 Drive 對帳用得到）都保留。還持有檔案的下載（失敗後保留以便重試，或匯入還有檔案沒存進曲庫）要先取消或處理匯入，才能移除。
+- 遺失的檔案（#57）：匯入重試先看每個失敗檔案的來源。還在的照常重排；不在（或匯入當時就不在，之後出現的內容沒有驗證過）而另一批已有同一個檔案入庫的，標為「已存在」，下載 #8 第 3 批重複帶入的 CD1 CUE／LOG 就屬此類；來自下載的，交給下載器（`Refetch`）：檔案的 `again` 記下要重試的批次，下一批從保存的種子取回（加入時檢查既有資料），交接時不另開新的匯入，而是重試原本那一批，所以 CUE／LOG 會進它們音檔的專輯；做種中或已完成的下載先清掉已入庫的檔案再開始這一批。取不回來的（上傳暫存已刪、下載已取消、種子找不到）留在失敗，說明原因。下載的「重試」也會重試它的匯入中失敗的檔案。
+- 資料夾整理（#52、#53）：資料夾依「來源」分開，來源是匯入的實際根目錄（`local_path` 去掉相對路徑：同一個下載的各批共用 `downloads/N/`，每次上傳各自一個，Drive 收件匣算一個），同名的相對資料夾不再混成一張專輯。對話框顯示來源，以 `key` 選擇。匯入時，批次最上層與名稱籠統的資料夾不是專輯資料夾：散放的檔案保留各自的標籤，不會加入同層另一首歌的專輯。
+- 拖曳排序（#51）：拖曳時不再重排 DOM（原本重排會讓把手失去 pointer capture，放開事件送不回來），改為被拖的列以 transform 跟著指標、經過的列讓位，放開才改順序；事件掛在 window 上。滑鼠與觸控筆可直接拖整列（移動 6px 以上才開始，放開不會觸發播放），手指用把手。Esc、觸控取消、失去 capture、清單改變或元件卸載時放回原處並清掉計時器與 listener。
+- 前端：
+  - 登入頁確定能否使用 passkey（最多等 3 秒）後才一次顯示完整表單；設定頁同時讀取服務、Drive、passkey（各最多 10 秒，Drive 已連線才讀同步狀態），確定後依固定順序一次顯示，之後的重試與輪詢只更新各自的區塊（#62）。`api()` 新增 `timeout`。
+  - RSS 尚未下載的列不再顯示「0」（#55）；外觀設定移除「只記在這個瀏覽器。」（#56）；VGMdb 匯入的搜尋步驟加上「用 Google 搜尋 VGMdb」（`site:vgmdb.net`，以 URLSearchParams 編碼，#63）。
 
 ## 使用方式（開發環境）
 

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -170,7 +171,7 @@ func TestFailedUploadCanBeRetried(t *testing.T) {
 	if b.Items[0].State != StateFailed || b.Items[0].Error == "" {
 		t.Fatalf("item = %+v", b.Items[0])
 	}
-	if n, err := im.Retry(ctx, batch); err != nil || n != 1 {
+	if n, err := im.Retry(ctx, batch); err != nil || n.Requeued != 1 {
 		t.Fatalf("retry: %d %v", n, err)
 	}
 	b = runUntilDone(t, im, batch)
@@ -214,6 +215,11 @@ func TestDefaultPlansFolderAlbums(t *testing.T) {
 		probe(8, "Box/b.mp3", media.Tags{Album: "Disc B"}),
 		probe(9, "Box/c.mp3", media.Tags{}),
 		probe(10, "loose.mp3", media.Tags{}),
+		// Loose files of an upload, one with an album tag: the others are not on it (#53).
+		probe(11, "01 Album A.mp3", media.Tags{Title: "Tagged song A", Album: "Album A", AlbumArtist: "Artist A"}),
+		probe(12, "02 Loose song B.mp3", media.Tags{Title: "Unrelated song B", Artist: "Artist B"}),
+		probe(13, "Music/x.mp3", media.Tags{Album: "Album X"}),
+		probe(14, "Music/y.mp3", media.Tags{Title: "y", Artist: "Q"}),
 	})
 	byID := map[int64]Plan{}
 	for _, p := range plans {
@@ -233,8 +239,13 @@ func TestDefaultPlansFolderAlbums(t *testing.T) {
 	if byID[9].Album != "" || byID[9].Group != "" || byID[7].Group == byID[8].Group {
 		t.Fatalf("folder of several albums: %+v", byID[9])
 	}
-	if byID[10].Album != "" || byID[10].Group != "" {
-		t.Fatalf("top of the batch: %+v", byID[10])
+	for _, id := range []int64{10, 12, 14} {
+		if p := byID[id]; p.Album != "" || p.Group != "" || p.Tagged.Album != "" {
+			t.Fatalf("loose file %d: %+v", id, p)
+		}
+	}
+	if p := byID[12]; p.Artist != "Artist B" || p.Title != "Unrelated song B" || byID[11].Album != "Album A" || byID[11].Group == "" {
+		t.Fatalf("loose files keep their own tags: %+v / %+v", p, byID[11])
 	}
 }
 
@@ -399,5 +410,89 @@ func TestOriginalTagsRestoreAfterEdit(t *testing.T) {
 	batch, _, _ = im.CreateBatch(ctx, "local", "", src, false)
 	if b := runUntilDone(t, im, batch); b.Items[0].State != StateDuplicate {
 		t.Fatalf("re-import %+v", b.Items)
+	}
+}
+
+// A retry looks at each failed file first (review #57): one still there is imported again; one
+// gone that another import has in the library (a later round brought an earlier round's CUE sheet
+// again) is a duplicate; one gone from a download is fetched again by it; one gone for good stays
+// failed and says why.
+func TestRetryTellsGoneFiles(t *testing.T) {
+	ctx := context.Background()
+	im, _, _ := setup(t)
+	dir := t.TempDir()
+	exec := func(q string, args ...any) int64 {
+		t.Helper()
+		r, err := im.db.Exec(q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := r.LastInsertId()
+		return id
+	}
+	batch := func(kind string) int64 {
+		return exec(`INSERT INTO import_batches (kind, source, state, created_at) VALUES (?, 'x', 'done', 0)`, kind)
+	}
+	item := func(batch int64, name, state, why string) int64 {
+		p := filepath.Join(dir, name)
+		return exec(`INSERT INTO import_items (batch_id, local_path, rel_path, state, role, error, updated_at) VALUES (?, ?, ?, ?, 'sidecar', ?, 0)`,
+			batch, p, name, state, why)
+	}
+	gone := "open " + filepath.Join(dir, "x") + ": no such file or directory"
+	os.WriteFile(filepath.Join(dir, "there.log"), []byte("log"), 0o600)
+	os.WriteFile(filepath.Join(dir, "back.cue"), []byte("fragment"), 0o600) // missing at import, back since
+
+	earlier, later := batch("download"), batch("download")
+	item(earlier, "CD1/album.cue", "published", "")
+	dup := item(later, "CD1/album.cue", "failed", gone)
+	there := item(later, "there.log", "failed", "upload failed: EOF")
+	back := item(later, "back.cue", "failed", gone)
+	lost := item(later, "CD2/album.log", "failed", gone)
+	var asked []string
+	im.Refetch = func(_ context.Context, b int64, paths []string) error {
+		if b != later {
+			t.Fatalf("batch %d", b)
+		}
+		asked = paths
+		return nil
+	}
+	res, err := im.Retry(ctx, later)
+	if err != nil || res != (RetryResult{Requeued: 1, Saved: 1, Fetching: 2}) {
+		t.Fatalf("retry %+v %v", res, err)
+	}
+	if len(asked) != 2 || filepath.Base(asked[0]) != "back.cue" || filepath.Base(asked[1]) != "album.log" {
+		t.Fatalf("fetched again: %v", asked)
+	}
+	state := func(id int64) (s, why string) {
+		im.db.QueryRow(`SELECT state, error FROM import_items WHERE id = ?`, id).Scan(&s, &why)
+		return
+	}
+	if s, _ := state(dup); s != StateDuplicate {
+		t.Fatalf("saved elsewhere: %s", s)
+	}
+	if s, _ := state(there); s != "pending" {
+		t.Fatalf("still there: %s", s)
+	}
+	for _, id := range []int64{back, lost} {
+		if s, why := state(id); s != "failed" || !strings.Contains(why, "fetching it again") {
+			t.Fatalf("fetched again: %s %q", s, why)
+		}
+	}
+
+	// Without a download to fetch it, a file gone stays failed, saying why.
+	im.db.Exec(`UPDATE import_batches SET state = 'done'`)
+	up := batch("upload")
+	gonePerm := item(up, "CD3/album.log", "failed", gone)
+	res, err = im.Retry(ctx, up)
+	if err != nil || res != (RetryResult{Lost: 1}) {
+		t.Fatalf("upload retry %+v %v", res, err)
+	}
+	if s, why := state(gonePerm); s != "failed" || !strings.Contains(why, "import it again, or discard it") {
+		t.Fatalf("gone for good: %s %q", s, why)
+	}
+	im.Refetch = func(context.Context, int64, []string) error { return errors.New("its download was canceled") }
+	res, _ = im.Retry(ctx, later)
+	if s, why := state(lost); res.Lost != 2 || s != "failed" || !strings.Contains(why, "its download was canceled") {
+		t.Fatalf("download cannot: %+v %s %q", res, s, why)
 	}
 }

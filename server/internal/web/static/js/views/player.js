@@ -153,7 +153,7 @@ export function NowPlaying() {
 function Queue({ s }) {
   const last = s.queue.length - 1;
   const current = s.queue[s.index]?.qid;
-  const { drag, start, order } = useReorder(moveItem); // drag a row by its handle to a new place
+  const { drag, start, press, lift } = useReorder(s.queue.map((q, i) => q.qid || i), moveItem);
   const menu = (e, i) => openMenu(e, [
     i !== s.index && i !== s.index + 1 && { icon: 'playNext', label: '移到下一首播放', onClick: () => playAfterCurrent(i) },
     i > 0 && { icon: 'up', label: '上移', onClick: () => moveItem(i, i - 1) },
@@ -166,11 +166,10 @@ function Queue({ s }) {
       <button class="btn text" disabled=${s.index >= last} onClick=${clearUpcoming}>清除待播</button>
       <button class="btn text" onClick=${() => resetPlayer()}>停止並清空</button>
     </div>
-    <ol class=${'tracks queue-list' + (drag ? ' dragging' : '')}>${order(s.queue).map((q, i) => html`<li key=${q.qid || i}
-      class=${drag && drag.to === i ? 'lifted' : ''}>
+    <ol class=${'tracks queue-list' + (drag ? ' dragging' : '')}>${s.queue.map((q, i) => html`<li key=${q.qid || i} ...${lift(i)}>
       <div class=${'track' + (q.qid === current ? ' current' : '')}>
         <${DragHandle} onStart=${(e) => start(e, i)} label=${`拖曳「${q.title}」改變播放順序`} />
-        <button class="track-main" onClick=${() => playAt(i)} aria-current=${q.qid === current ? 'true' : undefined}>
+        <button class="track-main" onPointerDown=${(e) => press(e, i)} onClick=${() => playAt(i)} aria-current=${q.qid === current ? 'true' : undefined}>
           <span class="num">${i + 1}</span>
           <span class="track-text"><span class="title">${q.title}</span><span class="sub">${q.artist}</span></span>
           <span class="meta">${fmtTime(q.durationMs)}</span>

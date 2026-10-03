@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,7 +48,9 @@ var (
 	ErrNotReady   = errors.New("the downloader is not running")
 	ErrOverBudget = errors.New("not enough staging space")
 	ErrBadState   = errors.New("not possible in the current state")
-	ErrLowDisk    = errors.New("the disk is nearly full; new downloads wait until space is freed")
+	// ErrNotClearable is a download whose record cannot leave the task center yet.
+	ErrNotClearable = errors.New("only a finished download that holds no files and has nothing to retry can be removed")
+	ErrLowDisk      = errors.New("the disk is nearly full; new downloads wait until space is freed")
 )
 
 type FileView struct {
@@ -58,6 +61,9 @@ type FileView struct {
 	Suggested bool   `json:"suggested"`       // default choice by the D2 table
 	Round     int    `json:"round,omitempty"` // the round that fetches it (review #28); 0: not yet
 	Batch     int64  `json:"batch,omitempty"` // the import batch its round made
+	// Again is the import batch to retry when a round has fetched the file again: it was lost after
+	// that batch had it (review #57). Its own Batch stays.
+	Again int64 `json:"again,omitempty"`
 }
 
 type View struct {
@@ -84,6 +90,7 @@ type View struct {
 	Left          int        `json:"left,omitempty"`        // selected files no round has fetched yet
 	WaitingSpace  bool       `json:"waiting_space,omitempty"`
 	CanRetry      bool       `json:"can_retry,omitempty"` // failed with files left to fetch (review #49)
+	Clearable     bool       `json:"clearable,omitempty"` // finished, holding no files: its record can leave the task center
 	Budget        int64      `json:"budget,omitempty"`    // the staging budget rounds fit (with the file list)
 	Files         []FileView `json:"files,omitempty"`
 }
@@ -497,7 +504,22 @@ func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	}
 	r.WaitingSpace = r.State == StateQueued && strings.HasPrefix(r.Note, notePrefixSpace)
 	r.CanRetry = r.State == StateFailed && len(retryable(r.files)) > 0 // (unless the torrent is downloading again elsewhere)
+	r.Clearable = r.finished() && !r.CanRetry && !r.holdsFiles()
 	return &r, nil
+}
+
+// finished: nothing runs for it any more (a failed one may still be retried).
+func (r *row) finished() bool {
+	return r.State == StateCompleted || r.State == StateCanceled || r.State == StateFailed
+}
+
+// holdsFiles: its folder is still there, for an import to retry or until its files are let go of.
+func (r *row) holdsFiles() bool {
+	if r.FilesRemoved || r.dir == "" {
+		return false
+	}
+	_, err := os.Stat(r.dir)
+	return err == nil
 }
 
 func (s *Service) load(ctx context.Context, id int64) (*row, error) {
@@ -520,6 +542,74 @@ func (s *Service) Get(ctx context.Context, id int64) (*View, error) {
 		v.Files = []FileView{}
 	}
 	return &v, nil
+}
+
+// Tasks lists the downloads of the task center: every one not finished, failed ones until their
+// record is cleared, and the latest history of the others; more says there are older ones.
+func (s *Service) Tasks(ctx context.Context, history int) ([]View, bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state NOT IN (?, ?)
+		UNION ALL SELECT * FROM (SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state IN (?, ?) ORDER BY id DESC LIMIT ?)
+		ORDER BY id DESC`, StateCompleted, StateCanceled, StateCompleted, StateCanceled, history+1)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+	out := []View{}
+	done := 0
+	for rows.Next() {
+		r, err := scanRow(rows)
+		if err != nil {
+			return nil, false, err
+		}
+		if r.State == StateCompleted || r.State == StateCanceled {
+			if done++; done > history {
+				continue // only says there is more
+			}
+		}
+		out = append(out, r.View)
+	}
+	return out, done > history, rows.Err()
+}
+
+// Clear removes a finished download's record from the task center (nothing else changes); with id
+// 0, every such download's. One still holding files, or with files left to retry, stays: they are
+// let go of by canceling it or through its import. It reports how many were cleared.
+func (s *Service) Clear(ctx context.Context, id int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state IN (?, ?, ?)
+		AND (? = 0 OR id = ?)`, StateCompleted, StateCanceled, StateFailed, id, id)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		r, err := scanRow(rows)
+		if err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if r.Clearable {
+			ids = append(ids, r.ID)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if id != 0 && len(ids) == 0 {
+		if r, err := s.load(ctx, id); err != nil || r == nil {
+			return 0, errors.New("no such download")
+		}
+		return 0, ErrNotClearable
+	}
+	now := db.Now()
+	for _, d := range ids {
+		if _, err := s.db.ExecContext(ctx, `UPDATE downloads SET cleared_at = ? WHERE id = ?`, now, d); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
 }
 
 func (s *Service) List(ctx context.Context, limit int) ([]View, error) {
@@ -696,7 +786,7 @@ func (r *row) batches() []int64 {
 // import); for a download from before rounds, its one batch.
 func (r *row) roundBatch() int64 {
 	for _, f := range r.files {
-		if f.Selected && f.Round == r.Round && f.Batch != 0 {
+		if f.Selected && f.Round == r.Round && f.Batch != 0 && f.Again == 0 {
 			return f.Batch
 		}
 	}
@@ -845,8 +935,94 @@ func (s *Service) Retry(ctx context.Context, id int64) error {
 	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', meta_gid = '', dir = ?, files = ?, round = ?, round_bytes = 0,
 		round_work = 0, done_bytes = done_before, files_removed = 0, error = '', note = 'retrying', paused_by = '', updated_at = ? WHERE id = ?`,
 		StateQueued, r.dir, string(files), round, db.Now(), r.ID)
+	if err != nil {
+		return err
+	}
+	// Its imports' failed files are retried too: those lost since they were handed over are fetched
+	// again (review #57). The retries ask for this download's lock, so they wait until this ends.
+	for _, b := range r.batches() {
+		var failed int
+		if s.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items WHERE batch_id = ? AND state = 'failed'`, b).Scan(&failed); failed > 0 {
+			go func() {
+				if _, err := s.imp.Retry(context.WithoutCancel(ctx), b); err != nil {
+					s.log.Warn("retry the import of a download", "download", r.ID, "batch", b, "err", err)
+				}
+			}()
+		}
+	}
 	s.poke()
-	return err
+	return nil
+}
+
+// Refetch fetches again files (local paths) a download handed to batchID and lost before they were
+// imported (an import failed because a file was gone, review #57): the next round takes them from
+// the saved torrent, checking what is on disk (aria2 may have left a fragment where a later round's
+// pieces reached), and once it has them batchID is retried, where its other files are. A download
+// that is seeding stops for it; a finished one starts again. It fails when the download cannot.
+func (s *Service) Refetch(ctx context.Context, batchID int64, paths []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT `+rowCols+` FROM downloads ORDER BY id DESC`)
+	if err != nil {
+		return err
+	}
+	var r *row
+	for rows.Next() {
+		d, err := scanRow(rows)
+		if err == nil && slices.Contains(d.batches(), batchID) {
+			r = d
+			break
+		}
+	}
+	rows.Close()
+	if r == nil {
+		return errors.New("no download has this import")
+	}
+	switch r.State {
+	case StateCanceled:
+		return errors.New("its download was canceled")
+	case StateMetadata, StateSelecting:
+		return ErrBadState
+	}
+	for _, p := range paths {
+		rel, err := filepath.Rel(r.dir, p)
+		i := slices.IndexFunc(r.files, func(f FileView) bool { return f.Selected && err == nil && f.Path == filepath.ToSlash(rel) })
+		if i < 0 {
+			return fmt.Errorf("%s is not a file of its download", filepath.Base(p))
+		}
+		r.files[i].Round, r.files[i].Again = 0, batchID
+	}
+	var other int64
+	if s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE info_hash = ? AND id != ? AND state NOT IN (?, ?, ?)`,
+		r.InfoHash, r.ID, StateCompleted, StateFailed, StateCanceled).Scan(&other) == nil {
+		return fmt.Errorf("its torrent is download #%d now", other)
+	}
+	if _, err := s.torrentFor(ctx, r); err != nil {
+		return err
+	}
+	files, _ := json.Marshal(r.files)
+	switch r.State {
+	case StateSeeding, StateCompleted, StateFailed:
+		if r.gid != "" {
+			s.aria.RPC.Call(ctx, "forceRemove", nil, r.gid)
+			s.aria.RPC.Call(ctx, "removeDownloadResult", nil, r.gid)
+		}
+		// What the last round left for seeding is in the library: it goes, so the round fits.
+		if !s.clearImported(ctx, r) {
+			return errors.New("could not tell which of its files the library has")
+		}
+		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', files = ?, round_bytes = 0, round_work = 0,
+			done_bytes = done_before, files_removed = 0, error = '', note = ?, updated_at = ? WHERE id = ?`, StateQueued, string(files),
+			fmt.Sprintf("fetching %d lost files again", len(paths)), db.Now(), r.ID)
+	default: // a round under way or waiting: a later round takes them
+		_, err = s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, updated_at = ? WHERE id = ?`, string(files), db.Now(), r.ID)
+	}
+	if err != nil {
+		return err
+	}
+	s.log.Info("fetching lost files again", "download", r.ID, "batch", batchID, "files", len(paths))
+	s.poke()
+	return nil
 }
 
 func (s *Service) Cancel(ctx context.Context, id int64) error {

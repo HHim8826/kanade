@@ -160,7 +160,7 @@ func companionFor(files []FileView, f FileView, round int) bool {
 	}
 	dir := path.Dir(f.Path)
 	for _, o := range files {
-		if o.Selected && o.Round == round && path.Dir(o.Path) == dir {
+		if o.Selected && o.Round == round && o.Again == 0 && path.Dir(o.Path) == dir {
 			return true
 		}
 	}

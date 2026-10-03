@@ -606,14 +606,18 @@ function VGMdbImport({ album, close }) {
       apply=${async (keys) => done(await post(`/albums/${album.id}/vgmdb/apply`, { ...body(), keys }), '已套用 VGMdb 的資料')} />`;
   }
 
-  const search = 'https://vgmdb.net/search?q=' + encodeURIComponent(album.catalog || album.title);
+  const words = album.catalog || album.title;
+  const search = 'https://vgmdb.net/search?' + new URLSearchParams({ q: words });
+  // VGMdb's own search wants the words in its order; Google finds pages by other names too.
+  const google = 'https://www.google.com/search?' + new URLSearchParams({ q: 'site:vgmdb.net ' + words });
   if (!found) {
     return html`<${Dialog} title="從 VGMdb 匯入" wide onClose=${close} actions=${html`
         <button class="btn text" onClick=${close}>取消</button>
         <button class="btn filled" disabled=${!text.trim()} onClick=${() => read({ text })}>讀取</button>`}>
       <p class="hint">VGMdb 沒有開放 API，也會擋下伺服器的連線，所以請在你自己的瀏覽器打開專輯頁，複製後貼到這裡。Kanade 不會連到 vgmdb.net；只有在你選擇套用封面時，才會從 VGMdb 的圖片網址（media.vgm.io）下載封面。</p>
       <ol class="steps">
-        <li><a class="link" href=${search} target="_blank" rel="noopener noreferrer">在 VGMdb 搜尋「${album.catalog || album.title}」</a>，打開對的專輯頁。</li>
+        <li>搜尋「${words}」：<a class="link" href=${search} target="_blank" rel="noopener noreferrer">在 VGMdb 搜尋</a>，找不到時
+          <a class="link" href=${google} target="_blank" rel="noopener noreferrer">用 Google 搜尋 VGMdb</a>；打開對的專輯頁。</li>
         <li>想要日文曲名，先把曲目表（Tracklist）切到「Japanese」。</li>
         <li>在專輯頁全選（Ctrl+A／⌘A）並複製，回到這裡貼在下面。</li>
       </ol>
@@ -655,18 +659,25 @@ export function folderAlbums(groups) {
   showDialog((close) => html`<${FolderAlbumsDialog} groups=${groups} close=${close} />`);
 }
 
+// sourceName says where a folder was imported from: folders of different imports are told apart.
+const sourceName = (s) => {
+  const at = s.at ? new Date(s.at).toLocaleString('zh-TW', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
+  const kind = { download: '下載', upload: '上傳', local: '伺服器資料夾', inbox: 'Drive 收件匣' }[s.kind] || '匯入';
+  return [s.kind === 'download' || s.kind === 'local' ? `${kind}「${s.name}」` : kind, at].filter(Boolean).join(' · ');
+};
+
 function FolderAlbumsDialog({ groups, close }) {
-  const [rows, setRows] = useState(() => groups.map((g) => ({ folder: g.folder, title: g.title, album_artist: g.album_artist, on: true })));
+  const [rows, setRows] = useState(() => groups.map((g) => ({ key: g.key, title: g.title, album_artist: g.album_artist, on: true })));
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const set = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
   const chosen = rows.filter((r) => r.on && r.title.trim());
-  const songs = chosen.reduce((n, r) => n + groups.find((g) => g.folder === r.folder).tracks.length, 0);
+  const songs = chosen.reduce((n, r) => n + groups.find((g) => g.key === r.key).tracks.length, 0);
   const submit = async () => {
     setBusy(true);
     setError(null);
     try {
-      const res = await post('/organize/folders', { folders: chosen.map(({ folder, title, album_artist }) => ({ folder, title, album_artist })) });
+      const res = await post('/organize/folders', { folders: chosen.map(({ key, title, album_artist }) => ({ key, title, album_artist })) });
       done(res, `已整理 ${chosen.length} 個資料夾`);
       close();
     } catch (e) {
@@ -684,9 +695,10 @@ function FolderAlbumsDialog({ groups, close }) {
     ${rows.map((r, i) => {
       const g = groups[i];
       const names = g.tracks.map((t) => t.file);
-      return html`<div class="diff-group folder-group" key=${r.folder}>
+      return html`<div class="diff-group folder-group" key=${r.key}>
         <label class="diff-row"><input type="checkbox" checked=${r.on} onChange=${() => set(i, { on: !r.on })} />
-          <span class="grow track-text"><span class="path">${r.folder}</span>
+          <span class="grow track-text"><span class="path">${g.folder}</span>
+            <span class="sub">${sourceName(g.source)}</span>
             <span class="sub">${g.tracks.length} 首 · ${names.length > 2 ? `${names[0]} … ${names[names.length - 1]}` : names.join('、')}</span>
             ${g.join
               ? html`<span class="sub">加入專輯「${g.title}」${g.album_artist ? `（${g.album_artist}）` : ''}</span>`

@@ -277,7 +277,7 @@ export function moveItem(from, to) {
   const cur = s.queue[s.index];
   const queue = [...s.queue];
   queue.splice(to, 0, ...queue.splice(from, 1));
-  player.set({ queue, index: queue.findIndex((q) => q.qid === cur.qid) });
+  player.set({ queue, index: cur ? queue.findIndex((q) => q.qid === cur.qid) : s.index });
 }
 
 // playAfterCurrent moves a queued song to right after the one playing.

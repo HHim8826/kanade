@@ -151,7 +151,7 @@ function ItemRow({ it, live }) {
     <div class="feed-actions">
       ${it.download && !busyNow && html`<button class="btn tonal" disabled=${busy} onClick=${download}>
         <${Icon} name="download" />${state === 'failed' ? '重試' : state === 'canceled' ? '重新下載' : '下載'}</button>`}
-      ${(state || started) && html`<a class="btn text" href=${href('tasks')}>任務</a>`}
+      ${state ? html`<a class="btn text" href=${href('tasks')}>任務</a>` : null}
       ${it.page && html`<a class="btn text" href=${it.page} target="_blank" rel="noopener noreferrer">網頁</a>`}
     </div>
   </li>`;

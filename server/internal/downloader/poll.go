@@ -341,6 +341,8 @@ func (r *row) roundPaths() []string {
 		switch {
 		case !f.Selected:
 			continue
+		case f.Round == r.Round && f.Again != 0:
+			continue // fetched again for the import that lost it, which is retried
 		case f.Round == r.Round:
 		case companionFor(r.files, f, r.Round):
 			if _, err := os.Stat(p); err != nil {
@@ -385,7 +387,7 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 	if t, ok := s.importWait[r.ID]; ok && time.Now().Before(t) {
 		return errors.New("waiting to retry the import")
 	}
-	round := func(f FileView) bool { return f.Selected && (f.Round == r.Round) }
+	round := func(f FileView) bool { return f.Selected && f.Round == r.Round && f.Again == 0 }
 	mark := func(batch int64) []FileView {
 		files := slices.Clone(r.files)
 		for i := range files {
@@ -409,6 +411,7 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 			r.files = mark(noImport)
 			delete(s.importWait, r.ID)
 			s.log.Info("round has nothing to import", "download", r.ID, "round", r.Round)
+			s.retryAgain(ctx, r)
 			return nil
 		}
 	}
@@ -422,7 +425,32 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 	delete(s.importWait, r.ID)
 	r.ImportBatchID, r.files, r.Error = batch, mark(batch), ""
 	s.log.Info("download complete; import queued", "download", r.ID, "round", r.Round, "batch", batch, "files", n)
+	s.retryAgain(ctx, r)
 	return nil
+}
+
+// retryAgain retries the imports that lost files this round fetched again (Refetch). The retry runs
+// apart: it reads the files from disk and never needs the download's lock.
+func (s *Service) retryAgain(ctx context.Context, r *row) {
+	fetched := map[int64][]string{} // batch -> its files this round fetched again
+	for i := range r.files {
+		if f := &r.files[i]; f.Selected && f.Round == r.Round && f.Again != 0 {
+			fetched[f.Again] = append(fetched[f.Again], filepath.Join(r.dir, filepath.FromSlash(f.Path)))
+			f.Again = 0
+		}
+	}
+	if len(fetched) == 0 {
+		return
+	}
+	files, _ := json.Marshal(r.files)
+	s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, updated_at = ? WHERE id = ?`, string(files), db.Now(), r.ID)
+	ctx = context.WithoutCancel(ctx)
+	for b, paths := range fetched {
+		go func() {
+			res, err := s.imp.RetryFetched(ctx, b, paths)
+			s.log.Info("retried the import of files fetched again", "download", r.ID, "batch", b, "requeued", res.Requeued, "err", err)
+		}()
+	}
 }
 
 // endRound finishes a round that is not the last: the round's files are handed to the importer,
@@ -463,11 +491,23 @@ func (s *Service) afterRound(ctx context.Context, r *row) {
 			return
 		}
 	}
+	if !s.clearImported(ctx, r) {
+		return
+	}
+	r.State = StateQueued
+	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, note = ?, updated_at = ? WHERE id = ?`, StateQueued,
+		fmt.Sprintf("round %d imported; the next round starts when there is room", r.Round), db.Now(), r.ID)
+	s.poke()
+}
+
+// clearImported deletes the files of a download that the library has safely: all but the files
+// imports still need (KeepsSource) and the companions later rounds need. False: it could not tell.
+func (s *Service) clearImported(ctx context.Context, r *row) bool {
 	keep := map[string]bool{}
 	for _, b := range r.batches() {
 		rows, err := s.db.QueryContext(ctx, `SELECT local_path, source_path FROM import_items i WHERE i.batch_id = ? AND `+importer.KeepsSource("i"), b)
 		if err != nil {
-			return
+			return false
 		}
 		for rows.Next() {
 			var p, src string
@@ -492,10 +532,7 @@ func (s *Service) afterRound(ctx context.Context, r *row) {
 			}
 		}
 	}
-	r.State = StateQueued
-	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, note = ?, updated_at = ? WHERE id = ?`, StateQueued,
-		fmt.Sprintf("round %d imported; the next round starts when there is room", r.Round), db.Now(), r.ID)
-	s.poke()
+	return true
 }
 
 // removeUnder deletes a file and the folders it leaves empty, up to root.

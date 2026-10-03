@@ -4,16 +4,18 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/HHim8826/kanade/server/internal/downloader"
+	"github.com/HHim8826/kanade/server/internal/importer"
 )
 
 func (s *Server) downloadError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, downloader.ErrNotReady):
 		writeError(w, http.StatusServiceUnavailable, err)
-	case errors.Is(err, downloader.ErrOverBudget), errors.Is(err, downloader.ErrBadState):
+	case errors.Is(err, downloader.ErrOverBudget), errors.Is(err, downloader.ErrBadState), errors.Is(err, downloader.ErrNotClearable):
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, downloader.ErrLowDisk):
 		writeError(w, http.StatusInsufficientStorage, err)
@@ -127,21 +129,73 @@ func (s *Server) downloadAction(action func(*downloader.Service, *http.Request, 
 	}
 }
 
-// tasks is the task center (plan §2): downloads and import batches in one response.
+// tasks is the task center (plan §2): downloads and import batches in one response. Every task
+// still under way or waiting for the user is in it; of the finished ones, the latest ?history (50
+// unless asked for more), and more_* says whether there are older ones.
 func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
-	downloads, err := s.downloads.List(r.Context(), 50)
+	history, _ := strconv.Atoi(r.URL.Query().Get("history"))
+	if history <= 0 || history > 1000 {
+		history = 50
+	}
+	downloads, moreDownloads, err := s.downloads.Tasks(r.Context(), history)
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	imports, err := s.importer.Batches(r.Context(), 50)
+	imports, moreImports, err := s.importer.Batches(r.Context(), history)
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	out := map[string]any{"downloads": downloads, "imports": imports}
+	out := map[string]any{"downloads": downloads, "imports": imports, "more_downloads": moreDownloads, "more_imports": moreImports}
 	if s.disk != nil {
 		out["disk"] = s.disk.Status() // low disk: the task page says what is held back
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// clearDownload, clearImport and clearTasks remove finished tasks' records from the task center;
+// the library, the files and what the tasks recorded about them stay.
+func (s *Server) clearDownload(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, err := s.downloads.Clear(r.Context(), id); err != nil {
+		s.downloadError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearImport(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if _, err := s.importer.Clear(r.Context(), id); err != nil {
+		if errors.Is(err, importer.ErrNotClearable) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
+		s.internal(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearTasks(w http.ResponseWriter, r *http.Request) {
+	downloads, err := s.downloads.Clear(r.Context(), 0)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	imports, err := s.importer.Clear(r.Context(), 0)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"downloads": downloads, "imports": imports})
 }

@@ -473,7 +473,9 @@ func defaultPlans(list []probed) []planned {
 	// Files without an album tag take one from their album folder: when no file there has one, the
 	// folder names the album, its album artist decided from the files' artists the same way; when
 	// the others all share one album, they join it (a set's radio episodes on disc 1 whose disc 2
-	// is tagged); when the folder has several albums, they stay standalone.
+	// is tagged); when the folder has several albums, they stay standalone. Loose files (at the top
+	// of what was imported, or in a folder whose name says nothing, like "Music") are not an album:
+	// each keeps its own tags.
 	albumsIn := map[string]map[string]bool{}
 	folderArtists := map[string]map[string]bool{}
 	for _, p := range list {
@@ -499,12 +501,13 @@ func defaultPlans(list []probed) []planned {
 			if p.info.Tags.AlbumArtist == "" {
 				in.AlbumArtist = decide(key{root, in.Album})
 			}
+		case name == "":
 		case len(tags) == 1:
 			for a := range tags {
 				in.Album = a
 			}
 			in.AlbumArtist = decide(key{root, in.Album})
-		case len(tags) == 0 && name != "":
+		case len(tags) == 0:
 			in.Album, in.AlbumArtist = name, ""
 			switch artists := folderArtists[root]; len(artists) {
 			case 0:
