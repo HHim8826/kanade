@@ -2,6 +2,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get, post } from '../api.js';
 import { resetPlayer } from '../player.js';
 import { href } from '../router.js';
+import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { ErrorBox, Icon, Spinner, fmtBytes, html, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
@@ -53,6 +54,30 @@ function DriveSync() {
     </div>`;
 }
 
+// Appearance: the color theme and light or dark, applied at once and kept in this browser.
+function Appearance() {
+  const [t, setT] = useState(loadTheme);
+  const choose = (patch) => {
+    const next = { ...t, ...patch };
+    setT(next);
+    setTheme(next);
+  };
+  return html`<h2 class="section-title">外觀</h2>
+    <div class="card pad">
+      <div class="sub">配色</div>
+      <div class="choices" role="radiogroup" aria-label="配色">
+        ${themes.map(([k, label]) => html`<button type="button" class="choice" role="radio" aria-checked=${t.theme === k}
+          onClick=${() => choose({ theme: k })}><span class=${'swatch ' + k}></span>${label}</button>`)}
+      </div>
+      <div class="sub">明暗</div>
+      <div class="choices" role="radiogroup" aria-label="明暗">
+        ${modes.map(([k, label]) => html`<button type="button" class="choice" role="radio" aria-checked=${t.mode === k}
+          onClick=${() => choose({ mode: k })}>${label}</button>`)}
+      </div>
+      <div class="sub">只記在這個瀏覽器。</div>
+    </div>`;
+}
+
 export function Settings({ onLogout }) {
   const status = useLoad(() => get('/status'), []);
   const drive = useLoad(() => get('/drive'), []);
@@ -84,6 +109,7 @@ export function Settings({ onLogout }) {
       <div class="actions"><button class="btn tonal" onClick=${connect}><${Icon} name="refresh" />${d && d.status.connected ? '重新連線' : '連線 Google Drive'}</button></div>
     </div>
     ${d && d.status.connected && html`<${DriveSync} />`}
+    <${Appearance} />
     <h2 class="section-title">服務</h2>
     <div class="card pad">
       ${status.data && html`<div class="sub">下載器（aria2）：${status.data.aria2_ready ? '運作中' : '未就緒'}</div>

@@ -1,4 +1,4 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { enqueue, fromEntry, fromTrack, playNext, playQueue, player, shuffled, toggle } from '../player.js';
@@ -16,7 +16,7 @@ function Shelf({ title, albums, more }) {
   return html`<div class="section-head"><h2 class="section-title">${title}</h2>${more}</div>
     <div class="shelf">${albums.map((a) => html`<a key=${a.id} class="card album-card" href=${href('album/' + a.id)}>
       <${Cover} id=${a.cover_id} alt="" />
-      <div class="card-text"><div class="title" title=${a.title}>${a.title}</div><div class="sub">${a.album_artist || '未知歌手'}</div></div>
+      <div class="card-text"><div class="title" title=${a.title}>${a.title}</div><div class="sub" title=${a.album_artist || ''}>${a.album_artist || '未知歌手'}</div></div>
     </a>`)}</div>`;
 }
 
@@ -126,9 +126,45 @@ export function Home() {
 const tabs = [['albums', '專輯'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏']];
 const tabURL = { playlists: '/playlists', favorites: '/favorites' };
 
+const PAGE = 200;
+
+// LoadMore loads the next page when it scrolls into view, or when tapped.
+function LoadMore({ onMore, busy }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || typeof IntersectionObserver === 'undefined') return;
+    // The page scrolls inside .content, so that is where to look ahead from.
+    const io = new IntersectionObserver((es) => es.some((e) => e.isIntersecting) && onMore(),
+      { root: el.closest('.content'), rootMargin: '400px' });
+    io.observe(el);
+    return () => io.disconnect();
+  }, [onMore]);
+  return html`<div class="actions center" ref=${ref}>
+    <button class="btn tonal" disabled=${busy} onClick=${onMore}>${busy ? '載入中…' : '載入更多'}</button></div>`;
+}
+
 export function Library({ tab = 'albums' }) {
   const rev = useLibRev();
-  const data = useLoad(() => get(tabURL[tab] || `/${tab}?limit=500`), [tab], rev);
+  const paged = !tabURL[tab];
+  const data = useLoad(() => get(tabURL[tab] || `/${tab}?limit=${PAGE}`), [tab], rev);
+  // Later pages, for this tab and library version only (review #9).
+  const key = `${tab}:${rev}`;
+  const [more, setMore] = useState({ key: null, pages: [], done: false, busy: false });
+  const own = more.key === key ? more : { key, pages: [], done: false, busy: false };
+  const list = data.data && paged ? [...data.data, ...own.pages.flat()] : data.data;
+  const done = !paged || !data.data || data.data.length < PAGE || own.done;
+  const loadMore = useCallback(async () => {
+    if (own.busy || done) return;
+    setMore({ ...own, busy: true });
+    try {
+      const next = await get(`/${tab}?limit=${PAGE}&offset=${list.length}`);
+      setMore((m) => (m.key === key ? { key, pages: [...m.pages, next], done: next.length < PAGE, busy: false } : m));
+    } catch (e) {
+      toast(e.message, 'error');
+      setMore((m) => ({ ...m, busy: false }));
+    }
+  }, [key, list && list.length, own.busy, done]);
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">曲庫</h1>
@@ -138,14 +174,15 @@ export function Library({ tab = 'albums' }) {
       ${tabs.map(([k, label]) => html`<a role="tab" aria-selected=${k === tab} class=${k === tab ? 'active' : ''} href=${href('library/' + k)}>${label}</a>`)}
     </nav>
     ${data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
-    ${data.data && tab === 'albums' && html`<${AlbumGrid} albums=${data.data} />`}
-    ${data.data && tab === 'artists' && html`<ul class="list">
-      ${data.data.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
+    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} />`}
+    ${list && tab === 'artists' && html`<ul class="list">
+      ${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
         <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
     </ul>`}
-    ${data.data && tab === 'tracks' && (data.data.length
-      ? html`<${TrackList} items=${data.data.map(fromTrack)} showAlbum />`
+    ${list && tab === 'tracks' && (list.length
+      ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum />`
       : html`<${Empty}>還沒有歌曲。<//>`)}
+    ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
     ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
   </section>`;

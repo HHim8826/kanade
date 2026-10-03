@@ -5,16 +5,29 @@ import { toast } from './ui.js';
 // Queue item: { qid, assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? };
 // qid tells apart the same song queued twice.
 const PREFS = 'kanade.player';
+
+// One play mode at a time, switched by one button (review #40): in order, looping the queue,
+// looping this song, or shuffled (which goes on in a new order after the last song).
+export const MODES = ['order', 'all', 'one', 'shuffle'];
+const modeState = (mode) => ({ mode, shuffle: mode === 'shuffle', repeat: { order: 'off', all: 'all', one: 'one', shuffle: 'all' }[mode] });
+
+// modeFrom reads the saved mode, or the separate shuffle and repeat switches saved before.
+export function modeFrom(p) {
+  if (MODES.includes(p.mode)) return p.mode;
+  if (p.repeat === 'one') return 'one';
+  if (p.shuffle) return 'shuffle';
+  return p.repeat === 'all' ? 'all' : 'order';
+}
+
 function loadPrefs() {
+  let p = {};
   try {
-    const p = JSON.parse(localStorage.getItem(PREFS) || '{}');
-    return {
-      volume: typeof p.volume === 'number' ? Math.min(Math.max(p.volume, 0), 1) : 1, muted: !!p.muted,
-      shuffle: !!p.shuffle, repeat: ['off', 'all', 'one'].includes(p.repeat) ? p.repeat : 'off',
-    };
-  } catch {
-    return { volume: 1, muted: false, shuffle: false, repeat: 'off' };
-  }
+    p = JSON.parse(localStorage.getItem(PREFS) || '{}') || {};
+  } catch { /* storage blocked: defaults */ }
+  return {
+    volume: typeof p.volume === 'number' ? Math.min(Math.max(p.volume, 0), 1) : 1, muted: !!p.muted,
+    ...modeState(modeFrom(p)),
+  };
 }
 
 export const player = createStore({
@@ -26,13 +39,14 @@ export const player = createStore({
   duration: 0, // seconds
   nowPlayingOpen: false,
   original: null, // the queue in its own order while shuffle is on
-  ...loadPrefs(), // volume 0–1, muted, shuffle, repeat: off | all | one
+  scrub: null, // seconds the seek bar is being dragged to, not yet sought (review #41)
+  ...loadPrefs(), // volume 0–1, muted, mode, and from it shuffle and repeat: off | all | one
 });
 
 function savePrefs() {
-  const { volume, muted, shuffle, repeat } = player.get();
+  const { volume, muted, mode } = player.get();
   try {
-    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, shuffle, repeat }));
+    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode }));
   } catch { /* private mode: the choice lasts for this page */ }
 }
 
@@ -90,19 +104,23 @@ function report(finished = false, keepalive = false) {
 
 let pendingSeek = null; // ms to jump to once the new track can seek
 
-function load(index, autoplay = true) {
+// load plays the queue item at index. again is a loop coming round (repeat one, or the queue
+// starting over): that plays from the start, never from where it was resumed (review #42).
+function load(index, autoplay = true, again = false) {
   const s = player.get();
   const item = s.queue[index];
   if (!item) return;
   if (session) report(); // close out the track we are leaving
   session = { id: crypto.randomUUID(), item, heard: 0, last: null };
-  pendingSeek = item.resumeMs || null;
-  if (!pendingSeek && item.kind === 'spoken') { // drama and radio pick up where they stopped
+  // A resume point ("continue" on the home page) is for the play it was asked for only.
+  pendingSeek = again ? null : item.resumeMs || null;
+  delete item.resumeMs;
+  if (!again && !pendingSeek && item.kind === 'spoken') { // drama and radio pick up where they stopped
     get(`/assets/${item.assetId}/resume`).then((r) => {
       if (session && session.item === item && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
   }
-  player.set({ index, time: 0, duration: (item.durationMs || 0) / 1000, buffering: true });
+  player.set({ index, time: 0, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: true });
   audio.src = streamURL(item.assetId);
   if (autoplay) audio.play().catch(() => player.set({ playing: false, buffering: false }));
   updateMediaSession(item);
@@ -200,25 +218,21 @@ export function toggleMute() {
   savePrefs();
 }
 
-// toggleShuffle keeps the current song playing: on, the rest of the queue follows in random order;
-// off, the queue is back in its own order around it.
-export function toggleShuffle() {
+// cycleMode goes in order → loop the queue → loop this song → shuffle → in order. The current song
+// keeps playing: shuffling puts the rest of the queue in random order after it, and leaving
+// shuffle puts the queue back in its own order around it.
+export function cycleMode() {
   const s = player.get();
+  const mode = MODES[(MODES.indexOf(s.mode) + 1) % MODES.length];
   const cur = s.queue[s.index];
-  if (s.shuffle) {
-    const queue = s.original || s.queue;
-    player.set({ shuffle: false, original: null, queue, index: cur ? Math.max(queue.findIndex((q) => q.qid === cur.qid), 0) : -1 });
-  } else if (cur) {
-    player.set({ shuffle: true, original: s.queue, queue: [cur, ...shuffled(s.queue.filter((q) => q !== cur))], index: 0 });
-  } else {
-    player.set({ shuffle: true });
+  let queue = {};
+  if (mode === 'shuffle' && cur) {
+    queue = { original: s.queue, queue: [cur, ...shuffled(s.queue.filter((q) => q !== cur))], index: 0 };
+  } else if (s.shuffle) {
+    const list = s.original || s.queue;
+    queue = { original: null, queue: list, index: cur ? Math.max(list.findIndex((q) => q.qid === cur.qid), 0) : -1 };
   }
-  savePrefs();
-}
-
-// cycleRepeat goes off → the whole queue → this song → off.
-export function cycleRepeat() {
-  player.set((s) => ({ repeat: { off: 'all', all: 'one', one: 'off' }[s.repeat] }));
+  player.set({ ...modeState(mode), ...queue });
   savePrefs();
 }
 
@@ -239,7 +253,7 @@ export function removeAt(i) {
   }
   const wasPlaying = !audio.paused;
   let index = i < queue.length ? i : 0;
-  if (i >= queue.length && s.repeat !== 'all') { // it was the last: stop at the start of the queue
+  if (i >= queue.length && s.repeat === 'off') { // it was the last: stop at the start of the queue
     player.set({ queue, original });
     load(queue.length - 1, false);
     return;
@@ -281,7 +295,7 @@ export function resetPlayer(withReport = true) {
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
-  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, duration: 0, nowPlayingOpen: false });
+  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, scrub: null, duration: 0, nowPlayingOpen: false });
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
 }
 
@@ -291,12 +305,19 @@ export function toggle() {
   else audio.pause();
 }
 
-// next moves on; past the end it goes round with repeat all, else it stops.
+// next moves on. Past the end it starts over in the looping modes (shuffle in a new order), and
+// stops in order mode.
 export function next() {
   const s = player.get();
   if (s.index + 1 < s.queue.length) load(s.index + 1);
-  else if (s.repeat === 'all' && s.queue.length) load(0);
-  else {
+  else if (s.repeat !== 'off' && s.queue.length) {
+    if (s.shuffle && s.queue.length > 1) {
+      const queue = shuffled(s.queue);
+      if (queue[0] === s.queue[s.index]) queue.push(queue.shift()); // not the song that just played
+      player.set({ queue });
+    }
+    load(0, true, true);
+  } else {
     audio.pause();
     player.set({ playing: false });
   }
@@ -304,13 +325,25 @@ export function next() {
 
 export function prev() {
   const s = player.get();
-  if (audio.currentTime > 3 || (s.index === 0 && s.repeat !== 'all')) audio.currentTime = 0;
+  if (audio.currentTime > 3 || (s.index === 0 && s.repeat === 'off')) seek(0);
   else load(s.index > 0 ? s.index - 1 : s.queue.length - 1);
 }
 
 export const playAt = (i) => load(i);
+
+// seek jumps there and shows it at once. Dragging the seek bar only previews (scrubTo) and seeks
+// once on release, so a drag is one jump, not one per pointer move (review #41).
 export const seek = (sec) => {
-  if (isFinite(sec)) audio.currentTime = sec;
+  if (!isFinite(sec) || !current()) return;
+  audio.currentTime = sec;
+  player.set({ time: sec, scrub: null });
+};
+export const scrubTo = (sec) => isFinite(sec) && player.set({ scrub: sec });
+export const endScrub = (commit) => {
+  const { scrub } = player.get();
+  if (scrub === null) return;
+  if (commit) seek(scrub);
+  else player.set({ scrub: null });
 };
 
 // Warm the server's stream cache for the next track (plan §5: preload at most the next one).
@@ -327,6 +360,7 @@ audio.addEventListener('timeupdate', () => {
   lastTick = now;
   player.set({ time: audio.currentTime });
 });
+audio.addEventListener('seeked', () => player.set({ time: audio.currentTime }));
 audio.addEventListener('durationchange', () => isFinite(audio.duration) && player.set({ duration: audio.duration }));
 audio.addEventListener('play', () => player.set({ playing: true }));
 audio.addEventListener('pause', () => {
@@ -341,7 +375,7 @@ audio.addEventListener('playing', () => {
 audio.addEventListener('ended', () => {
   report(true);
   session = null;
-  if (player.get().repeat === 'one') load(player.get().index);
+  if (player.get().repeat === 'one') load(player.get().index, true, true);
   else next();
 });
 audio.addEventListener('error', () => {

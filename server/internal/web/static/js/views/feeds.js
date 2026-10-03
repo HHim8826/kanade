@@ -239,8 +239,11 @@ function SourceDialog({ src, close, reload }) {
       setBusy(false);
     }
   };
-  return html`<${Dialog} title=${src ? '編輯來源' : '新增 RSS 來源'} wide onClose=${close}>
-    <form onSubmit=${save}>
+  // The buttons stay in view below the scrolling form (review #29).
+  return html`<${Dialog} title=${src ? '編輯來源' : '新增 RSS 來源'} wide onClose=${close} actions=${html`
+      <button type="button" class="btn text" onClick=${close}>取消</button>
+      <button type="submit" form="source-form" class="btn filled" disabled=${busy}>${src ? '儲存' : '新增'}</button>`}>
+    <form id="source-form" onSubmit=${save}>
       ${!src && html`<div class="card pad template">
         <div class="title">Nyaa 範本</div>
         <div class="form-grid three">
@@ -275,10 +278,6 @@ function SourceDialog({ src, close, reload }) {
         <label class="field">也送到這些網站（選填）<textarea rows="2" value=${f.origins} placeholder="https://dl.example.org" onInput=${set('origins')}></textarea></label>
         <p class="hint tight">只存在伺服器的資料庫裡，用來取得 RSS 與 .torrent 檔。帳密與 Cookie 只會送到 RSS 網址的同一個網站（相同協定、主機與連接埠，轉址也一樣）；.torrent 放在其他網站（例如 CDN）而需要登入時，把那個網站加在上面，每行一個。</p>
       </details>
-      <div class="dialog-actions">
-        <button type="button" class="btn text" onClick=${close}>取消</button>
-        <button class="btn filled" disabled=${busy}>${src ? '儲存' : '新增'}</button>
-      </div>
     </form>
   <//>`;
 }

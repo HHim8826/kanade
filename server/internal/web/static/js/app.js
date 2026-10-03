@@ -65,13 +65,16 @@ function App() {
   const section = route.parts[0] || '';
   const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist', 'edits'].includes(section))
     || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section)) || (key === '' && section === 'history');
-  return html`
+  // The page scrolls on its own above the player bar and the navigation, which keep their room
+  // (review #48).
+  return html`<div class="shell">
     <nav class="nav" aria-label="主要">
       ${nav.map(([key, icon, label]) => html`<a key=${key} href=${href(key)} class=${active(key) ? 'active' : ''} aria-current=${active(key) ? 'page' : undefined}>
         <span class="nav-icon"><${Icon} name=${icon} /></span><span class="nav-label">${label}</span></a>`)}
     </nav>
-    <main class="content"><${Boundary} key=${location.hash}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></main>
+    <main class="content" id="content"><div class="page"><${Boundary} key=${location.hash}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></div></main>
     <${PlayerBar} />
+    </div>
     <${NowPlaying} />
     <${MenuHost} />
     <${DialogHost} />

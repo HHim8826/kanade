@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import { api, get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
-  clearUpcoming, current, cycleRepeat, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, seek, setVolume,
-  toggle, toggleMute, toggleShuffle,
+  clearUpcoming, current, cycleMode, endScrub, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, scrubTo, seek,
+  setVolume, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
 import { createStore, useStore } from '../store.js';
@@ -18,22 +18,35 @@ const openTab = (tab) => {
   open(true);
 };
 
-// Seek is the playing position as a slider; the filled part follows it.
+// shownTime is where the song is, or where the seek bar is being dragged to.
+const shownTime = (s) => (s.scrub ?? s.time);
+
+// Seek is the playing position as a slider; the filled part follows it. Dragging previews the
+// position and seeks once on release; each key press seeks at once (review #41).
 function Seek({ s, className }) {
-  const pct = s.duration ? Math.min(s.time / s.duration, 1) * 100 : 0;
-  return html`<input class=${'seek ' + className} type="range" min="0" max=${s.duration || 0} step="0.1" value=${s.time}
-    style=${{ '--p': pct + '%' }} onInput=${(e) => seek(parseFloat(e.target.value))} aria-label="播放位置"
-    aria-valuetext=${`${fmtTime(s.time * 1000)} / ${fmtTime(s.duration * 1000)}`} />`;
+  const t = shownTime(s);
+  const pct = s.duration ? Math.min(t / s.duration, 1) * 100 : 0;
+  return html`<input class=${'seek ' + className} type="range" min="0" max=${s.duration || 0} step="0.1" value=${t}
+    style=${{ '--p': pct + '%' }} onInput=${(e) => scrubTo(parseFloat(e.target.value))}
+    onChange=${(e) => seek(parseFloat(e.target.value))} onPointerCancel=${() => endScrub(false)} onBlur=${() => endScrub(true)}
+    onKeyDown=${(e) => seekKey(e, s)} aria-label="播放位置" aria-valuetext=${`${fmtTime(t * 1000)} / ${fmtTime(s.duration * 1000)}`} />`;
 }
 
-const repeatLabels = { off: '循環播放：關閉', all: '循環播放：整個佇列', one: '循環播放：單曲' };
+// The arrow keys move five seconds, not the slider's fine step.
+function seekKey(e, s) {
+  const by = { ArrowLeft: -5, ArrowDown: -5, ArrowRight: 5, ArrowUp: 5, PageDown: -30, PageUp: 30 }[e.key];
+  if (!by || !s.duration) return;
+  e.preventDefault();
+  seek(Math.min(Math.max(s.time + by, 0), s.duration));
+}
 
-function Modes({ s, which, size }) {
-  return which === 'shuffle'
-    ? html`<${IconButton} icon="shuffle" label=${s.shuffle ? '隨機播放：開啟' : '隨機播放：關閉'} pressed=${s.shuffle} size=${size}
-        className=${'mode' + (s.shuffle ? ' on' : '')} onClick=${toggleShuffle} />`
-    : html`<${IconButton} icon=${s.repeat === 'one' ? 'repeatOne' : 'repeat'} label=${repeatLabels[s.repeat]} pressed=${s.repeat !== 'off'}
-        size=${size} className=${'mode' + (s.repeat !== 'off' ? ' on' : '')} onClick=${cycleRepeat} />`;
+const modeLook = { order: ['order', '順序播放'], all: ['repeat', '列表循環'], one: ['repeatOne', '單曲循環'], shuffle: ['shuffle', '隨機播放'] };
+
+// ModeButton shows the play mode and switches to the next one (review #40).
+function ModeButton({ s, size }) {
+  const [icon, name] = modeLook[s.mode];
+  return html`<${IconButton} icon=${icon} label=${`播放模式：${name}（按一下切換）`} size=${size}
+    className=${'mode' + (s.mode !== 'order' ? ' on' : '')} onClick=${cycleMode} />`;
 }
 
 function Volume({ s }) {
@@ -56,14 +69,13 @@ export function PlayerBar() {
       <span class="track-text"><span class="title">${item.title}</span><span class="sub">${item.artist || '未知歌手'}</span></span>
     </button>
     <div class="controls">
-      <span class="wide-only"><${Modes} s=${s} which="shuffle" /></span>
+      <span class="wide-only"><${ModeButton} s=${s} /></span>
       <${IconButton} icon="prev" label="上一首" onClick=${prev} />
       <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled />
       <${IconButton} icon="next" label="下一首" onClick=${next} />
-      <span class="wide-only"><${Modes} s=${s} which="repeat" /></span>
     </div>
     <div class="bar-extra">
-      <span class="bar-time wide-only">${fmtTime(s.time * 1000)} / ${fmtTime(s.duration * 1000)}</span>
+      <span class="bar-time wide-only">${fmtTime(shownTime(s) * 1000)} / ${fmtTime(s.duration * 1000)}</span>
       <span class="wide-only">${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}</span>
       <span class="wide-only"><${IconButton} icon="lyrics" label="歌詞" onClick=${() => openTab('lyrics')} /></span>
       <${IconButton} icon="queue" label="播放佇列" onClick=${() => openTab('queue')} />
@@ -77,6 +89,11 @@ function FavButton({ trackId }) {
   return html`<${IconButton} icon=${on ? 'favorite' : 'favoriteOff'} label=${on ? '取消收藏' : '收藏'} pressed=${on}
     className=${on ? 'fav-on' : ''} onClick=${() => toggleFav('track', trackId)} />`;
 }
+
+const showQueue = () => {
+  panel.set({ tab: 'queue' });
+  document.querySelector('.np-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
 
 export function NowPlaying() {
   const s = useStore(player);
@@ -110,13 +127,13 @@ export function NowPlaying() {
         </div>
         <div class="quality">${fmtQuality(item.asset)}</div>
         <${Seek} s=${s} className="np-seek" />
-        <div class="times"><span>${fmtTime(s.time * 1000)}</span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
+        <div class="times"><span>${fmtTime(shownTime(s) * 1000)}</span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
         <div class="np-controls">
-          <${Modes} s=${s} which="shuffle" />
+          <${ModeButton} s=${s} />
           <${IconButton} icon="prev" label="上一首" onClick=${prev} size=${32} />
           <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled size=${40} />
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
-          <${Modes} s=${s} which="repeat" />
+          <${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} />
         </div>
         <${Volume} s=${s} />
       </div>
@@ -142,7 +159,7 @@ function Queue({ s }) {
   ]);
   return html`<div class="queue">
     <div class="queue-head">
-      <span class="sub grow">${s.queue.length} 首${s.shuffle ? ' · 隨機順序' : ''}${s.repeat !== 'off' ? ' · ' + repeatLabels[s.repeat].slice(5) : ''}</span>
+      <span class="sub grow">${s.queue.length} 首 · ${modeLook[s.mode][1]}</span>
       <button class="btn text" disabled=${s.index >= last} onClick=${clearUpcoming}>清除待播</button>
       <button class="btn text" onClick=${() => resetPlayer()}>停止並清空</button>
     </div>

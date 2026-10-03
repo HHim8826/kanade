@@ -12,7 +12,7 @@ export function useRoute() {
   useEffect(() => {
     const onChange = () => {
       setRoute(parseHash());
-      window.scrollTo(0, 0);
+      document.getElementById('content')?.scrollTo(0, 0); // the page scrolls, not the window
     };
     addEventListener('hashchange', onChange);
     return () => removeEventListener('hashchange', onChange);

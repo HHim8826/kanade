@@ -15,7 +15,7 @@ export function AlbumGrid({ albums, empty = '還沒有專輯。到「任務」�
       <${Cover} id=${a.cover_id} alt="" />
       <div class="card-text">
         <div class="title" title=${a.title}>${a.title}</div>
-        <div class="sub">${a.album_artist || '未知歌手'}</div>
+        <div class="sub" title=${a.album_artist || ''}>${a.album_artist || '未知歌手'}</div>
       </div>
     </a>`)}
   </div>`;

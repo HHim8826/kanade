@@ -63,7 +63,7 @@ func scanAlbums(rows *sql.Rows, err error) ([]AlbumSummary, error) {
 
 // Albums lists albums by album artist and title, or newest first when recent is set.
 func (s *Store) Albums(ctx context.Context, limit, offset int, recent bool) ([]AlbumSummary, error) {
-	order := `al.album_artist, al.title`
+	order := `al.album_artist, al.title, al.id`
 	if recent {
 		order = `al.id DESC`
 	}
@@ -171,7 +171,7 @@ func scanTracks(rows *sql.Rows, err error) ([]TrackItem, error) {
 }
 
 func (s *Store) Tracks(ctx context.Context, limit, offset int) ([]TrackItem, error) {
-	return scanTracks(s.db.QueryContext(ctx, trackSQL+` ORDER BY t.title LIMIT ? OFFSET ?`, limit, offset))
+	return scanTracks(s.db.QueryContext(ctx, trackSQL+` ORDER BY t.title, t.id LIMIT ? OFFSET ?`, limit, offset)) // a total order: pages neither repeat nor skip
 }
 
 type Artist struct {
@@ -182,7 +182,7 @@ type Artist struct {
 
 func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, count(ta.track_id) FROM artists ar
-		JOIN track_artists ta ON ta.artist_id = ar.id GROUP BY ar.id ORDER BY ar.name LIMIT ? OFFSET ?`, limit, offset)
+		JOIN track_artists ta ON ta.artist_id = ar.id GROUP BY ar.id ORDER BY ar.name, ar.id LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}

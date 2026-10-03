@@ -1,5 +1,5 @@
 import { h } from '../vendor/preact.module.js';
-import { useEffect, useErrorBoundary, useState } from '../vendor/hooks.module.js';
+import { useEffect, useErrorBoundary, useRef, useState } from '../vendor/hooks.module.js';
 import htm from '../vendor/htm.module.js';
 import { coverURL } from './api.js';
 import { createStore, useStore } from './store.js';
@@ -49,6 +49,7 @@ const icons = {
   image: 'M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
   undo: 'M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62A7.95 7.95 0 0 1 12.5 10c3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 10.53 17.15 8 12.5 8z',
   repeat: 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4z',
+  order: 'M2 17h2v.5H3v1h1v.5H2v1h3v-4H2v1zm1-9h1V4H2v1h1v3zm-1 3h1.8L2 13.1v.9h3v-1H3.2L5 10.9V10H2v1zm5-6v2h14V5H7zm0 14h14v-2H7v2zm0-6h14v-2H7v2z',
   repeatOne: 'M7 7h10v3l4-4-4-4v3H5v6h2V7zm10 10H7v-3l-4 4 4 4v-3h12v-6h-2v4zm-4-2V9h-1l-2 1v1h1.5v4H13z',
   volume: 'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z',
   volumeOff: 'M16.5 12A4.5 4.5 0 0 0 14 7.97v2.21l2.45 2.45c.03-.2.05-.41.05-.63zm2.5 0c0 .94-.2 1.82-.54 2.64l1.51 1.51A8.796 8.796 0 0 0 21 12c0-4.28-2.99-7.86-7-8.77v2.06c2.89.86 5 3.54 5 6.71zM4.27 3L3 4.27 7.73 9H3v6h4l5 5v-6.73l4.25 4.25c-.67.52-1.42.93-2.25 1.18v2.06a8.99 8.99 0 0 0 3.69-1.81L19.73 21 21 19.73l-9-9L4.27 3zM12 4L9.91 6.09 12 8.18V4z',
@@ -177,35 +178,65 @@ const menus = createStore({ menu: null });
 
 export function openMenu(e, items) {
   e.stopPropagation();
-  const r = e.currentTarget.getBoundingClientRect();
-  menus.set({ menu: { rect: { top: r.top, bottom: r.bottom, right: r.right }, items: items.filter(Boolean) } });
+  const opener = e.currentTarget;
+  const r = opener.getBoundingClientRect();
+  menus.set({ menu: { rect: { top: r.top, bottom: r.bottom, right: r.right }, items: items.filter(Boolean), opener } });
 }
 
-const closeMenu = () => menus.set({ menu: null });
+// closeMenu with refocus puts the keyboard focus back on the button that opened the menu.
+const closeMenu = (refocus = false) => {
+  const { menu } = menus.get();
+  menus.set({ menu: null });
+  if (refocus === true && menu?.opener?.isConnected) menu.opener.focus({ preventScroll: true });
+};
+
+// placeMenu puts a menu of this height below the button, or above it when only that side has
+// room. When neither does, it takes the roomier side and scrolls inside, so every item stays
+// reachable however short the window (review #47).
+function placeMenu(rect, height, vh = innerHeight) {
+  const margin = 8, gap = 4;
+  const below = vh - rect.bottom - gap - margin, above = rect.top - gap - margin;
+  if (height <= below || (height > above && below >= above)) return { top: rect.bottom + gap, maxHeight: below };
+  return { bottom: vh - rect.top + gap, maxHeight: above };
+}
 
 export function MenuHost() {
   const { menu } = useStore(menus);
+  const ref = useRef(null);
   useEffect(() => {
     if (!menu) return;
-    const onKey = (e) => e.key === 'Escape' && closeMenu();
+    const items = () => [...ref.current.querySelectorAll('[role=menuitem]')];
+    items()[0]?.focus({ preventScroll: true });
+    const onKey = (e) => {
+      if (e.key === 'Escape') return closeMenu(true);
+      const list = items(), at = list.indexOf(document.activeElement);
+      const to = { ArrowDown: at + 1, ArrowUp: at - 1, Home: 0, End: list.length - 1 }[e.key];
+      if (to === undefined || !list.length) return;
+      e.preventDefault();
+      list[(to + list.length) % list.length].focus(); // scrolls a long menu to it
+    };
     addEventListener('keydown', onKey);
-    addEventListener('resize', closeMenu);
-    addEventListener('hashchange', closeMenu);
+    const away = () => closeMenu();
+    addEventListener('resize', away);
+    addEventListener('hashchange', away);
     return () => {
       removeEventListener('keydown', onKey);
-      removeEventListener('resize', closeMenu);
-      removeEventListener('hashchange', closeMenu);
+      removeEventListener('resize', away);
+      removeEventListener('hashchange', away);
     };
   }, [menu]);
   if (!menu) return null;
   const { rect, items } = menu;
   const width = 240, height = items.length * 48 + 16;
   const left = Math.max(8, Math.min(rect.right - width, innerWidth - width - 8));
-  const below = innerHeight - rect.bottom > height + 8 || rect.top < height + 8;
-  const style = { left: left + 'px', width: width + 'px', ...(below ? { top: rect.bottom + 4 + 'px' } : { bottom: innerHeight - rect.top + 4 + 'px' }) };
-  return html`<div class="menu-scrim" onClick=${closeMenu} onWheel=${closeMenu}>
-    <ul class="menu" role="menu" style=${style} onClick=${(e) => e.stopPropagation()}>
-      ${items.map((it, i) => html`<li key=${i} role="none"><button role="menuitem" onClick=${() => { closeMenu(); it.onClick(); }}>
+  const place = placeMenu(rect, height);
+  const style = { left: left + 'px', width: width + 'px', maxHeight: place.maxHeight + 'px',
+    ...(place.top !== undefined ? { top: place.top + 'px' } : { bottom: place.bottom + 'px' }) };
+  // Scrolling the wheel outside the menu closes it; inside, it scrolls the menu.
+  const onWheel = (e) => !ref.current?.contains(e.target) && closeMenu();
+  return html`<div class="menu-scrim" onClick=${() => closeMenu(true)} onWheel=${onWheel}>
+    <ul class="menu" role="menu" ref=${ref} style=${style} onClick=${(e) => e.stopPropagation()}>
+      ${items.map((it, i) => html`<li key=${i} role="none"><button role="menuitem" onClick=${() => { closeMenu(true); it.onClick(); }}>
         <${Icon} name=${it.icon} /><span>${it.label}</span></button></li>`)}
     </ul>
   </div>`;
