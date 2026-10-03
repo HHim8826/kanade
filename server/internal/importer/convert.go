@@ -236,8 +236,11 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 		limits[i] = ffmpeg.MaxFLAC(s, max(end-p.Start, 1), size)
 		need += limits[i]
 	}
-	release, err := im.hold(ctx, need)
+	release, err := im.holdOutput(ctx, img.id, need, img.path, size)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fail("not enough staging space to split it: " + err.Error())
 	}
 	defer release()
@@ -380,8 +383,11 @@ func (im *Importer) convert(ctx context.Context, batchID int64, a audioItem) err
 		return nil
 	}
 	limit := ffmpeg.MaxFLAC(s, 0, size)
-	release, err := im.hold(ctx, limit)
+	release, err := im.holdOutput(ctx, a.id, limit, a.path, size)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fail("not enough staging space to convert it: " + err.Error())
 	}
 	defer release()

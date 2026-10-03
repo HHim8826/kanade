@@ -1,9 +1,12 @@
 package downloader
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha1"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -80,7 +83,8 @@ type View struct {
 	Note          string     `json:"note,omitempty"`        // what it waits for
 	Left          int        `json:"left,omitempty"`        // selected files no round has fetched yet
 	WaitingSpace  bool       `json:"waiting_space,omitempty"`
-	Budget        int64      `json:"budget,omitempty"` // the staging budget rounds fit (with the file list)
+	CanRetry      bool       `json:"can_retry,omitempty"` // failed with files left to fetch (review #49)
+	Budget        int64      `json:"budget,omitempty"`    // the staging budget rounds fit (with the file list)
 	Files         []FileView `json:"files,omitempty"`
 }
 
@@ -94,19 +98,34 @@ type Service struct {
 	log     *slog.Logger
 	mu      sync.Mutex // serializes state changes between API calls and the poll loop
 	kick    chan struct{}
+
+	importWait map[int64]time.Time // a failed hand-over to the importer is tried again after this (under mu)
 }
 
 // NewService makes the service with a budget of its own; ShareBudget puts it on the shared one.
 func NewService(d *sql.DB, aria *Aria2, imp *importer.Importer, root string, budget, reserve int64, log *slog.Logger) *Service {
-	s := &Service{db: d, aria: aria, imp: imp, root: root, log: log, kick: make(chan struct{}, 1)}
+	s := &Service{db: d, aria: aria, imp: imp, root: root, log: log, kick: make(chan struct{}, 1), importWait: map[int64]time.Time{}}
 	s.ShareBudget(&staging.Budget{Limit: budget, Reserve: reserve, Dir: root, Free: freeSpace})
 	return s
 }
 
-// ShareBudget counts the downloads against b, and starts rounds only when they fit it.
+// ShareBudget counts the downloads against b, and starts rounds only when they fit it. Others
+// short of space may have a finished seed stopped for them.
 func (s *Service) ShareBudget(b *staging.Budget) {
 	s.budget = b
-	b.Use(s.Committed)
+	b.Use(s.Usage)
+	b.Reclaim = s.reclaim
+}
+
+// reclaim stops a finished seed for someone else's request (an import's FFmpeg output, an upload).
+// When the poll loop or an API call is busy it does nothing rather than wait: they may be waiting
+// on the budget themselves.
+func (s *Service) reclaim(ctx context.Context) (bool, error) {
+	if !s.mu.TryLock() {
+		return false, nil
+	}
+	defer s.mu.Unlock()
+	return s.stopOldestSeed(ctx)
 }
 
 func (s *Service) poke() {
@@ -264,8 +283,156 @@ const maxTorrent = 10 << 20
 // again (review #28).
 const taskTorrent = "task.torrent"
 
+// saveTorrent keeps the torrent beside the download's files, whole or not at all.
 func saveTorrent(dir string, torrent []byte) error {
-	return os.WriteFile(filepath.Join(dir, taskTorrent), torrent, 0o600)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	tmp := filepath.Join(dir, taskTorrent+".tmp")
+	if err := os.WriteFile(tmp, torrent, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, filepath.Join(dir, taskTorrent))
+}
+
+// torrentFor returns a download's torrent, kept as task.torrent, after checking its info hash is
+// the download's (review #49). A download from before task.torrent has only what aria2 saved
+// itself: a torrent added by RPC under the SHA-1 of the whole file, a magnet's metadata under the
+// info hash; any .torrent in the folder that checks out is taken. Failing that, a .torrent URL is
+// fetched again.
+func (s *Service) torrentFor(ctx context.Context, r *row) ([]byte, error) {
+	want := strings.ToLower(r.InfoHash)
+	ours := func(b []byte) bool {
+		h, err := infoHash(b)
+		return err == nil && (h == want || want == "")
+	}
+	kept := filepath.Join(r.dir, taskTorrent)
+	if b, err := os.ReadFile(kept); err == nil && ours(b) {
+		return b, nil
+	}
+	if want == "" {
+		return nil, errors.New("the torrent of this download is missing")
+	}
+	found, _ := filepath.Glob(filepath.Join(r.dir, "*.torrent"))
+	for _, p := range found {
+		if st, err := os.Stat(p); err != nil || st.Size() > maxTorrent || p == kept {
+			continue
+		}
+		if b, err := os.ReadFile(p); err == nil && ours(b) {
+			return b, saveTorrent(r.dir, b)
+		}
+	}
+	if strings.HasPrefix(r.Source, "https://") || strings.HasPrefix(r.Source, "http://") {
+		b, err := fetchTorrent(ctx, r.Source)
+		if err != nil {
+			return nil, fmt.Errorf("the torrent of this download is missing, and fetching it again failed: %w", err)
+		}
+		if !ours(b) {
+			return nil, errors.New("the torrent of this download is missing, and its link now gives a different torrent")
+		}
+		s.log.Info("fetched the torrent again", "download", r.ID)
+		return b, saveTorrent(r.dir, b)
+	}
+	return nil, errors.New("the torrent of this download is missing; add it again from its link or file")
+}
+
+// secureTorrents makes sure every download under way keeps its own torrent before a later round
+// needs it, for downloads added before task.torrent existed (review #49).
+func (s *Service) secureTorrents(ctx context.Context) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+rowCols+` FROM downloads WHERE info_hash != '' AND files_removed = 0
+		AND state NOT IN (?, ?, ?)`, StateCompleted, StateCanceled, StateFailed)
+	if err != nil {
+		return
+	}
+	var list []*row
+	for rows.Next() {
+		if r, err := scanRow(rows); err == nil {
+			list = append(list, r)
+		}
+	}
+	rows.Close()
+	for _, r := range list {
+		if _, err := s.torrentFor(ctx, r); err != nil {
+			s.log.Warn("torrent for later rounds", "download", r.ID, "err", err)
+		}
+	}
+}
+
+// infoHash is a torrent's BitTorrent info hash: the SHA-1 of its bencoded info dictionary.
+func infoHash(t []byte) (string, error) {
+	if len(t) == 0 || t[0] != 'd' {
+		return "", errors.New("not a torrent")
+	}
+	for i := 1; i < len(t) && t[i] != 'e'; {
+		key, next, err := bstring(t, i)
+		if err != nil {
+			return "", err
+		}
+		end, err := bskip(t, next, 0)
+		if err != nil {
+			return "", err
+		}
+		if key == "info" {
+			sum := sha1.Sum(t[next:end])
+			return hex.EncodeToString(sum[:]), nil
+		}
+		i = end
+	}
+	return "", errors.New("the torrent has no info dictionary")
+}
+
+var errBencode = errors.New("not a valid torrent")
+
+// bstring reads a bencoded string at i, returning it and where it ends.
+func bstring(t []byte, i int) (string, int, error) {
+	j := i
+	for j < len(t) && t[j] >= '0' && t[j] <= '9' {
+		j++
+	}
+	if j == i || j >= len(t) || t[j] != ':' {
+		return "", 0, errBencode
+	}
+	n, err := strconv.Atoi(string(t[i:j]))
+	if err != nil || n < 0 || n > len(t)-j-1 {
+		return "", 0, errBencode
+	}
+	return string(t[j+1 : j+1+n]), j + 1 + n, nil
+}
+
+// bskip returns where the bencoded value at i ends.
+func bskip(t []byte, i, depth int) (int, error) {
+	if i >= len(t) || depth > 64 {
+		return 0, errBencode
+	}
+	switch c := t[i]; {
+	case c == 'i':
+		j := bytes.IndexByte(t[i:], 'e')
+		if j < 0 {
+			return 0, errBencode
+		}
+		return i + j + 1, nil
+	case c == 'l', c == 'd':
+		i++
+		for i < len(t) && t[i] != 'e' {
+			var err error
+			if c == 'd' {
+				if _, i, err = bstring(t, i); err != nil {
+					return 0, err
+				}
+			}
+			if i, err = bskip(t, i, depth+1); err != nil {
+				return 0, err
+			}
+		}
+		if i >= len(t) {
+			return 0, errBencode
+		}
+		return i + 1, nil
+	case c >= '0' && c <= '9':
+		_, end, err := bstring(t, i)
+		return end, err
+	}
+	return 0, errBencode
 }
 
 // addTorrent adds a paused task. With check, aria2 first checks what is already on disk against
@@ -302,21 +469,21 @@ func fetchTorrent(ctx context.Context, uri string) ([]byte, error) {
 
 type row struct {
 	View
-	metaGID, gid, dir      string
-	files                  []FileView
-	roundBytes, doneBefore int64
+	metaGID, gid, dir                 string
+	files                             []FileView
+	roundBytes, roundWork, doneBefore int64
 }
 
 const rowCols = `id, source, name, info_hash, meta_gid, gid, state, dir, files, total_bytes, done_bytes, uploaded_bytes,
 	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select,
-	round, round_bytes, done_before, note`
+	round, round_bytes, round_work, done_before, note`
 
 func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	var r row
 	var files string
 	err := sc.Scan(&r.ID, &r.Source, &r.Name, &r.InfoHash, &r.metaGID, &r.gid, &r.State, &r.dir, &files, &r.TotalBytes,
 		&r.DoneBytes, &r.UploadedBytes, &r.DownSpeed, &r.UpSpeed, &r.Peers, &r.Error, &r.ImportBatchID, &r.FilesRemoved,
-		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.doneBefore, &r.Note)
+		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note)
 	if err != nil {
 		return nil, err
 	}
@@ -329,6 +496,7 @@ func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 		}
 	}
 	r.WaitingSpace = r.State == StateQueued && strings.HasPrefix(r.Note, notePrefixSpace)
+	r.CanRetry = r.State == StateFailed && len(retryable(r.files)) > 0 // (unless the torrent is downloading again elsewhere)
 	return &r, nil
 }
 
@@ -463,12 +631,19 @@ func (s *Service) selectLocked(ctx context.Context, id int64, indexes []int) err
 }
 
 // Committed is what the downloads hold or have promised: files on disk plus what running rounds
-// still have to fetch. Rounds not started promise nothing.
+// still have to fetch, and the work space their imports will need. Rounds not started promise
+// nothing.
 func (s *Service) Committed(ctx context.Context) int64 {
+	u := s.Usage(ctx)
+	return u.Disk + u.Pending
+}
+
+// Usage is Committed split into what is on disk and what is promised (review #4).
+func (s *Service) Usage(ctx context.Context) staging.Usage {
 	var pending int64
-	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(round_bytes - (done_bytes - done_before), 0)), 0) FROM downloads
+	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(round_bytes - (done_bytes - done_before), 0) + round_work), 0) FROM downloads
 		WHERE state IN (?, ?, ?)`, StateQueued, StateDownloading, StatePaused).Scan(&pending)
-	return dirSize(s.root) + pending
+	return staging.Usage{Disk: dirSize(s.root), Pending: pending}
 }
 
 // stopOldestSeed frees staging space for a round: it stops the oldest seed whose files are all in
@@ -488,7 +663,7 @@ func (s *Service) stopOldestSeed(ctx context.Context) (bool, error) {
 	rows.Close()
 	for _, id := range ids {
 		r, err := s.load(ctx, id)
-		if err != nil || r == nil || !s.importsSaved(ctx, r) {
+		if err != nil || r == nil || !r.handedOver() || !s.importsSaved(ctx, r) {
 			continue
 		}
 		s.aria.RPC.Call(ctx, "forceRemove", nil, r.gid)
@@ -505,7 +680,7 @@ func (r *row) batches() []int64 {
 	seen := map[int64]bool{}
 	var out []int64
 	add := func(id int64) {
-		if id != 0 && !seen[id] {
+		if id > 0 && !seen[id] {
 			seen[id] = true
 			out = append(out, id)
 		}
@@ -514,6 +689,39 @@ func (r *row) batches() []int64 {
 		add(f.Batch)
 	}
 	add(r.ImportBatchID)
+	return out
+}
+
+// roundBatch is the import batch of the current round's files (noImport when there was nothing to
+// import); for a download from before rounds, its one batch.
+func (r *row) roundBatch() int64 {
+	for _, f := range r.files {
+		if f.Selected && f.Round == r.Round && f.Batch != 0 {
+			return f.Batch
+		}
+	}
+	return r.ImportBatchID
+}
+
+// handedOver reports whether every selected file was fetched and handed to an import: nothing is
+// left to download, and no file is waiting for its import to be set up (review #43, #49).
+func (r *row) handedOver() bool {
+	for _, f := range r.files {
+		if f.Selected && f.Batch == 0 && !(r.Round == 0 && r.ImportBatchID != 0) { // before rounds: one import for all
+			return false
+		}
+	}
+	return true
+}
+
+// retryable are the selected files a retry fetches: those no import has.
+func retryable(files []FileView) []FileView {
+	var out []FileView
+	for _, f := range files {
+		if f.Selected && f.Batch == 0 {
+			out = append(out, f)
+		}
+	}
 	return out
 }
 
@@ -582,6 +790,65 @@ func (s *Service) Resume(ctx context.Context, id int64) error {
 	return nil
 }
 
+// Retry starts a failed download again (review #49, #50). What earlier rounds imported stays in
+// the library and is not fetched again; the rest is planned in rounds as usual, from the download's
+// torrent, found in its folder or fetched again from its link, and checked against what is on disk.
+func (s *Service) Retry(ctx context.Context, id int64) error {
+	if !s.aria.Ready() {
+		return ErrNotReady
+	}
+	if s.lowDisk.Load() {
+		return ErrLowDisk
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r, err := s.load(ctx, id)
+	if err != nil || r == nil {
+		return errors.New("no such download")
+	}
+	if r.State != StateFailed {
+		return ErrBadState
+	}
+	if len(retryable(r.files)) == 0 {
+		return errors.New("nothing is left to download: every chosen file was imported, or the files were never chosen; add it again")
+	}
+	var other int64
+	if s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE info_hash = ? AND id != ? AND state NOT IN (?, ?, ?)`,
+		r.InfoHash, r.ID, StateCompleted, StateFailed, StateCanceled).Scan(&other) == nil {
+		return fmt.Errorf("this torrent is already download #%d", other)
+	}
+	if r.dir == "" {
+		r.dir = filepath.Join(s.root, strconv.FormatInt(r.ID, 10))
+	}
+	if _, err := s.torrentFor(ctx, r); err != nil {
+		return err
+	}
+	for _, g := range []string{r.metaGID, r.gid} {
+		if g != "" {
+			s.aria.RPC.Call(ctx, "forceRemove", nil, g)
+			s.aria.RPC.Call(ctx, "removeDownloadResult", nil, g)
+		}
+	}
+	// Files of a round that never reached an import are planned again; finished rounds stay.
+	round := 0
+	for i := range r.files {
+		f := &r.files[i]
+		if f.Selected && f.Batch == 0 {
+			f.Round = 0
+		}
+		if f.Batch != 0 {
+			round = max(round, f.Round)
+		}
+	}
+	files, _ := json.Marshal(r.files)
+	delete(s.importWait, r.ID)
+	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', meta_gid = '', dir = ?, files = ?, round = ?, round_bytes = 0,
+		round_work = 0, done_bytes = done_before, files_removed = 0, error = '', note = 'retrying', paused_by = '', updated_at = ? WHERE id = ?`,
+		StateQueued, r.dir, string(files), round, db.Now(), r.ID)
+	s.poke()
+	return err
+}
+
 func (s *Service) Cancel(ctx context.Context, id int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -590,7 +857,7 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 		return errors.New("no such download")
 	}
 	switch r.State {
-	case StateCompleted, StateFailed, StateCanceled:
+	case StateCompleted, StateCanceled:
 		return ErrBadState
 	}
 	for _, g := range []string{r.metaGID, r.gid} {
@@ -603,14 +870,16 @@ func (s *Service) Cancel(ctx context.Context, id int64) error {
 	return nil
 }
 
-// cleanup removes a finished download's files once nothing needs them: no import, or imports in
-// which every file is in the library, was excluded, or was discarded by the user. Failed and
-// skipped audio keep the files, so the import can be retried (review #1).
+// cleanup removes a finished download's files once nothing needs them: every chosen file was
+// handed to an import, and in the imports every file is in the library, was excluded, or was
+// discarded by the user. Failed and skipped audio keep the files, so the import can be retried
+// (review #1); a download that failed before handing everything over keeps its files and torrent
+// for a retry (review #43, #49). Canceling lets go of what no import has.
 func (s *Service) cleanup(ctx context.Context, r *row) {
 	if r.FilesRemoved || r.dir == "" {
 		return
 	}
-	if !s.importsSaved(ctx, r) {
+	if (r.State != StateCanceled && !r.handedOver()) || !s.importsSaved(ctx, r) {
 		return // files not in the library yet stay, for a retry or until the user discards them
 	}
 	for _, g := range []string{r.metaGID, r.gid} {

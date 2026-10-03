@@ -109,21 +109,31 @@ function ItemList({ sources, initialQ, rev }) {
 // in the list.
 const liveKey = (live, it, i) => `${live.source.id}|${it.guid || it.info_hash || it.download || 'i' + i}`;
 
+// What an item's download is doing (review #50): only a finished one counts as downloaded; a
+// failed one can be retried in place and a canceled one downloaded again.
+const dlLook = {
+  seeding: ['已下載', ''], completed: ['已下載', ''], failed: ['下載失敗', 'warn'], canceled: ['下載已取消', ''],
+};
+const underWay = (state) => state && !dlLook[state];
+
 function ItemRow({ it, live }) {
   const [busy, setBusy] = useState(false);
   const [started, setStarted] = useState(0);
+  const state = started ? 'queued' : it.download_state;
   const download = async () => {
     setBusy(true);
     try {
       const r = live ? await post(`/rss/sources/${live.id}/download`, { link: it.download }) : await post(`/rss/items/${it.id}/download`);
       setStarted(r.id);
-      toast('已加入下載，取得檔案清單後請選擇要下載的檔案', 'info', { label: '前往任務', onClick: () => go('tasks') });
+      toast(state === 'failed' ? '已重新開始下載，已入庫的部分會保留' : '已加入下載，取得檔案清單後請選擇要下載的檔案', 'info',
+        { label: '前往任務', onClick: () => go('tasks') });
     } catch (e) {
       toast(e.message, 'error');
     }
     setBusy(false);
   };
-  const done = it.downloaded || started > 0;
+  const busyNow = underWay(state) || state === 'seeding' || state === 'completed';
+  const [label, tone] = underWay(state) ? ['下載中', ''] : dlLook[state] || [];
   return html`<li class="feed-item">
     <div class="grow">
       <div class="title">${it.title}</div>
@@ -131,16 +141,17 @@ function ItemRow({ it, live }) {
         ${[it.source, it.size ? fmtBytes(it.size) : '大小未知', it.seeders >= 0 ? `做種 ${it.seeders}` : '', it.published_at ? clock(it.published_at) : ''].filter(Boolean).join(' · ')}
         ${it.match === 'included' && html` <span class="pill good">符合規則</span>`}
         ${it.match === 'excluded' && html` <span class="pill">已排除</span>`}
-        ${done && html` <span class="pill">已下載</span>`}
-        ${!done && it.auto_state === 'pending' && html` <span class="pill">等待自動下載</span>`}
-        ${!done && it.auto_state === 'failed' && html` <span class="pill warn">自動下載失敗</span>`}
+        ${label && html` <span class=${'pill ' + tone}>${label}</span>`}
+        ${!busyNow && it.auto_state === 'pending' && html` <span class="pill">等待自動下載</span>`}
+        ${!busyNow && it.auto_state === 'failed' && html` <span class="pill warn">自動下載失敗</span>`}
         ${!it.download && html` <span class="pill warn">只有網頁，無法直接下載</span>`}
       </div>
-      ${!done && it.auto_error && html`<div class="task-error">${it.auto_state === 'failed' ? '自動下載失敗，已停止重試：' : '自動下載暫時失敗，稍後再試：'}${it.auto_error}</div>`}
+      ${!busyNow && it.auto_error && html`<div class="task-error">${it.auto_state === 'failed' ? '自動下載失敗，已停止重試：' : it.auto_state === 'pending' ? '自動下載暫時失敗，稍後再試：' : '自動下載：'}${it.auto_error}</div>`}
     </div>
     <div class="feed-actions">
-      ${it.download && !done && html`<button class="btn tonal" disabled=${busy} onClick=${download}><${Icon} name="download" />下載</button>`}
-      ${done && html`<a class="btn text" href=${href('tasks')}>任務</a>`}
+      ${it.download && !busyNow && html`<button class="btn tonal" disabled=${busy} onClick=${download}>
+        <${Icon} name="download" />${state === 'failed' ? '重試' : state === 'canceled' ? '重新下載' : '下載'}</button>`}
+      ${(state || started) && html`<a class="btn text" href=${href('tasks')}>任務</a>`}
       ${it.page && html`<a class="btn text" href=${it.page} target="_blank" rel="noopener noreferrer">網頁</a>`}
     </div>
   </li>`;

@@ -176,6 +176,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/downloads/{id}/pause", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Pause(r.Context(), id) })))
 	mux.Handle("POST /api/v1/downloads/{id}/resume", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Resume(r.Context(), id) })))
 	mux.Handle("POST /api/v1/downloads/{id}/cancel", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Cancel(r.Context(), id) })))
+	mux.Handle("POST /api/v1/downloads/{id}/retry", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Retry(r.Context(), id) })))
 	mux.Handle("GET /api/v1/tasks", s.authed(s.tasks))
 
 	mux.Handle("GET /api/v1/rss/sources", s.authed(s.rssSources))

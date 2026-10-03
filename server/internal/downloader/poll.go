@@ -2,13 +2,14 @@ package downloader
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,12 +23,17 @@ import (
 func (s *Service) Run(ctx context.Context) {
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
+	secured := false
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		case <-s.kick:
+		}
+		if !secured { // downloads from before task.torrent keep their own before a round needs it
+			s.secureTorrents(ctx)
+			secured = true
 		}
 		if s.aria.Ready() {
 			s.tick(ctx)
@@ -110,18 +116,19 @@ func (s *Service) startRound(ctx context.Context, r *row) error {
 		return nil
 	}
 	avail := s.budget.Limit - s.budget.Used(ctx)
-	pick, need, alone := planRound(r.files, max(avail, 0))
+	pick, need, work, alone := planRound(r.files, max(avail, 0))
 	if len(pick) == 0 {
 		return errors.New("no file left to download")
 	}
-	return s.budget.Take(ctx, staging.Request{Need: need, MakeRoom: s.stopOldestSeed, Alone: alone, Record: func() error {
-		return s.beginRound(ctx, r, pick, need)
+	return s.budget.Take(ctx, staging.Request{Need: need + work, MakeRoom: s.stopOldestSeed, Alone: alone, Record: func() error {
+		return s.beginRound(ctx, r, pick, need, work)
 	}})
 }
 
-// beginRound selects a round's files in aria2 and records the reservation. After an earlier round
-// the aria2 task is gone; it is added again from the torrent aria2 saved, fetching only these files.
-func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need int64) error {
+// beginRound selects a round's files in aria2 and records the reservation: need bytes to download,
+// and work for the import (review #46). After an earlier round the aria2 task is gone; it is added
+// again from the download's torrent, fetching only these files.
+func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need, work int64) error {
 	round := r.Round + 1
 	list := make([]string, len(pick))
 	in := map[int]bool{}
@@ -131,12 +138,9 @@ func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need int64
 	}
 	gid := r.gid
 	if gid == "" {
-		torrent, err := os.ReadFile(filepath.Join(r.dir, taskTorrent))
-		if errors.Is(err, fs.ErrNotExist) { // a magnet's metadata, saved by aria2
-			torrent, err = os.ReadFile(filepath.Join(r.dir, strings.ToLower(r.InfoHash)+".torrent"))
-		}
+		torrent, err := s.torrentFor(ctx, r)
 		if err != nil {
-			return fmt.Errorf("the saved torrent is missing, cannot start round %d: %w", round, err)
+			return fmt.Errorf("cannot start round %d: %w", round, err)
 		}
 		if gid, err = s.addTorrent(ctx, torrent, r.dir, true); err != nil {
 			return err
@@ -158,9 +162,9 @@ func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need int64
 		note = fmt.Sprintf("round %d: %d files, %d MB; %d files wait for later rounds", round, len(pick), need>>20, left)
 	}
 	files, _ := json.Marshal(r.files)
-	r.gid, r.Round, r.roundBytes, r.State = gid, round, need, StateDownloading
-	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET gid = ?, files = ?, round = ?, round_bytes = ?, state = ?, note = ?, error = '',
-		updated_at = ? WHERE id = ?`, gid, string(files), round, need, StateDownloading, note, db.Now(), r.ID)
+	r.gid, r.Round, r.roundBytes, r.roundWork, r.State = gid, round, need, work, StateDownloading
+	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET gid = ?, files = ?, round = ?, round_bytes = ?, round_work = ?, state = ?,
+		note = ?, error = '', updated_at = ? WHERE id = ?`, gid, string(files), round, need, work, StateDownloading, note, db.Now(), r.ID)
 	return err
 }
 
@@ -311,7 +315,9 @@ func (s *Service) pollTransfer(ctx context.Context, r *row) {
 	case r.State == StateDownloading && finished && len(remaining(r.files)) > 0:
 		s.endRound(ctx, r)
 	case r.State == StateDownloading && finished:
-		s.startImport(ctx, r)
+		if s.startImport(ctx, r) != nil {
+			return // the files stay and the round stays finished-but-not-handed-over; tried again later (review #43)
+		}
 		next := StateSeeding
 		if st.Status == "complete" {
 			next = StateCompleted // nothing to seed (for example ratio already met)
@@ -326,19 +332,24 @@ func (s *Service) pollTransfer(ctx context.Context, r *row) {
 }
 
 // roundPaths are the files a round's import reads: the round's own, and companions kept on disk
-// from earlier rounds of the same folders.
+// from earlier rounds of the same folders (review #45). A download from before rounds (round 0)
+// imports all its selected files.
 func (r *row) roundPaths() []string {
 	var paths []string
 	for _, f := range r.files {
-		if !f.Selected || f.Round == 0 || (f.Round != r.Round && !keepAfterRound(r.files, f)) {
+		p := filepath.Join(r.dir, filepath.FromSlash(f.Path))
+		switch {
+		case !f.Selected:
 			continue
-		}
-		if f.Round != r.Round {
-			if _, err := os.Stat(filepath.Join(r.dir, filepath.FromSlash(f.Path))); err != nil {
+		case f.Round == r.Round:
+		case companionFor(r.files, f, r.Round):
+			if _, err := os.Stat(p); err != nil {
 				continue
 			}
+		default:
+			continue
 		}
-		paths = append(paths, filepath.Join(r.dir, filepath.FromSlash(f.Path)))
+		paths = append(paths, p)
 	}
 	return paths
 }
@@ -353,40 +364,82 @@ func (s *Service) restartRound(ctx context.Context, r *row) {
 	}
 	files, _ := json.Marshal(r.files)
 	r.Round--
-	r.State, r.gid, r.roundBytes = StateQueued, "", 0
-	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', files = ?, round = ?, round_bytes = 0, done_bytes = done_before,
+	r.State, r.gid, r.roundBytes, r.roundWork = StateQueued, "", 0, 0
+	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', files = ?, round = ?, round_bytes = 0, round_work = 0, done_bytes = done_before,
 		note = 'aria2 lost the task; the round starts again', updated_at = ? WHERE id = ?`, StateQueued, string(files), r.Round, db.Now(), r.ID)
 	s.poke()
 }
 
-// startImport queues the files of the round that just finished.
-func (s *Service) startImport(ctx context.Context, r *row) {
-	// No preview: the files were already chosen; the album can be tidied afterwards (P2-3).
-	batch, n, err := s.imp.CreateBatchFiles(ctx, "download", r.Name, r.dir, r.roundPaths(), false)
-	if err != nil {
-		s.db.ExecContext(ctx, `UPDATE downloads SET error = ? WHERE id = ?`, "import: "+err.Error(), r.ID)
-		return
+// noImport marks the files of a round that had nothing to import (only scans, say): they are
+// handed over all the same.
+const noImport = -1
+
+// importRetry is how long a failed hand-over to the importer waits before it is tried again.
+var importRetry = time.Minute
+
+// startImport hands the files of the round that just finished to the importer. The import batch
+// and the download's link to it are written in one transaction, and only then does the download
+// move on: if either fails, the files stay, nothing counts them as imported, and the hand-over is
+// tried again on a later poll, after a restart too (review #43).
+func (s *Service) startImport(ctx context.Context, r *row) error {
+	if t, ok := s.importWait[r.ID]; ok && time.Now().Before(t) {
+		return errors.New("waiting to retry the import")
 	}
-	r.ImportBatchID = batch
-	for i := range r.files {
-		if r.files[i].Round == r.Round {
-			r.files[i].Batch = batch
+	round := func(f FileView) bool { return f.Selected && (f.Round == r.Round) }
+	mark := func(batch int64) []FileView {
+		files := slices.Clone(r.files)
+		for i := range files {
+			if round(files[i]) {
+				files[i].Batch = batch
+			}
+		}
+		return files
+	}
+	// No preview: the files were already chosen; the album can be tidied afterwards (P2-3).
+	batch, n, err := s.imp.CreateBatchLinked(ctx, "download", r.Name, r.dir, r.roundPaths(), false, func(tx *sql.Tx, batch int64) error {
+		files, _ := json.Marshal(mark(batch))
+		_, err := tx.ExecContext(ctx, `UPDATE downloads SET import_batch_id = ?, files = ?, error = '', updated_at = ? WHERE id = ?`,
+			batch, string(files), db.Now(), r.ID)
+		return err
+	})
+	if errors.Is(err, importer.ErrNothingToImport) { // nothing the importer takes: handed over as done
+		files, _ := json.Marshal(mark(noImport))
+		if _, err = s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, error = '', updated_at = ? WHERE id = ?`,
+			string(files), db.Now(), r.ID); err == nil {
+			r.files = mark(noImport)
+			delete(s.importWait, r.ID)
+			s.log.Info("round has nothing to import", "download", r.ID, "round", r.Round)
+			return nil
 		}
 	}
-	files, _ := json.Marshal(r.files)
-	s.db.ExecContext(ctx, `UPDATE downloads SET import_batch_id = ?, files = ? WHERE id = ?`, batch, string(files), r.ID)
+	if err != nil {
+		s.importWait[r.ID] = time.Now().Add(importRetry)
+		s.db.ExecContext(ctx, `UPDATE downloads SET error = ?, updated_at = ? WHERE id = ?`,
+			"handing the files to the importer failed; trying again: "+err.Error(), db.Now(), r.ID)
+		s.log.Warn("hand download to the importer", "download", r.ID, "err", err)
+		return err
+	}
+	delete(s.importWait, r.ID)
+	r.ImportBatchID, r.files, r.Error = batch, mark(batch), ""
 	s.log.Info("download complete; import queued", "download", r.ID, "round", r.Round, "batch", batch, "files", n)
+	return nil
 }
 
-// endRound finishes a round that is not the last: the aria2 task is removed (no seeding between
-// rounds; the next round adds it again), and the round's files are imported.
+// endRound finishes a round that is not the last: the round's files are handed to the importer,
+// then the aria2 task is removed (no seeding between rounds; the next round adds it again from the
+// torrent kept beside the files). Its work space reservation is released for the import's own.
 func (s *Service) endRound(ctx context.Context, r *row) {
+	if _, err := s.torrentFor(ctx, r); err != nil { // the next round needs it; say so now
+		s.log.Warn("torrent for later rounds", "download", r.ID, "err", err)
+	}
+	if s.startImport(ctx, r) != nil {
+		return // the task stays as it is; tried again later (review #43)
+	}
 	s.aria.RPC.Call(ctx, "forceRemove", nil, r.gid)
 	s.aria.RPC.Call(ctx, "removeDownloadResult", nil, r.gid)
-	s.startImport(ctx, r)
 	r.doneBefore += r.roundBytes
-	r.State, r.gid, r.roundBytes = StateImporting, "", 0
-	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', round_bytes = 0, done_before = ?, done_bytes = ?,
+	r.State, r.gid, r.roundBytes, r.roundWork = StateImporting, "", 0, 0
+	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, gid = '', round_bytes = 0, round_work = 0, done_before = ?, done_bytes = ?,
 		down_speed = 0, up_speed = 0, peers = 0, note = ?, updated_at = ? WHERE id = ?`, StateImporting, r.doneBefore, r.doneBefore,
 		fmt.Sprintf("round %d downloaded; importing it before the next round", r.Round), db.Now(), r.ID)
 }
@@ -395,10 +448,20 @@ func (s *Service) endRound(ctx context.Context, r *row) {
 // companions later rounds need and files that did not make it into the library) and queues the
 // next round.
 func (s *Service) afterRound(ctx context.Context, r *row) {
-	var state string
-	if err := s.db.QueryRowContext(ctx, `SELECT state FROM import_batches WHERE id = ?`, r.ImportBatchID).Scan(&state); err != nil ||
-		(state != "done" && state != "canceled") {
-		return
+	for _, f := range r.files { // the round's import must be the one that ended
+		if f.Selected && f.Round == r.Round && f.Batch == 0 {
+			if s.startImport(ctx, r) != nil {
+				return
+			}
+			break
+		}
+	}
+	if b := r.roundBatch(); b > 0 {
+		var state string
+		if err := s.db.QueryRowContext(ctx, `SELECT state FROM import_batches WHERE id = ?`, b).Scan(&state); err != nil ||
+			(state != "done" && state != "canceled") {
+			return
+		}
 	}
 	keep := map[string]bool{}
 	for _, b := range r.batches() {

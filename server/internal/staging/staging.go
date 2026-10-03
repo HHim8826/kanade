@@ -21,32 +21,49 @@ type Budget struct {
 	Reserve int64              // free space to keep on the filesystem
 	Dir     string             // where the staging data lives (for free space)
 	Free    func(string) int64 // free bytes on Dir's filesystem, -1 when unknown; nil: not checked
+	// Reclaim may free space for a request that does not fit (stopping a finished seed); it reports
+	// whether it freed anything, and is called again until the request fits or it frees nothing.
+	Reclaim func(ctx context.Context) (bool, error)
 
 	mu    sync.Mutex
-	users []func(context.Context) int64
+	users []func(context.Context) Usage
 	held  int64
 }
 
-// Use registers what a user holds or has promised (files on disk plus bytes still to come).
-func (b *Budget) Use(committed func(context.Context) int64) {
+// Usage is what one user of the budget has: bytes on disk, and bytes promised that are not on disk
+// yet (the rest of an upload, what a download round still has to fetch).
+type Usage struct{ Disk, Pending int64 }
+
+// Use registers a user's usage.
+func (b *Budget) Use(u func(context.Context) Usage) {
 	b.mu.Lock()
-	b.users = append(b.users, committed)
+	b.users = append(b.users, u)
 	b.mu.Unlock()
 }
 
-func (b *Budget) usedLocked(ctx context.Context) int64 {
-	n := b.held
+// OnDisk is the usage of a user whose bytes are all on disk.
+func OnDisk(f func(context.Context) int64) func(context.Context) Usage {
+	return func(ctx context.Context) Usage { return Usage{Disk: f(ctx)} }
+}
+
+// usageLocked is everything held or promised, and the part of it not written yet: held space and
+// promises do not show in the filesystem's free space (review #4).
+func (b *Budget) usageLocked(ctx context.Context) (used, unwritten int64) {
+	used, unwritten = b.held, b.held
 	for _, u := range b.users {
-		n += u(ctx)
+		n := u(ctx)
+		used += n.Disk + n.Pending
+		unwritten += n.Pending
 	}
-	return n
+	return used, unwritten
 }
 
 // Used is everything held or promised now.
 func (b *Budget) Used(ctx context.Context) int64 {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.usedLocked(ctx)
+	used, _ := b.usageLocked(ctx)
+	return used
 }
 
 // Request is one reservation.
@@ -60,8 +77,11 @@ type Request struct {
 	MakeRoom func(ctx context.Context) (bool, error)
 	// Alone allows a single item larger than the whole budget, when staging holds little else (a
 	// quarter of the budget at most) and the disk has the room: a file bigger than the budget can
-	// still be downloaded, by itself.
+	// still be downloaded, or converted, by itself.
 	Alone bool
+	// Own is what the requester already has in staging and that does not count as something else
+	// (the file being converted), for Alone.
+	Own int64
 }
 
 // Take reserves r.Need if it fits the budget and the free-space reserve.
@@ -78,25 +98,28 @@ func (b *Budget) Take(ctx context.Context, r Request) error {
 }
 
 func (b *Budget) fitsLocked(ctx context.Context, r Request) error {
-	used := b.usedLocked(ctx)
-	for used+r.Need > b.Limit && r.MakeRoom != nil {
-		freed, err := r.MakeRoom(ctx)
-		if err != nil {
-			return err
+	used, unwritten := b.usageLocked(ctx)
+	for _, makeRoom := range []func(context.Context) (bool, error){r.MakeRoom, b.Reclaim} {
+		for used+r.Need > b.Limit && makeRoom != nil {
+			freed, err := makeRoom(ctx)
+			if err != nil {
+				return err
+			}
+			if !freed {
+				break
+			}
+			used, unwritten = b.usageLocked(ctx)
 		}
-		if !freed {
-			break
-		}
-		used = b.usedLocked(ctx)
 	}
-	if used+r.Need > b.Limit && !(r.Alone && used <= b.Limit/4) {
+	if used+r.Need > b.Limit && !(r.Alone && used-r.Own <= b.Limit/4) {
 		if r.Need > b.Limit {
 			return fmt.Errorf("%w: %d MB needed, more than the %d MB staging budget", ErrOverBudget, r.Need>>20, b.Limit>>20)
 		}
 		return fmt.Errorf("%w: %d MB in use or reserved, %d MB more needed, budget %d MB", ErrOverBudget, used>>20, r.Need>>20, b.Limit>>20)
 	}
+	// What is promised but not written yet will take free space too.
 	if b.Free != nil {
-		if free := b.Free(b.Dir); free >= 0 && free-r.Need < b.Reserve {
+		if free := b.Free(b.Dir); free >= 0 && free-unwritten-r.Need < b.Reserve {
 			return fmt.Errorf("%w (%d GB)", ErrReserve, b.Reserve>>30)
 		}
 	}
@@ -107,11 +130,17 @@ func (b *Budget) fitsLocked(ctx context.Context, r Request) error {
 // yet (FFmpeg output, an archive being unpacked). Release once the data is on disk, where its user
 // counts it, or gone.
 func (b *Budget) Hold(ctx context.Context, need int64) (release func(), err error) {
+	return b.HoldRequest(ctx, Request{Need: need})
+}
+
+// HoldRequest is Hold for r.Need, with r.Alone and r.Own (r.Record is not used).
+func (b *Budget) HoldRequest(ctx context.Context, r Request) (release func(), err error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if err := b.fitsLocked(ctx, Request{Need: need}); err != nil {
+	if err := b.fitsLocked(ctx, r); err != nil {
 		return nil, err
 	}
+	need := r.Need
 	b.held += need
 	var once sync.Once
 	return func() {

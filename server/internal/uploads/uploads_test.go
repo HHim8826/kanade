@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
 func newStore(t *testing.T, budget int64) *Store {
@@ -122,7 +123,7 @@ func TestBudgetIsShared(t *testing.T) {
 	if _, err := s.Create(ctx, "group-0003", "a.flac", 2000, ""); !errors.Is(err, ErrOverBudget) {
 		t.Fatalf("over budget: %v", err)
 	}
-	s.budget.Use(func(context.Context) int64 { return 900 }) // downloads hold 900 bytes
+	s.budget.Use(staging.OnDisk(func(context.Context) int64 { return 900 })) // downloads hold 900 bytes
 	if _, err := s.Create(ctx, "group-0003", "b.flac", 200, ""); !errors.Is(err, ErrOverBudget) {
 		t.Fatalf("shared budget ignored: %v", err)
 	}

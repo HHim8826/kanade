@@ -82,8 +82,10 @@ function DownloadCard({ d, onSelect, onChange }) {
         ${d.state === 'selecting' && html`<button class="btn filled" onClick=${onSelect}>選擇檔案</button>`}
         ${(d.state === 'downloading' || d.state === 'queued' || d.state === 'seeding') && html`<${IconButton} icon="pause" label="暫停" onClick=${() => act('pause')} />`}
         ${d.state === 'paused' && html`<${IconButton} icon="play" label="繼續" onClick=${() => act('resume')} />`}
-        ${!['completed', 'failed', 'canceled'].includes(d.state) && html`<${IconButton} icon="close" label=${d.state === 'seeding' ? '停止做種' : '取消'}
-          onClick=${() => confirm(d.state === 'seeding' ? '停止做種？檔案已匯入，會在之後清除。' : '取消這個下載？') && act('cancel')} />`}
+        ${d.can_retry && html`<button class="btn tonal" onClick=${() => act('retry')}>重試</button>`}
+        ${!['completed', 'canceled'].includes(d.state) && (d.state !== 'failed' || !d.files_removed) && html`<${IconButton} icon="close"
+          label=${d.state === 'seeding' ? '停止做種' : d.state === 'failed' ? '放棄並清除' : '取消'}
+          onClick=${() => confirm(cancelPrompt(d)) && act('cancel')} />`}
       </div>
     </div>
     ${(d.state === 'downloading' || d.state === 'paused' || d.state === 'queued' || d.state === 'importing') && html`<${Progress} value=${progress} />`}
@@ -93,6 +95,13 @@ function DownloadCard({ d, onSelect, onChange }) {
     ${d.error && html`<div class="task-error">${d.error}</div>`}
   </article>`;
 }
+
+// A failed download keeps what it fetched for a retry (review #49); giving it up clears what no
+// import has. Songs already imported stay in the library.
+const cancelPrompt = (d) => ({
+  seeding: '停止做種？檔案已匯入，會在之後清除。',
+  failed: '放棄這個下載？還沒匯入的檔案會被清除，已入庫的歌曲保留。',
+}[d.state] || '取消這個下載？');
 
 function AddDownload({ onClose, onAdded }) {
   const [uri, setUri] = useState('');

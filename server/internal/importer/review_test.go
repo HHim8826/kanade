@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -141,14 +142,14 @@ func TestRetryConvertsAfterSpaceFailure(t *testing.T) {
 	var full sync.Mutex
 	noRoom := true
 	im.Budget = &staging.Budget{Limit: 1 << 30}
-	im.Budget.Use(func(context.Context) int64 { // something else holds the staging space at first
+	im.Budget.Use(staging.OnDisk(func(context.Context) int64 { // something else holds the staging space at first
 		full.Lock()
 		defer full.Unlock()
 		if noRoom {
 			return 1 << 30
 		}
 		return 0
-	})
+	}))
 	var unsaved []int
 	im.OnBatchDone = func(_ context.Context, _, _ string, n int) { unsaved = append(unsaved, n) }
 	startWorker(t, im)
@@ -335,17 +336,31 @@ func TestSplitHoldsItsOutputBound(t *testing.T) {
 	s, _ := im.FFmpeg.Probe(ctx, filepath.Join(src, "Disc/image.flac"))
 	bound := 3*(256<<10) + ffmpeg.MaxFLAC(s, 0, 0) - 256<<10 // three songs' share of the PCM, each with its overhead
 
-	im.Budget = &staging.Budget{Limit: image.Size() * 2} // room for the image's size, not the bound
-	im.Budget.Use(im.WorkCommitted)
+	// Room for the image's size, not the bound, with something else in staging: it fails.
+	limit := image.Size() * 2
+	im.Budget = &staging.Budget{Limit: limit}
+	im.Budget.Use(staging.OnDisk(im.WorkCommitted))
+	im.Budget.Use(staging.OnDisk(func(context.Context) int64 { return limit / 2 }))
 	startWorker(t, im)
 	batch, _, _ := im.CreateBatch(ctx, "local", "", src, true)
 	waitState(t, im, batch, BatchReview)
 	if st := states(mustBatch(t, im, batch)); st["Disc/image.flac"] != StateFailed {
 		t.Fatalf("split past the budget: %v", st)
 	}
+	// With nothing else in staging, output larger than the whole budget is made alone (review #46);
+	// the image is in staging, but it is the split's own.
+	im.Budget = &staging.Budget{Limit: limit, Dir: src}
+	im.Budget.Use(staging.OnDisk(func(context.Context) int64 { return image.Size() }))
+	im.Budget.Use(staging.OnDisk(im.WorkCommitted))
+	alone, _, _ := im.CreateBatch(ctx, "local", "", src, true)
+	waitState(t, im, alone, BatchReview)
+	if st := states(mustBatch(t, im, alone)); st["Disc/image.flac"] != StateSplit {
+		t.Fatalf("not split alone: %v", st)
+	}
+	im.Cancel(ctx, alone)
 
 	im.Budget = &staging.Budget{Limit: bound + 1<<20}
-	im.Budget.Use(im.WorkCommitted)
+	im.Budget.Use(staging.OnDisk(im.WorkCommitted))
 	again, _, _ := im.CreateBatch(ctx, "local", "", src, true)
 	waitState(t, im, again, BatchReview)
 	if st := states(mustBatch(t, im, again)); st["Disc/image.flac"] != StateSplit {
@@ -388,5 +403,42 @@ func TestPreviewNewAlbumOverridesImportIdentity(t *testing.T) {
 	}
 	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 2 { // the files are shared
 		t.Fatalf("tracks %+v", tracks)
+	}
+}
+
+// FFmpeg output short of space that others hold waits for it, saying so on the file, and goes on
+// once it is free, instead of failing (review #46).
+func TestConversionWaitsForSpace(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	withFFmpeg(t, im)
+	var held atomic.Int64
+	held.Store(1 << 30)
+	im.Budget = &staging.Budget{Limit: 1 << 30}
+	im.Budget.Use(staging.OnDisk(func(context.Context) int64 { return held.Load() })) // an upload, say
+	im.SpaceWait = time.Minute
+	startWorker(t, im)
+	src := t.TempDir()
+	makeAudio(t, im, filepath.Join(src, "W/01.wav"), "-c:a", "pcm_s16le", "-metadata", "title=Wave", "-metadata", "album=W")
+	batch, _, _ := im.CreateBatch(ctx, "local", "", src, false)
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		b, _ := im.Batch(ctx, batch)
+		if len(b.Items) > 0 && strings.HasPrefix(b.Items[0].Error, "waiting for staging space") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("not waiting: %+v", b.Items)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	held.Store(0)
+	waitState(t, im, batch, BatchDone)
+	b, _ := im.Batch(ctx, batch)
+	if states(b)["W/01.wav"] != StatePublished || b.Items[0].Error != "" {
+		t.Fatalf("after the wait %v %q", states(b), b.Items[0].Error)
+	}
+	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 {
+		t.Fatalf("tracks %d", len(tracks))
 	}
 }

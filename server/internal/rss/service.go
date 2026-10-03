@@ -32,6 +32,8 @@ const (
 // Downloader starts BitTorrent downloads; auto picks the suggested files without asking.
 type Downloader interface {
 	Add(ctx context.Context, uri string, torrent []byte, auto bool) (int64, error)
+	// Retry starts a failed download again, keeping what it imported (review #50).
+	Retry(ctx context.Context, id int64) error
 }
 
 type Service struct {
@@ -481,7 +483,9 @@ const autoMaxTries = 8
 
 // runPending starts the source's queued auto-downloads, at most maxAutoPerPoll a poll, oldest
 // first. A failure waits and tries again later (doubling from 10 minutes, at most 6 hours); after
-// autoMaxTries it is shown as failed. Items the rules no longer pick leave the queue.
+// autoMaxTries it is shown as failed. Items the rules no longer pick leave the queue. Each start is
+// judged by the source as it is then: settings changed while the queue drains (auto-download
+// turned off, the rules, the address or login) count from the next item on (review #22).
 func (s *Service) runPending(ctx context.Context, src *Source, res *PollResult) {
 	if !src.AutoDownload {
 		return
@@ -507,19 +511,27 @@ func (s *Service) runPending(ctx context.Context, src *Source, res *PollResult) 
 		if res.Downloaded >= maxAutoPerPoll {
 			return
 		}
+		cur, err := s.source(ctx, src.ID)
+		if err != nil || !cur.AutoDownload || !cur.Enabled {
+			return // deleted, or auto-download turned off meanwhile
+		}
 		it, err := s.item(ctx, q.id)
-		if err != nil || it == nil {
+		if err != nil || it == nil || it.AutoState != "pending" {
 			continue
 		}
-		if it.Downloaded {
+		switch {
+		case handled(it.DownloadState):
 			s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = 'done', auto_error = '' WHERE id = ?`, q.id)
 			continue
+		case it.DownloadState == "canceled": // the user stopped this torrent: not started again by itself
+			s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = '', auto_error = 'its download was canceled' WHERE id = ?`, q.id)
+			continue
 		}
-		if Match(src.Include, src.Exclude, it.Title) != "included" || it.Download == "" {
+		if Match(cur.Include, cur.Exclude, it.Title) != "included" || it.Download == "" {
 			s.db.ExecContext(ctx, `UPDATE rss_items SET auto_state = '' WHERE id = ?`, q.id)
 			continue
 		}
-		if _, err := s.startDownload(ctx, src, it, true); err != nil {
+		if _, err := s.startDownload(ctx, cur, it, true); err != nil {
 			s.log.Warn("rss auto-download", "item", q.id, "err", err)
 			state, wait := "pending", min(10*time.Minute<<min(q.tries, 10), maxBackoff)
 			if q.tries+1 >= autoMaxTries {
@@ -624,9 +636,12 @@ type Item struct {
 	FirstSeen  int64  `json:"first_seen_at,omitempty"`
 	Match      string `json:"match"`                 // included | excluded | ""
 	DownloadID int64  `json:"download_id,omitempty"` // the download started from it, or of the same torrent
-	Downloaded bool   `json:"downloaded"`
-	AutoState  string `json:"auto_state,omitempty"` // pending | done | failed (review #23)
-	AutoError  string `json:"auto_error,omitempty"`
+	// DownloadState is that download's state; Downloaded only when it finished (seeding or
+	// completed), not when it is under way, failed or canceled (review #50).
+	DownloadState string `json:"download_state,omitempty"`
+	Downloaded    bool   `json:"downloaded"`
+	AutoState     string `json:"auto_state,omitempty"` // pending | done | failed (review #23)
+	AutoError     string `json:"auto_error,omitempty"`
 }
 
 const itemSQL = `SELECT i.id, i.source_id, s.name, i.guid, i.title, i.page, i.download, i.info_hash, i.size, i.seeders,
@@ -655,13 +670,25 @@ func (s *Service) scanItems(ctx context.Context, rows *sql.Rows) ([]Item, error)
 	return out, nil
 }
 
-// markDownloaded finds a download of the same torrent, from any source or added by hand.
+// markDownloaded finds the download of this item's torrent: the one it started, or one from any
+// source or added by hand. A download under way or finished stands before one that failed or was
+// canceled, so a later failed attempt does not hide an earlier success; then the newest.
 func (s *Service) markDownloaded(ctx context.Context, it *Item) {
-	if it.DownloadID == 0 && (it.InfoHash != "" || it.Download != "") {
-		s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE (? != '' AND lower(info_hash) = ?) OR (? != '' AND source = ?)
-			ORDER BY id DESC LIMIT 1`, it.InfoHash, it.InfoHash, it.Download, it.Download).Scan(&it.DownloadID)
+	var id int64
+	var state string
+	err := s.db.QueryRowContext(ctx, `SELECT id, state FROM downloads WHERE id = ?1 OR (?2 != '' AND lower(info_hash) = ?2)
+		OR (?3 != '' AND source = ?3) ORDER BY state IN ('failed', 'canceled'), id DESC LIMIT 1`,
+		it.DownloadID, strings.ToLower(it.InfoHash), it.Download).Scan(&id, &state)
+	if err != nil {
+		return
 	}
-	it.Downloaded = it.DownloadID != 0
+	it.DownloadID, it.DownloadState = id, state
+	it.Downloaded = state == "seeding" || state == "completed"
+}
+
+// handled reports whether a download state means the torrent is taken care of: under way or done.
+func handled(state string) bool {
+	return state != "" && state != "failed" && state != "canceled"
 }
 
 func (s *Service) item(ctx context.Context, id int64) (*Item, error) {
@@ -769,12 +796,29 @@ func (s *Service) DownloadLink(ctx context.Context, sourceID int64, link string)
 	if err != nil {
 		return 0, err
 	}
-	return s.startDownload(ctx, src, &Item{Entry: Entry{Download: link}}, false)
+	it := &Item{SourceID: src.ID, Entry: Entry{Download: link}}
+	// The stored item of the same link, when there is one, keeps the download it went to.
+	s.db.QueryRowContext(ctx, `SELECT id, info_hash, coalesce(download_id, 0) FROM rss_items WHERE source_id = ? AND download = ?
+		ORDER BY id DESC LIMIT 1`, src.ID, link).Scan(&it.ID, &it.InfoHash, &it.DownloadID)
+	return s.startDownload(ctx, src, it, false)
 }
 
 // startDownload fetches a .torrent with the source's credentials (private trackers need them) and
-// hands it to the downloader; magnets go as they are.
+// hands it to the downloader; magnets go as they are. A download of this torrent under way or done
+// is not started twice; one that failed is retried, keeping what it imported (review #50).
 func (s *Service) startDownload(ctx context.Context, src *Source, it *Item, auto bool) (int64, error) {
+	s.markDownloaded(ctx, it)
+	switch {
+	case handled(it.DownloadState):
+		s.link(ctx, it, it.DownloadID)
+		return it.DownloadID, nil
+	case it.DownloadState == "failed":
+		if err := s.dl.Retry(ctx, it.DownloadID); err == nil {
+			s.link(ctx, it, it.DownloadID)
+			return it.DownloadID, nil
+		}
+		// nothing left to retry there (or it cannot be): a new download
+	}
 	link := strings.TrimSpace(it.Download)
 	var torrent []byte
 	switch {
@@ -805,8 +849,13 @@ func (s *Service) startDownload(ctx context.Context, src *Source, it *Item, auto
 	if err != nil {
 		return 0, err
 	}
+	s.link(ctx, it, id)
+	return id, nil
+}
+
+// link records the download a stored item went to.
+func (s *Service) link(ctx context.Context, it *Item, id int64) {
 	if it.ID != 0 {
 		s.db.ExecContext(ctx, `UPDATE rss_items SET download_id = ? WHERE id = ?`, id, it.ID)
 	}
-	return id, nil
 }

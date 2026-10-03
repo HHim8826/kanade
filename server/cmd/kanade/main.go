@@ -179,8 +179,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}
 	downloads.ShareBudget(budget)
 	ups.ShareBudget(budget)
-	budget.Use(imp.WorkCommitted)
+	budget.Use(staging.OnDisk(imp.WorkCommitted))
 	imp.Budget = budget
+	imp.SpaceWait = 10 * time.Minute // FFmpeg output waits for space others hold (review #46)
 	imp.OnBatchDone = func(ctx context.Context, kind, source string, unsaved int) {
 		if kind == "upload" && unsaved == 0 { // files not in the library stay until imported or discarded
 			if err := ups.RemoveGroup(ctx, source); err != nil {

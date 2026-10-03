@@ -71,7 +71,7 @@ func New(d *sql.DB, root string, budget int64) *Store {
 // ShareBudget counts this store's uploads against b, and checks new ones against it.
 func (s *Store) ShareBudget(b *staging.Budget) {
 	s.budget = b
-	b.Use(s.Committed)
+	b.Use(s.Usage)
 }
 
 func (s *Store) GroupDir(group string) string { return filepath.Join(s.root, group) }
@@ -133,9 +133,15 @@ func dirSize(dir string) int64 {
 
 // Committed is staged upload data plus what receiving uploads still have to send.
 func (s *Store) Committed(ctx context.Context) int64 {
+	u := s.Usage(ctx)
+	return u.Disk + u.Pending
+}
+
+// Usage is the staged upload data, and what receiving uploads still have to send.
+func (s *Store) Usage(ctx context.Context) staging.Usage {
 	var pending int64
-	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(size - received), 0) FROM uploads WHERE state = ?`, StateReceiving).Scan(&pending)
-	return dirSize(s.root) + pending
+	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(size - received, 0)), 0) FROM uploads WHERE state = ?`, StateReceiving).Scan(&pending)
+	return staging.Usage{Disk: dirSize(s.root), Pending: pending}
 }
 
 func (s *Store) partPath(u *Upload) string {

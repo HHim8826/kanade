@@ -101,9 +101,31 @@ type fakeDL struct {
 	added []string
 	auto  []bool
 	fail  int // the next this many Adds fail, like a full disk
+	// retried are the downloads Retry started again.
+	retried []int64
+	// gate, when set, holds each Add until it is closed; entered tells that an Add arrived.
+	gate, entered chan struct{}
+}
+
+func (f *fakeDL) Retry(ctx context.Context, id int64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r, err := f.db.ExecContext(ctx, `UPDATE downloads SET state = 'queued' WHERE id = ? AND state = 'failed'`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n == 0 {
+		return errors.New("not possible in the current state")
+	}
+	f.retried = append(f.retried, id)
+	return nil
 }
 
 func (f *fakeDL) Add(ctx context.Context, uri string, torrent []byte, auto bool) (int64, error) {
+	if f.gate != nil {
+		f.entered <- struct{}{}
+		<-f.gate
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.fail > 0 {
@@ -220,7 +242,8 @@ func TestPollBaselineAndAutoDownload(t *testing.T) {
 	for _, it := range items {
 		byTitle[it.Title] = it
 	}
-	if !byTitle["New Album FLAC"].Downloaded || byTitle["New Album MP3 FLAC"].Match != "excluded" || byTitle["Old Album FLAC"].Downloaded {
+	if byTitle["New Album FLAC"].DownloadState != "metadata" || byTitle["New Album FLAC"].Downloaded ||
+		byTitle["New Album MP3 FLAC"].Match != "excluded" || byTitle["Old Album FLAC"].DownloadID != 0 {
 		t.Fatalf("marks %+v", byTitle)
 	}
 	if only, _ := s.Items(ctx, ItemQuery{Only: "included"}); len(only) != 2 {
@@ -245,7 +268,7 @@ func TestPollBaselineAndAutoDownload(t *testing.T) {
 
 	// Live search on the site.
 	res, err := s.Search(ctx, src.ID, "New")
-	if err != nil || len(res) != 2 || !res[0].Downloaded && !res[1].Downloaded {
+	if err != nil || len(res) != 2 || res[0].DownloadID == 0 && res[1].DownloadID == 0 {
 		t.Fatalf("search %+v %v", res, err)
 	}
 }
@@ -311,6 +334,7 @@ func TestCredentialsStayWithTheirSite(t *testing.T) {
 		mu.Lock()
 		delete(got, name)
 		mu.Unlock()
+		s.db.Exec(`UPDATE downloads SET state = 'canceled'`) // else the torrent is not fetched again (review #50)
 		s.DownloadLink(ctx, src.ID, link)
 		mu.Lock()
 		defer mu.Unlock()
@@ -431,7 +455,7 @@ func TestAutoDownloadQueue(t *testing.T) {
 	if r, _ := s.Poll(ctx, src.ID); r.Downloaded != 1 {
 		t.Fatalf("retry %+v", r)
 	}
-	if items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "disk"}); items[0].AutoState != "done" || !items[0].Downloaded {
+	if items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "disk"}); items[0].AutoState != "done" || items[0].DownloadID == 0 {
 		t.Fatalf("after retry %+v", items[0])
 	}
 
@@ -442,5 +466,103 @@ func TestAutoDownloadQueue(t *testing.T) {
 	s.Update(ctx, src.ID, SourceInput{AutoDownload: yes(false)})
 	if items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "off"}); items[0].AutoState != "" {
 		t.Fatalf("still queued %+v", items[0])
+	}
+}
+
+// An item's download counts as done only when it finished; a failed one is retried in place and a
+// canceled one replaced, from the stored item and from a live search alike; a download under way
+// is not started twice (review #50).
+func TestItemsShowTheirDownloadState(t *testing.T) {
+	ctx := context.Background()
+	s, dl, fs, feed := newService(t)
+	fs.items = []string{"Failed FLAC", "Canceled FLAC", "Running FLAC", "Done FLAC"}
+	src, _ := s.Create(ctx, SourceInput{Name: str("S"), URL: str(feed)})
+	s.Poll(ctx, src.ID)
+	items, _ := s.Items(ctx, ItemQuery{Source: src.ID})
+	by := map[string]Item{}
+	for _, it := range items {
+		by[it.Title] = it
+	}
+	for title, state := range map[string]string{"Failed FLAC": "failed", "Canceled FLAC": "canceled", "Running FLAC": "downloading", "Done FLAC": "completed"} {
+		id, err := s.Download(ctx, by[title].ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s.db.Exec(`UPDATE downloads SET state = ?, info_hash = ? WHERE id = ?`, state, "hash-"+state, id)
+	}
+	check := func(list []Item) {
+		t.Helper()
+		for _, it := range list {
+			want := map[string]bool{"Done FLAC": true}[it.Title]
+			if it.Downloaded != want || it.DownloadState == "" {
+				t.Fatalf("%s: downloaded %v, state %q", it.Title, it.Downloaded, it.DownloadState)
+			}
+		}
+	}
+	items, _ = s.Items(ctx, ItemQuery{Source: src.ID})
+	check(items)
+	live, _ := s.Search(ctx, src.ID, "FLAC")
+	check(live)
+	added := len(dl.added)
+	// Running: no second download. Failed: retried in place. Canceled: a new download.
+	if id, err := s.Download(ctx, by["Running FLAC"].ID); err != nil || len(dl.added) != added || id != by["Running FLAC"].DownloadID && id == 0 {
+		t.Fatalf("running started again: %d %v", id, err)
+	}
+	failedID := func() int64 { it, _ := s.item(ctx, by["Failed FLAC"].ID); return it.DownloadID }()
+	if id, err := s.Download(ctx, by["Failed FLAC"].ID); err != nil || id != failedID || len(dl.retried) != 1 || len(dl.added) != added {
+		t.Fatalf("failed: %d %v retried %v", id, err, dl.retried)
+	}
+	if id, err := s.DownloadLink(ctx, src.ID, by["Canceled FLAC"].Download); err != nil || len(dl.added) != added+1 {
+		t.Fatalf("canceled: %d %v", id, err)
+	} else if it, _ := s.item(ctx, by["Canceled FLAC"].ID); it.DownloadID != id || it.DownloadState != "metadata" {
+		t.Fatalf("the new download is not the item's: %+v", it)
+	}
+	// An earlier success stands before a later failed attempt of the same torrent.
+	s.db.Exec(`INSERT INTO downloads (source, state, dir, info_hash, created_at, updated_at) VALUES ('x', 'failed', '', 'hash-completed', 0, 0)`)
+	if it, _ := s.item(ctx, by["Done FLAC"].ID); !it.Downloaded {
+		t.Fatalf("a later failure hid the success: %+v", it)
+	}
+}
+
+// The auto-download queue does not take a failed or canceled download for a success: a failed one
+// is retried, a canceled one leaves the queue and is not restarted by itself (review #50).
+func TestQueueAndFailedDownloads(t *testing.T) {
+	ctx := context.Background()
+	s, dl, fs, feed := newService(t)
+	src, _ := s.Create(ctx, SourceInput{Name: str("Q"), URL: str(feed), Include: str("flac"), AutoDownload: yes(true)})
+	s.Poll(ctx, src.ID) // baseline
+	fs.items = append([]string{"Again FLAC", "Stopped FLAC"}, fs.items...)
+	for _, title := range []string{"Again FLAC", "Stopped FLAC"} { // downloads of the same torrents, added before
+		state := map[string]string{"Again FLAC": "failed", "Stopped FLAC": "canceled"}[title]
+		s.db.Exec(`INSERT INTO downloads (source, state, dir, created_at, updated_at) VALUES (?, ?, '', 0, 0)`,
+			strings.TrimSuffix(feed, "/rss?page=rss&q=")+"/"+strings.ReplaceAll(title, " ", "_")+".torrent", state)
+	}
+	if r, _ := s.Poll(ctx, src.ID); r.Downloaded != 1 || len(dl.retried) != 1 || len(dl.added) != 0 {
+		t.Fatalf("queue %+v retried %v added %v", r, dl.retried, dl.added)
+	}
+	items, _ := s.Items(ctx, ItemQuery{Source: src.ID, Q: "stopped"})
+	if items[0].AutoState != "" || items[0].DownloadState != "canceled" {
+		t.Fatalf("canceled %+v", items[0])
+	}
+}
+
+// Turning auto-download off while the queue drains stops the starts that follow (review #22).
+func TestDisableAutoDuringQueueDrain(t *testing.T) {
+	ctx := context.Background()
+	s, dl, fs, feed := newService(t)
+	src, _ := s.Create(ctx, SourceInput{Name: str("Q"), URL: str(feed), Include: str("flac"), AutoDownload: yes(true)})
+	s.Poll(ctx, src.ID) // baseline
+	fs.items = append([]string{"One FLAC", "Two FLAC", "Three FLAC"}, fs.items...)
+	dl.gate, dl.entered = make(chan struct{}), make(chan struct{}, 4)
+	done := make(chan *PollResult)
+	go func() { r, _ := s.Poll(ctx, src.ID); done <- r }()
+	<-dl.entered // the first Add is under way
+	if _, err := s.Update(ctx, src.ID, SourceInput{AutoDownload: yes(false)}); err != nil {
+		t.Fatal(err)
+	}
+	close(dl.gate)
+	r := <-done
+	if r.Downloaded != 1 || len(dl.added) != 1 {
+		t.Fatalf("kept starting after auto-download was turned off: %+v %v", r, dl.added)
 	}
 }

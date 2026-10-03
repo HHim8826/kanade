@@ -113,7 +113,8 @@ DIR/
 | `POST /downloads` | `{"uri": "magnet:..."}`／`{"uri": "https://.../x.torrent"}`，或以 `Content-Type: application/x-bittorrent` 直接送 .torrent |
 | `GET /downloads`、`GET /downloads/{id}` | 下載清單；單一下載含檔案清單與預設勾選（`suggested`） |
 | `POST /downloads/{id}/select` | `{"files": [索引...]}`；省略則採預設勾選。總量超過暫存預算也接受，分批下載（審查 #28）；下載回應含 `round`、`rounds`、`left`（還沒輪到的檔案數）、`waiting_space`、`budget` |
-| `POST /downloads/{id}/pause`、`/resume`、`/cancel` | 控制 |
+| `POST /downloads/{id}/pause`、`/resume`、`/cancel` | 控制；`cancel` 也用於放棄失敗的下載（清除還沒匯入的檔案，已入庫的歌曲保留） |
+| `POST /downloads/{id}/retry` | 重新開始失敗的下載（審查 #49）：已匯入的批次保留，其餘照常分批；種子從資料夾找回或由原連結重新取得。同一個種子另有進行中的下載時拒絕。回應中的 `can_retry` 表示有檔案可重試 |
 | `POST /uploads` | `{"group", "path", "size", "sha256"}` 建立或續接上傳 |
 | `PUT /uploads/{id}?offset=N` | 送一個分塊（最多 32 MB）；位移不符回 409 與伺服器已收到的位元組數 |
 | `GET /uploads/{id}`、`POST /uploads/{id}/complete` | 進度；完成（驗證大小與 SHA-256；可重送） |
@@ -121,7 +122,7 @@ DIR/
 | `GET /tasks` | 任務中心：下載與匯入批次 |
 | `GET`／`POST /rss/sources`、`PATCH`／`DELETE /rss/sources/{id}` | RSS 來源（密碼與 Cookie 只回報是否已設定；`auth_origins`：其他也要收到帳密與 Cookie 的網站，每行一個） |
 | `POST /rss/sources/{id}/refresh`、`GET /rss/sources/{id}/search?q=` | 立即更新；站內搜尋（不入庫） |
-| `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、是否已下載、自動下載的 `auto_state`：`pending`／`done`／`failed` 與 `auto_error`）；從條目或站內搜尋結果開始下載 |
+| `GET /rss/items?source&q&only=included&before`、`POST /rss/items/{id}/download`、`POST /rss/sources/{id}/download` | 條目（含是否符合規則、關聯下載的 `download_id` 與 `download_state`、只在完成時為真的 `downloaded`、自動下載的 `auto_state`：`pending`／`done`／`failed` 與 `auto_error`）；從條目或站內搜尋結果開始下載，失敗的下載改為重試，進行中的不重複開始 |
 | `GET /home` | 首頁資料：繼續播放、最近播放、最近加入、未聽完的廣播劇、任務摘要、待整理（D9） |
 | `POST /plays` | 回報播放：`session`、`asset_id`、`album_id`、`position_ms`、`listened_ms`、`finished`、`seq`（同一次播放遞增）、`at`（用戶端時間，毫秒） |
 | `GET /assets/{id}/resume`、`GET /albums/random` | 續播位置；隨機一張音樂專輯 |
@@ -293,6 +294,21 @@ DIR/
 - 播放模式（#40）：一個按鈕依序切換順序播放、列表循環、單曲循環、隨機播放，四者互斥；隨機播放在最後一首之後以新的順序繼續。舊的隨機／循環偏好轉成對應的模式。
 - 拖動進度（#41）：拖動時只更新顯示的位置、填色與時間，放開才 seek 一次；鍵盤方向鍵每次 5 秒、Page Up／Down 30 秒，立即生效。
 - 循環從頭播放（#42）：「繼續播放」的位置只用於那一次；單曲循環、列表或隨機重新開始時從頭播放，也不再查詢廣播劇的續播位置。
+
+### 審查修正：下載種子、交接與暫存（2026-10-03）
+
+- 種子（#49）：分批之間需要重新加入任務時，用 `torrentFor` 取得這個下載自己的種子，並核對 info hash：先看 `task.torrent`，再找資料夾裡任何對得上的 .torrent（aria2 以整份檔案的 SHA-1 命名 RPC 加入的種子，以 info hash 命名 magnet 的 metadata），最後從 .torrent 連結重新下載；找到就存成 `task.torrent`（先寫暫存檔再改名）。服務啟動時先替進行中的下載補存。
+- 失敗不再清掉資料（#49、#43）：只有每個選取的檔案都交給了匯入、且匯入都已入庫或被放棄，才清除下載資料夾；失敗的下載保留檔案與種子。任務頁對失敗的下載提供「重試」（`POST /downloads/{id}/retry`）與「放棄並清除」。
+- 交接給匯入（#43）：建立匯入批次與寫入下載的關聯在同一個交易（`importer.CreateBatchLinked`）；任一失敗時，下載停在原狀態、記下錯誤，一分鐘後再試，重啟後也會繼續。中間批在交接成功後才移除 aria2 任務。沒有可匯入檔案的批次（例如只有掃描圖）視為已交接。
+- 最後一批的 CUE（#45）：每一批都帶上同資料夾在前幾批下載、仍留在磁碟上的附屬檔（CUE、LOG、封面），最後一批也一樣，所以整軌音檔能照 CUE 分軌。
+- 轉檔工作空間（#46，遷移 17：`downloads.round_work`）：規劃分批時，每個檔案再加上匯入時需要的工作空間：WAV／AIFF 約為本身大小，APE／TAK／WavPack／TTA 與帶 CUE 的整軌 FLAC 以 2.5 倍估算，ZIP 以 2 倍估算。這部分在下載期間一起預留，進入匯入時釋出給匯入使用。匯入的 FFmpeg 輸出若暫時沒有空間，會等其他用途釋出（最多 10 分鐘，項目上顯示「等待暫存空間」）；暫存區除了自己的原檔幾乎是空的、而且磁碟夠時，大於整個預算的輸出也可以單獨進行。其他用途空間不足時，可以停止已完整入庫的做種（`Budget.Reclaim`）。
+- 磁碟保留（#4）：每個使用者回報「已在磁碟」與「尚待寫入」兩部分（`staging.Usage`）；判斷保留空間時，從目前可用空間再扣掉所有尚待寫入的預留與 hold，已經寫到磁碟的不重複扣。
+- RSS（#50、#22）：條目回傳關聯下載的實際狀態（`download_state`），只有做種中或完成才算「已下載」；進行中或已完成的下載優先於失敗或取消的。失敗的條目按「重試」會重試原本的下載（保留已入庫的部分），取消的可以重新下載；同一個種子正在下載時不會再開一個。自動下載佇列遇到失敗的下載會重試，使用者取消的則離開佇列；佇列每開始一個下載前都重新讀取來源設定，抓取中途關閉自動下載、停用或刪除來源後，不再開始後面的下載。
+- 測試：
+  - 真 aria2：舊任務只有 aria2 自存的種子時，三批全部完成；找不到種子時任務失敗但保留資料，恢復連結後重試完成，第一批不重複入庫，同一個種子另有下載時拒絕重試；建立匯入失敗時，中間批與最後一批都不前進、不刪檔，恢復後完成。
+  - 規劃與匯入：WAV 依轉檔空間分開兩批、整軌 FLAC 與 APE 的估算、最後一批帶上 CUE、info hash 解析。
+  - 預算：未寫入的預留不可重複使用保留空間；`Reclaim` 也作用於 hold；單獨進行大型輸出；轉檔等待空間後完成。
+  - RSS：四種下載狀態的顯示、失敗重試與取消重新下載、早先成功不被後來的失敗蓋過、佇列遇到失敗與取消、佇列中途關閉自動下載。
 
 ## 使用方式（開發環境）
 

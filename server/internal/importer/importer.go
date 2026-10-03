@@ -71,6 +71,9 @@ type Importer struct {
 	Budget *staging.Budget
 	// FFmpeg converts and splits (P2-4); nil when the server has none.
 	FFmpeg *ffmpeg.Tool
+	// SpaceWait is how long FFmpeg output waits for staging space that others hold before the file
+	// fails (review #46); 0 fails at once.
+	SpaceWait time.Duration
 }
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
@@ -108,10 +111,20 @@ func (im *Importer) CreateBatch(ctx context.Context, kind, source, dir string, p
 	return im.CreateBatchFiles(ctx, kind, source, dir, files, preview)
 }
 
+// ErrNothingToImport is a batch with no audio file or archive among its files.
+var ErrNothingToImport = errors.New("no audio files found")
+
 // CreateBatchFiles queues the audio files, sidecars and archives among paths (for example the files
 // chosen in a torrent). root is the folder that relative paths and folder structure are taken from.
 // The count returned is of audio files and archives.
 func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root string, paths []string, preview bool) (int64, int, error) {
+	return im.CreateBatchLinked(ctx, kind, source, root, paths, preview, nil)
+}
+
+// CreateBatchLinked is CreateBatchFiles with link run in the same transaction, so that whoever
+// hands the files over records the batch together with it, or neither happens (review #43).
+func (im *Importer) CreateBatchLinked(ctx context.Context, kind, source, root string, paths []string, preview bool,
+	link func(tx *sql.Tx, batchID int64) error) (int64, int, error) {
 	type file struct{ path, role string }
 	var files []file
 	count := 0
@@ -137,7 +150,7 @@ func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root str
 		}
 	}
 	if count == 0 {
-		return 0, 0, errors.New("no audio files found")
+		return 0, 0, ErrNothingToImport
 	}
 	tx, err := im.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -158,6 +171,11 @@ func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root str
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, updated_at)
 			VALUES (?, ?, ?, 'pending', ?, ?)`, batchID, f.path, filepath.ToSlash(rel), f.role, now); err != nil {
+			return 0, 0, err
+		}
+	}
+	if link != nil {
+		if err := link(tx, batchID); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -358,6 +376,43 @@ func (im *Importer) hold(ctx context.Context, need int64) (release func(), err e
 		return func() {}, nil
 	}
 	return im.Budget.Hold(ctx, need)
+}
+
+// holdOutput holds staging for FFmpeg output made from src, of size bytes. Output larger than
+// the whole budget may be made alone, when staging holds little besides that source and the disk
+// has room. When others hold the space, it waits for them up to SpaceWait, saying so on the item,
+// rather than failing at once (review #46).
+func (im *Importer) holdOutput(ctx context.Context, itemID, need int64, src string, size int64) (release func(), err error) {
+	if im.Budget == nil {
+		return func() {}, nil
+	}
+	var own int64 // the source counts as the request's own only where the budget counts it
+	if dir := im.Budget.Dir; dir != "" {
+		if rel, err := filepath.Rel(dir, src); err == nil && filepath.IsLocal(rel) {
+			own = size
+		}
+	}
+	deadline := time.Now().Add(im.SpaceWait)
+	waiting := false
+	defer func() {
+		if waiting {
+			im.db.ExecContext(context.WithoutCancel(ctx), `UPDATE import_items SET error = '' WHERE id = ? AND error LIKE 'waiting for staging space%'`, itemID)
+		}
+	}()
+	for {
+		release, err = im.Budget.HoldRequest(ctx, staging.Request{Need: need, Alone: true, Own: own})
+		if err == nil || !(errors.Is(err, staging.ErrOverBudget) || errors.Is(err, staging.ErrReserve)) || !time.Now().Before(deadline) {
+			return release, err
+		}
+		if !waiting {
+			waiting = true
+			im.db.ExecContext(ctx, `UPDATE import_items SET error = ?, updated_at = ? WHERE id = ?`,
+				"waiting for staging space: "+err.Error(), db.Now(), itemID)
+		}
+		if !sleepCtx(ctx, 5*time.Second) {
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // StateDiscarded is an unsaved file the user chose to let go of, so its source can be cleaned up.
