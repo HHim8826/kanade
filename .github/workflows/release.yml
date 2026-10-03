@@ -46,8 +46,8 @@ jobs:
             out="../dist/kanade-linux-$arch"
             mkdir -p "$out"
             CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$out/kanade" ./cmd/kanade
-            cp ../README.md "$out/"
-            tar -C "$out" -czf "../dist/kanade-linux-$arch.tar.gz" kanade README.md
+            cp ../README.md ../LICENSE "$out/"
+            tar -C "$out" -czf "../dist/kanade-linux-$arch.tar.gz" kanade README.md LICENSE
             rm -rf "$out"
           done
           cp ../scripts/kanade.sh ../dist/

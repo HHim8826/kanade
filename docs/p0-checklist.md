@@ -9,7 +9,7 @@
 | 驗證 | 通過標準 |
 |---|---|
 | 自有 Web client 的 OAuth 流程 | 取得 refresh token 並以 Google token endpoint 刷新成功。2026-10-01 已收到 client 設定（專案 `drive-510320`，Web 類型），存於 `secrets/google-oauth-client.json`（權限 600，已列入 `.gitignore`），目前只登記了正式網址的 redirect URI。P0 需在 GCP 再加入 `http://localhost:8080/oauth/google/callback`：瀏覽器導回 localhost 時會打不開，把網址列整串貼回開發程式即可，與 rclone 的做法相同 |
-| refresh token 不會 7 天過期 | 首次授權的 token 回應中沒有 `refresh_token_expires_in` 欄位（「測試中」狀態會帶這個欄位，從 7 天倒數），且第 8 天後同一 token 仍能刷新（背景長時間觀察，不阻擋其他項目）。若暫時停在「測試中」，`phsub350@gmail.com` 必須列在測試使用者名單，否則授權會被擋 |
+| refresh token 不會 7 天過期 | 首次授權的 token 回應中沒有 `refresh_token_expires_in` 欄位（「測試中」狀態會帶這個欄位，從 7 天倒數），且第 8 天後同一 token 仍能刷新（背景長時間觀察，不阻擋其他項目）。若暫時停在「測試中」，平台專用的 Google 帳號 必須列在測試使用者名單，否則授權會被擋 |
 | redirect URI 登記 | 2026-10-01 已驗證：`http://localhost:8080/oauth/google/callback` 與 `https://music.ser1ka.com/oauth/google/callback` 都會導向 Google 登入頁；未登記的對照網址則導向錯誤頁 |
 | 貼上外部 token | 以 rclone 取得的 token＋對應 client 能正常刷新 |
 | resumable upload 續傳 | 上傳中途終止程序，重啟後以保存的 session URL 查詢進度（`Content-Range: bytes */總長`）並續傳完成；遠端只有一個檔案 |
@@ -18,13 +18,13 @@
 | Changes API | 在 Drive 網頁上改名、移動、刪除檔案後，以 page token 增量取得對應變更 |
 | 上傳 RAM | 分塊 8 MB 時，上傳 1 GB 檔案的程序 RSS 不隨檔案大小增長 |
 | 從 Drive 收件匣讀取（D6 選項 1 的前置） | 對 Drive 上已存在的測試檔只用 Range 讀檔頭取得標籤、時長與封面，搭配 `sha256Checksum` 去重，再以伺服器端移動歸入平台資料夾；記錄每首的請求數與傳輸量（目標遠小於檔案大小） |
-| 容量 | 以 `about.storageQuota` 確認 `phsub350` 的實際容量（使用者印象約 5 TB） |
+| 容量 | 以 `about.storageQuota` 確認平台帳號的實際容量（使用者印象約 5 TB） |
 
 ### 第 1 節結果（2026-10-02，spike：`spikes/p0-drive`，在開發工作區執行；spike 已於 2026-10-03 刪除，程式碼留在 git 歷史中）
 
 | 驗證 | 結果 | 實測 |
 |---|---|---|
-| OAuth 流程 | ✅ | 經 `music.ser1ka.com` 隧道回呼取得 refresh token，scope 為完整 `drive`，帳號 `phsub350@gmail.com`。過程中等待回呼的程式隨工作階段結束被停止，使用者看到 502；已補上「貼上回呼網址完成授權」的備援，並驗證 state 必須相符 |
+| OAuth 流程 | ✅ | 經 `music.ser1ka.com` 隧道回呼取得 refresh token，scope 為完整 `drive`，帳號為平台專用的 Google 帳號。過程中等待回呼的程式隨工作階段結束被停止，使用者看到 502；已補上「貼上回呼網址完成授權」的備援，並驗證 state 必須相符 |
 | 7 天期限 | ✅（第 8 天待複查） | token 回應欄位為 `access_token, expires_in, refresh_token, scope, token_type`，沒有 `refresh_token_expires_in`，即已是正式版。強制過期後刷新成功。2026-10-10 後再刷新一次確認 |
 | 貼上外部 token | ⏸ 未測 | 優先度低，延後 |
 | resumable 續傳 | ✅ | 1 GiB 檔在 40 塊（320 MiB）時中止，狀態檔保留 session；重啟後伺服器回報 335,544,320 位元組，從該處續傳完成；遠端只有一份，SHA-256 相符 |
@@ -158,8 +158,8 @@ aria2 上游約三年未發布新版，屬於維護風險；計畫書的下載�
 
 ## 需要使用者提供
 
-1. ~~GCP 專案與 OAuth client~~：已收到；localhost redirect URI 已加入並驗證；2026-10-02 品牌檢查通過（應用程式名稱 ser1ka Music）。是否已是正式版，首次授權時以 token 回應有無 `refresh_token_expires_in` 確認。以下為原始說明：在 Google Auth Platform 的「目標對象（Audience）」頁把發布狀態改為「正式版（In production）」。若「發布應用程式」按鈕無法點選，通常是品牌資訊不完整：需要首頁網址、隱私權政策網址，以及已驗證的授權網域 `ser1ka.com`（可在 Search Console 以 Cloudflare DNS TXT 紀錄驗證，不需要先架網站）。在改好之前，P0 可先在「測試中」狀態進行，但要把 `phsub350@gmail.com` 加為測試使用者。
-2. 在 `phsub350@gmail.com` 建一個測試用資料夾（P0 期間只在此資料夾內寫入）。
+1. ~~GCP 專案與 OAuth client~~：已收到；localhost redirect URI 已加入並驗證；2026-10-02 品牌檢查通過（應用程式名稱 ser1ka Music）。是否已是正式版，首次授權時以 token 回應有無 `refresh_token_expires_in` 確認。以下為原始說明：在 Google Auth Platform 的「目標對象（Audience）」頁把發布狀態改為「正式版（In production）」。若「發布應用程式」按鈕無法點選，通常是品牌資訊不完整：需要首頁網址、隱私權政策網址，以及已驗證的授權網域 `ser1ka.com`（可在 Search Console 以 Cloudflare DNS TXT 紀錄驗證，不需要先架網站）。在改好之前，P0 可先在「測試中」狀態進行，但要把 平台專用的 Google 帳號 加為測試使用者。
+2. 在平台專用的 Google 帳號建一個測試用資料夾（P0 期間只在此資料夾內寫入）。
 3. 測試音檔：現有曲庫已涵蓋無 SEEKTABLE 的 FLAC、Hi-Res、無標籤 MP3、UTF-16 LOG、cp1252 CUE（見 `library-survey.md`）。仍缺：APE、TAK、整軌 FLAC＋CUE（最好有含 pregap 的）、CP932 標籤的 MP3、含日文檔名的 ZIP。TAK 編碼器只有 Windows 版，無法在這裡自行產生樣本。
 4. 一台 Android 8.1 以上的實機。
 5. 目標 VPS 的存取權（進行第 2、9 項時）。

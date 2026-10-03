@@ -68,6 +68,10 @@ git tag v0.1.0 && git push origin v0.1.0
 
 A tag with a hyphen (`v0.2.0-rc1`) is published as a pre-release, which `latest` skips. Running the workflow by hand builds the same files as an artifact without releasing them.
 
+## License
+
+[AGPL-3.0](LICENSE). If you run a modified Kanade for other people, offer them its source. The bundled Preact and htm keep their own licenses (`server/internal/web/static/vendor/`).
+
 ## Design notes
 
 Start with `docs/decisions.md` and `docs/backend-design.md`. In short: Drive is accessed directly through its REST API (D1); every file is verified by SHA-256 after upload; playback downloads the whole track into a local cache in the background, because each Drive request costs about 0.6 s (D7); everything is sized for a 1.5 GB RAM VPS.

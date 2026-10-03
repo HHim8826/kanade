@@ -228,19 +228,19 @@ Ktor client、kotlinx.serialization、Coil 3（圖片）、Media3。本地快取
 
 ### 已確認
 
-- 平台授權的 Google 帳號：`phsub350@gmail.com`，專為本平台建立的獨立新帳號。使用者表示容量約 5 TB，P0 授權後以 Drive `about.storageQuota` 確認。
+- 平台授權的 Google 帳號：專為本平台建立的獨立新帳號。使用者表示容量約 5 TB，P0 授權後以 Drive `about.storageQuota` 確認。
 - 既有曲庫：OpenList「Music」就是全部曲庫（約 1,000 首、29 GB，見 `library-survey.md`），儲存在 **OneDrive**，不是 Google Drive。
 
 ### 對設計的影響
 
-- 第一版只有一個儲存來源：`phsub350` 的 Google Drive。不需要跨帳號或多來源設計，D1 不變。
+- 第一版只有一個儲存來源：平台帳號的 Google Drive。不需要跨帳號或多來源設計，D1 不變。
 - `library-survey.md` 的內容分析（格式、標籤、分組難點）與儲存位置無關，仍然有效；只有「以 Drive `sha256Checksum` 原地索引」的建議不適用於 OneDrive 上的檔案。
 
 ### 日後遷移的選項（記錄備查，現在不決定）
 
 | 選項 | 做法 | 評估 |
 |---|---|---|
-| 1　OpenList 跨儲存複製 | 在使用者的 OpenList 加入 `phsub350` 的 Google Drive，用 OpenList 的複製任務把 Music 複製到 Drive 的「匯入收件匣」資料夾，再由平台從收件匣匯入 | 傳輸由 OpenList 所在主機負責，不經 VPS；平台只需讀檔頭，並在 Drive 內以伺服器端移動歸檔。傾向此項 |
+| 1　OpenList 跨儲存複製 | 在使用者的 OpenList 加入平台帳號的 Google Drive，用 OpenList 的複製任務把 Music 複製到 Drive 的「匯入收件匣」資料夾，再由平台從收件匣匯入 | 傳輸由 OpenList 所在主機負責，不經 VPS；平台只需讀檔頭，並在 Drive 內以伺服器端移動歸檔。傾向此項 |
 | 2　經 VPS 下載後上傳 | 平台從 OneDrive 下載，再走一般匯入流程 | 29 GB 經 VPS 進出，且受 2 GB 暫存配額限制，需分批，最慢 |
 | 3　平台直接接 OneDrive | 新增 OneDrive（Microsoft Graph）唯讀來源 | 多一個儲存適配器與多來源資料模型，不列入第一版 |
 
