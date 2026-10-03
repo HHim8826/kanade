@@ -28,6 +28,8 @@ const (
 	minPasswordLen = 10
 	maxFailures    = 5
 	failureWindow  = 15 * time.Minute
+	// SessionLifetime is the absolute lifetime shared by server tokens and web cookies.
+	SessionLifetime = 90 * 24 * time.Hour
 )
 
 var dummyHash = sync.OnceValue(func() []byte {
@@ -40,11 +42,12 @@ type Service struct {
 
 	mu         sync.Mutex
 	failures   map[string][]time.Time // client IP -> recent failed logins
+	inFlight   map[string]int         // reserved checks count towards the same limit
 	challenges map[string]challenge   // pending passkey requests
 }
 
 func New(d *sql.DB) *Service {
-	return &Service{db: d, failures: map[string][]time.Time{}, challenges: map[string]challenge{}}
+	return &Service{db: d, failures: map[string][]time.Time{}, inFlight: map[string]int{}, challenges: map[string]challenge{}}
 }
 
 func (s *Service) HasUsers(ctx context.Context) (bool, error) {
@@ -96,7 +99,12 @@ func (s *Service) SetPassword(ctx context.Context, username, password string) er
 	if err != nil {
 		return err
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE username = ?`, string(hash), username)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE username = ?`, string(hash), username)
 	if err != nil {
 		return err
 	}
@@ -104,11 +112,16 @@ func (s *Service) SetPassword(ctx context.Context, username, password string) er
 		return errors.New("no such user")
 	}
 	// A new password ends every existing login.
-	_, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)`, username)
-	return err
+	if _, err = tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)`, username); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-func (s *Service) throttled(ip string) bool {
+// Reserve a check before doing expensive verification. Concurrent password/passkey
+// requests cannot all pass the limit while their earlier failures are still pending.
+// finish must be called once; only failed credentials remain in the rolling window.
+func (s *Service) beginAttempt(ip string) (finish func(bool), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	recent := s.failures[ip][:0]
@@ -122,41 +135,75 @@ func (s *Service) throttled(ip string) bool {
 	} else {
 		s.failures[ip] = recent
 	}
-	return len(recent) >= maxFailures
-}
-
-func (s *Service) recordFailure(ip string) {
-	s.mu.Lock()
-	s.failures[ip] = append(s.failures[ip], time.Now())
-	s.mu.Unlock()
+	if len(recent)+s.inFlight[ip] >= maxFailures {
+		return nil, ErrThrottled
+	}
+	s.inFlight[ip]++
+	return func(failed bool) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.inFlight[ip]--
+		if s.inFlight[ip] == 0 {
+			delete(s.inFlight, ip)
+		}
+		if failed {
+			s.failures[ip] = append(s.failures[ip], time.Now())
+		}
+	}, nil
 }
 
 // Login checks the password and returns a new login token. clientIP is used for throttling.
 func (s *Service) Login(ctx context.Context, username, password, deviceName, clientIP string) (string, error) {
-	if s.throttled(clientIP) {
-		return "", ErrThrottled
+	finish, err := s.beginAttempt(clientIP)
+	if err != nil {
+		return "", err
 	}
+	failed := false
+	defer func() { finish(failed) }()
 	var id int64
 	var hash string
-	err := s.db.QueryRowContext(ctx, `SELECT id, password_hash FROM users WHERE username = ?`, username).Scan(&id, &hash)
+	err = s.db.QueryRowContext(ctx, `SELECT id, password_hash FROM users WHERE username = ?`, username).Scan(&id, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Spend the same time as a real comparison so usernames cannot be probed by timing.
 		bcrypt.CompareHashAndPassword(dummyHash(), []byte(password))
-		s.recordFailure(clientIP)
+		failed = true
 		return "", ErrBadCredentials
 	}
 	if err != nil {
 		return "", err
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-		s.recordFailure(clientIP)
+		failed = true
 		return "", ErrBadCredentials
 	}
-	return s.newSession(ctx, id, deviceName)
+	// Recheck the password version under the same write lock as session creation.
+	// A reset either rejects this old proof or revokes the session after it commits.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var current string
+	err = tx.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, id).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && current != hash) {
+		failed = true
+		return "", ErrBadCredentials
+	}
+	if err != nil {
+		return "", err
+	}
+	token, err := newSession(ctx, tx, id, deviceName)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 // newSession starts a login for the user and returns its token; only the token's hash is kept.
-func (s *Service) newSession(ctx context.Context, id int64, deviceName string) (string, error) {
+func newSession(ctx context.Context, tx *sql.Tx, id int64, deviceName string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
@@ -164,7 +211,7 @@ func (s *Service) newSession(ctx context.Context, id int64, deviceName string) (
 	token := base64.RawURLEncoding.EncodeToString(raw)
 	sum := sha256.Sum256([]byte(token))
 	now := db.Now()
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO sessions (user_id, token_hash, name, created_at, last_used_at)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions (user_id, token_hash, name, created_at, last_used_at)
 		VALUES (?, ?, ?, ?, ?)`, id, sum[:], deviceName, now, now); err != nil {
 		return "", err
 	}
@@ -178,7 +225,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (int64, error)
 	}
 	sum := sha256.Sum256([]byte(token))
 	var userID, sessionID, lastUsed int64
-	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, last_used_at FROM sessions WHERE token_hash = ?`, sum[:]).
+	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, last_used_at FROM sessions WHERE token_hash = ? AND created_at > ?`, sum[:], db.Now()-SessionLifetime.Milliseconds()).
 		Scan(&sessionID, &userID, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNoSession

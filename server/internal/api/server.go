@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -95,10 +96,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
-	mux.HandleFunc("POST /api/v1/login", s.login)
+	mux.Handle("POST /api/v1/login", s.loginRequests(s.login))
 	mux.HandleFunc("GET /api/v1/passkeys/available", s.passkeysAvailable)
-	mux.HandleFunc("POST /api/v1/passkeys/login/options", s.passkeyLoginOptions)
-	mux.HandleFunc("POST /api/v1/passkeys/login", s.passkeyLogin)
+	mux.Handle("POST /api/v1/passkeys/login/options", s.loginRequests(s.passkeyLoginOptions))
+	mux.Handle("POST /api/v1/passkeys/login", s.loginRequests(s.passkeyLogin))
 	mux.Handle("GET /api/v1/passkeys", s.authed(s.listPasskeys))
 	mux.Handle("POST /api/v1/passkeys/options", s.authed(s.passkeyOptions))
 	mux.Handle("POST /api/v1/passkeys", s.authed(s.addPasskey))
@@ -272,6 +273,33 @@ const sessionCookie = "kanade_session"
 // cannot add a custom header without a CORS preflight, which this server never grants.
 const csrfHeader = "X-Requested-With"
 
+// Login needs CSRF protection before a session exists: an attacker must not sign
+// the victim's browser into the attacker's account or allocate its challenge budget.
+func (s *Server) loginRequests(next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); origin != "" {
+			u, err := url.Parse(s.cfg.PublicURL)
+			if err != nil || u.Host == "" || origin != u.Scheme+"://"+u.Host {
+				writeError(w, http.StatusForbidden, errors.New("login must come from this site's origin"))
+				return
+			}
+		}
+		if site := r.Header.Get("Sec-Fetch-Site"); site == "cross-site" || site == "same-site" {
+			writeError(w, http.StatusForbidden, errors.New("cross-origin login is not allowed"))
+			return
+		}
+		next(w, r)
+	})
+}
+
+func cookieLoginAllowed(w http.ResponseWriter, r *http.Request, cookie bool) bool {
+	if cookie && r.Header.Get(csrfHeader) != "kanade" {
+		writeError(w, http.StatusForbidden, errors.New("missing "+csrfHeader+" header"))
+		return false
+	}
+	return true
+}
+
 func bearerToken(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if t, ok := strings.CutPrefix(h, "Bearer "); ok {
@@ -395,6 +423,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	if !cookieLoginAllowed(w, r, req.Cookie) {
+		return
+	}
 	token, err := s.auth.Login(r.Context(), req.Username, req.Password, req.Device, clientIP(r))
 	switch {
 	case errors.Is(err, auth.ErrThrottled):
@@ -414,7 +445,7 @@ func (s *Server) loggedIn(w http.ResponseWriter, token string, cookie bool) {
 		writeJSON(w, http.StatusOK, map[string]string{"token": token})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: 90 * 24 * 3600,
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(auth.SessionLifetime / time.Second),
 		HttpOnly: true, Secure: strings.HasPrefix(s.cfg.PublicURL, "https://"), SameSite: http.SameSiteStrictMode})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

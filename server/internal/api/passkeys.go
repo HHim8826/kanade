@@ -87,7 +87,7 @@ func (s *Server) passkeyLoginOptions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("passkeys need the site's https address"))
 		return
 	}
-	ch, err := s.auth.NewChallenge("login", 0, clientIP(r))
+	ch, err := s.auth.NewLoginChallenge(clientIP(r))
 	if err != nil {
 		s.passkeyError(w, r, err)
 		return
@@ -114,6 +114,9 @@ func (s *Server) passkeyLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !cookieLoginAllowed(w, r, req.Cookie) {
 		return
 	}
 	token, err := s.auth.PasskeyLogin(r.Context(), rp, req.ID, req.ClientDataJSON, req.AuthenticatorData, req.Signature,
@@ -155,7 +158,8 @@ func (s *Server) passkeyOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := userID(r)
-	if err := s.auth.CheckPassword(r.Context(), uid, req.Password, clientIP(r)); err != nil {
+	ch, err := s.auth.NewRegistrationChallenge(r.Context(), uid, req.Password, clientIP(r))
+	if err != nil {
 		s.passkeyError(w, r, err)
 		return
 	}
@@ -167,11 +171,6 @@ func (s *Server) passkeyOptions(w http.ResponseWriter, r *http.Request) {
 	have, err := s.auth.CredentialIDs(r.Context(), uid)
 	if err != nil {
 		s.internal(w, r, err)
-		return
-	}
-	ch, err := s.auth.NewChallenge("register", uid, clientIP(r))
-	if err != nil {
-		s.passkeyError(w, r, err)
 		return
 	}
 	exclude := []credRef{}

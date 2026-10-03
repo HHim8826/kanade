@@ -41,15 +41,28 @@ const (
 )
 
 type challenge struct {
-	purpose string // "register" or "login"
-	userID  int64
-	client  string
-	expires time.Time
+	purpose      string // "register" or "login"
+	userID       int64
+	client       string
+	expires      time.Time
+	passwordHash string // the password version that authorized registration
 }
 
-// NewChallenge makes a one-time challenge for registering a passkey for userID, or for logging in
-// (userID 0), asked from clientIP.
-func (s *Service) NewChallenge(purpose string, userID int64, clientIP string) ([]byte, error) {
+func (s *Service) NewLoginChallenge(clientIP string) ([]byte, error) {
+	return s.newChallenge("login", 0, clientIP, "")
+}
+
+// Registration retains the exact password version that was verified, so resetting
+// the password invalidates the authorization even if enrollment is already in flight.
+func (s *Service) NewRegistrationChallenge(ctx context.Context, userID int64, password, clientIP string) ([]byte, error) {
+	hash, err := s.checkPassword(ctx, userID, password, clientIP)
+	if err != nil {
+		return nil, err
+	}
+	return s.newChallenge("register", userID, clientIP, hash)
+}
+
+func (s *Service) newChallenge(purpose string, userID int64, clientIP, passwordHash string) ([]byte, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return nil, err
@@ -68,20 +81,20 @@ func (s *Service) NewChallenge(purpose string, userID int64, clientIP string) ([
 	if len(s.challenges) >= maxChallenges || mine >= maxPerClient {
 		return nil, ErrTooManyRequests
 	}
-	s.challenges[string(raw)] = challenge{purpose, userID, clientIP, now.Add(challengeTTL)}
+	s.challenges[string(raw)] = challenge{purpose: purpose, userID: userID, client: clientIP, expires: now.Add(challengeTTL), passwordHash: passwordHash}
 	return raw, nil
 }
 
-// takeChallenge uses up a challenge; it reports the user it was made for.
-func (s *Service) takeChallenge(raw []byte, purpose string) (int64, bool) {
+// takeChallenge uses up a challenge and returns its authorization, including its owner.
+func (s *Service) takeChallenge(raw []byte, purpose string) (challenge, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.challenges[string(raw)]
 	delete(s.challenges, string(raw))
 	if !ok || c.purpose != purpose || time.Now().After(c.expires) {
-		return 0, false
+		return challenge{}, false
 	}
-	return c.userID, true
+	return c, true
 }
 
 // UserHandle is the passkey user ID of an account (no name in it, as WebAuthn asks).
@@ -94,21 +107,23 @@ func (s *Service) User(ctx context.Context, userID int64) (string, error) {
 	return name, err
 }
 
-// CheckPassword confirms the account's password before something sensitive (adding a passkey);
-// failures count towards the login throttle.
-func (s *Service) CheckPassword(ctx context.Context, userID int64, password, clientIP string) error {
-	if s.throttled(clientIP) {
-		return ErrThrottled
+// checkPassword returns the verified password version; failures share the login throttle.
+func (s *Service) checkPassword(ctx context.Context, userID int64, password, clientIP string) (string, error) {
+	finish, err := s.beginAttempt(clientIP)
+	if err != nil {
+		return "", err
 	}
+	failed := false
+	defer func() { finish(failed) }()
 	var hash string
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
-		return err
+		return "", err
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-		s.recordFailure(clientIP)
-		return ErrBadCredentials
+		failed = true
+		return "", ErrBadCredentials
 	}
-	return nil
+	return hash, nil
 }
 
 // Passkeys lists an account's passkeys, newest first.
@@ -160,7 +175,8 @@ func (s *Service) AddPasskey(ctx context.Context, rp webauthn.RP, userID int64, 
 	if err != nil {
 		return nil, err
 	}
-	if owner, ok := s.takeChallenge(ch, "register"); !ok || owner != userID {
+	proof, ok := s.takeChallenge(ch, "register")
+	if !ok || proof.userID != userID {
 		return nil, ErrPasskeyRequest
 	}
 	cred, err := rp.Register(ch, clientDataJSON, attestationObject)
@@ -180,7 +196,27 @@ func (s *Service) AddPasskey(ctx context.Context, rp webauthn.RP, userID int64, 
 	}
 	name = string([]rune(name)[:min(len([]rune(name)), 60)])
 	now := db.Now()
-	r, err := s.db.ExecContext(ctx, `INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, name, created_at)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var current string
+	err = tx.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && (proof.passwordHash == "" || current != proof.passwordHash)) {
+		return nil, ErrPasskeyRequest
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Enforce the account limit again under the write lock, alongside enrollment.
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM passkeys WHERE user_id = ?`, userID).Scan(&n); err != nil {
+		return nil, err
+	}
+	if n >= maxPasskeys {
+		return nil, errors.New("an account can have at most 20 passkeys")
+	}
+	r, err := tx.ExecContext(ctx, `INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, name, created_at)
 		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (credential_id) DO NOTHING`, userID, cred.ID, cred.PublicKey, cred.SignCount, name, now)
 	if err != nil {
 		return nil, err
@@ -189,6 +225,9 @@ func (s *Service) AddPasskey(ctx context.Context, rp webauthn.RP, userID int64, 
 		return nil, ErrPasskeyExists
 	}
 	id, _ := r.LastInsertId()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return &Passkey{ID: id, Name: name, CreatedAt: now}, nil
 }
 
@@ -224,11 +263,14 @@ func (s *Service) DeletePasskey(ctx context.Context, userID, id int64) error {
 // Login with the password. Failures count towards the same throttle.
 func (s *Service) PasskeyLogin(ctx context.Context, rp webauthn.RP, credentialID, clientDataJSON, authenticatorData, signature,
 	userHandle []byte, deviceName, clientIP string) (string, error) {
-	if s.throttled(clientIP) {
-		return "", ErrThrottled
+	finish, err := s.beginAttempt(clientIP)
+	if err != nil {
+		return "", err
 	}
+	failed := false
+	defer func() { finish(failed) }()
 	fail := func(err error) (string, error) {
-		s.recordFailure(clientIP)
+		failed = true
 		return "", err
 	}
 	ch, err := webauthn.Challenge(clientDataJSON)
@@ -255,10 +297,35 @@ func (s *Service) PasskeyLogin(ctx context.Context, rp webauthn.RP, credentialID
 	if err != nil {
 		return fail(err)
 	}
-	// The counter only moves forward, even when two logins with one passkey race.
-	if _, err := s.db.ExecContext(ctx, `UPDATE passkeys SET sign_count = max(sign_count, ?), last_used_at = ? WHERE id = ?`,
+	// The credential must still exist and its counter must still advance when the
+	// session is created, even if another login or deletion happened during verification.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var current uint32
+	err = tx.QueryRowContext(ctx, `SELECT sign_count FROM passkeys WHERE id = ? AND user_id = ? AND credential_id = ? AND public_key = ?`,
+		id, userID, cred.ID, cred.PublicKey).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fail(ErrNoPasskey)
+	}
+	if err != nil {
+		return "", err
+	}
+	if (count != 0 || current != 0) && count <= current {
+		return fail(webauthn.ErrCloned)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE passkeys SET sign_count = ?, last_used_at = ? WHERE id = ?`,
 		count, db.Now(), id); err != nil {
 		return "", err
 	}
-	return s.newSession(ctx, userID, deviceName)
+	token, err := newSession(ctx, tx, userID, deviceName)
+	if err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return token, nil
 }
