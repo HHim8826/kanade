@@ -1,18 +1,19 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { get, post } from '../api.js';
+import { useState } from '../../vendor/hooks.module.js';
+import { getInitial, post } from '../api.js';
 import { loginWithPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
-import { ErrorBox, Icon, html } from '../ui.js';
+import { ErrorBox, Icon, Spinner, html, useLoad } from '../ui.js';
 
 export function Login({ onLogin }) {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  // The passkey button shows only once a passkey was added (in the settings) and the browser can use it.
-  const [passkeys, setPasskeys] = useState(false);
-  useEffect(() => {
-    if (passkeysSupported()) get('/passkeys/available', { allow401: true }).then((r) => setPasskeys(r.available), () => {});
-  }, []);
+  // Resolve the available methods before showing the form, rather than moving it
+  // when the passkey button arrives. A failed or stalled check still permits passwords.
+  const methods = useLoad(() => passkeysSupported()
+    ? getInitial('/passkeys/available', { allow401: true, timeoutMs: 3000 })
+    : Promise.resolve({ available: false }), []);
+  const passkeys = methods.data && methods.data.available;
   const withPasskey = async () => {
     setBusy(true);
     setError(null);
@@ -37,6 +38,7 @@ export function Login({ onLogin }) {
       setBusy(false);
     }
   };
+  if (methods.loading) return html`<main class="login"><${Spinner} /></main>`;
   return html`<main class="login">
     <form class="card pad login-card" onSubmit=${submit}>
       <div class="brand"><${Icon} name="library" size=${40} /><h1>Kanade</h1></div>

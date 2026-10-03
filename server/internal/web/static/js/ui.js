@@ -113,6 +113,17 @@ export function ErrorBox({ error, onRetry }) {
     ${onRetry && html`<button class="btn text" onClick=${onRetry}>重試</button>`}</div>`;
 }
 
+// Reveal a page only after its initial reads have all settled. Later refreshes stay
+// inside their sections, so they never unmount controls the user is interacting with.
+export function useInitialLoad(loads) {
+  const [ready, setReady] = useState(false);
+  const loading = loads.some((load) => load.loading);
+  useEffect(() => {
+    if (!loading) setReady(true);
+  }, [loading]);
+  return ready;
+}
+
 // useLoad runs an async loader and keeps loading / error / data together. Data loaded for other
 // deps (another tab, another album) is never returned: rendering one tab's rows with another
 // tab's component crashed the library page. A change of refresh (the library revision after an

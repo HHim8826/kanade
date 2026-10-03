@@ -1,28 +1,26 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { api, get, post } from '../api.js';
+import { api, getInitial, post } from '../api.js';
 import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { resetPlayer } from '../player.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
-import { Dialog, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
+import { Dialog, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useInitialLoad, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
 
 // DriveSync: the change feed, the full check and the inbox (P2-6).
-function DriveSync() {
-  const [rev, setRev] = useState(0);
-  const sync = useLoad(() => get('/drive/sync'), [], rev);
+function DriveSync({ sync }) {
   const s = sync.data || {};
   useEffect(() => { // a full check runs in the background: follow it
-    if (!s.full_running) return;
-    const t = setTimeout(() => setRev((n) => n + 1), 2000);
+    if (!s.full_running || sync.loading) return;
+    const t = setTimeout(sync.reload, 2000);
     return () => clearTimeout(t);
-  }, [s.full_running, rev]);
+  }, [s.full_running, sync.loading]);
   const reconcile = async () => {
     try {
       await post('/drive/reconcile');
       toast('開始完整對帳');
-      setRev((n) => n + 1);
+      sync.reload();
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -32,7 +30,7 @@ function DriveSync() {
       const r = await post('/drive/inbox');
       const later = r.waiting ? `；${r.waiting} 個檔案剛放進來，5 分鐘內沒有新檔案後再匯入` : '';
       toast((r.files ? `收件匣有 ${r.files} 個新檔案，已開始匯入` : '收件匣沒有可匯入的新檔案') + later);
-      setRev((n) => n + 1);
+      sync.reload();
     } catch (e) {
       toast(e.message, 'error');
     }
@@ -40,17 +38,19 @@ function DriveSync() {
   const res = s.last_full_result;
   return html`<h2 class="section-title">與 Drive 同步</h2>
     <div class="card pad">
-      <div class="sub">每 10 分鐘檢查 Drive 的變更：在 Drive 刪除、移到垃圾桶或內容被改寫的曲庫檔案會標成「遺失」（曲庫資料不刪），還原成原本的內容後自動恢復。上次檢查：${when(s.last_checked)}</div>
+      <${ErrorBox} error=${sync.error} onRetry=${sync.reload} />
+      ${sync.loading && !sync.data && html`<${Spinner} />`}
+      <div class="sub">每 10 分鐘檢查 Drive 的變更：在 Drive 刪除、移到垃圾桶或內容被改寫的曲庫檔案會標成「遺失」（曲庫資料不刪），還原成原本的內容後自動恢復。上次檢查：${sync.data ? when(s.last_checked) : '—'}</div>
       ${s.last_error && html`<div class="task-error">${s.last_error}</div>`}
       ${s.trash_pending > 0 && html`<div class="sub state-failed">${s.trash_pending} 個已永久刪除的檔案還沒移到 Drive 垃圾桶，會自動重試${s.trash_error ? `（上次錯誤：${s.trash_error}）` : ''}。</div>`}
       ${s.baseline_pending && html`<div class="sub state-failed">基準對帳尚未完成：開始同步或變更紀錄過期後，會自動做一次完整對帳；完成前，之前就已在 Drive 刪除的檔案可能還沒標出。</div>`}
-      <div class="sub">上次完整對帳：${when(s.last_full)}${res ? `（檢查 ${res.checked} 個，標為遺失 ${res.missing}，恢復 ${res.restored}）` : ''}</div>
+      <div class="sub">上次完整對帳：${sync.data ? when(s.last_full) : '—'}${res ? `（檢查 ${res.checked} 個，標為遺失 ${res.missing}，恢復 ${res.restored}）` : ''}</div>
       <div class="actions"><button class="btn tonal" disabled=${s.full_running} onClick=${reconcile}><${Icon} name="refresh" />${s.full_running ? '對帳中…' : '完整對帳'}</button>
         <a class="btn text" href=${href('missing')}>遺失的檔案</a></div>
     </div>
     <h2 class="section-title">Drive 收件匣</h2>
     <div class="card pad">
-      <div class="sub">把音樂（可含資料夾、CUE、LOG、歌詞、封面、ZIP）放進 Google Drive 的「Kanade/inbox」資料夾，會直接在 Drive 上歸檔進曲庫，不必經伺服器重新上傳；曲庫已有的檔案會移到「inbox/重複」，處理完剩下的原始檔（如已轉檔的 WAV、歌詞、封面）移到「inbox/已處理」，都不會刪除。每 10 分鐘自動檢查；剛放進來的資料夾會等 5 分鐘沒有新檔案才匯入。上次檢查：${when(s.last_inbox)}</div>
+      <div class="sub">把音樂（可含資料夾、CUE、LOG、歌詞、封面、ZIP）放進 Google Drive 的「Kanade/inbox」資料夾，會直接在 Drive 上歸檔進曲庫，不必經伺服器重新上傳；曲庫已有的檔案會移到「inbox/重複」，處理完剩下的原始檔（如已轉檔的 WAV、歌詞、封面）移到「inbox/已處理」，都不會刪除。每 10 分鐘自動檢查；剛放進來的資料夾會等 5 分鐘沒有新檔案才匯入。上次檢查：${sync.data ? when(s.last_inbox) : '—'}</div>
       <div class="actions"><button class="btn tonal" onClick=${inbox}><${Icon} name="download" />立即檢查收件匣</button></div>
     </div>`;
 }
@@ -89,8 +89,7 @@ function deviceName() {
 }
 
 // Passkeys: adding one (after the password) makes the login page offer it.
-function Passkeys() {
-  const data = useLoad(() => get('/passkeys'), []);
+function Passkeys({ data }) {
   const add = () => showDialog((close) => html`<${AddPasskey} close=${close} onAdded=${data.reload} />`);
   const rename = async (p) => {
     const name = prompt('Passkey 名稱', p.name);
@@ -117,6 +116,7 @@ function Passkeys() {
     <div class="title">Passkey</div>
     <div class="sub">加入 passkey 後，登入頁會出現「使用 passkey 登入」，用裝置的指紋、臉部或螢幕鎖定登入，不必輸入密碼；密碼仍然可以使用。</div>
     <${ErrorBox} error=${data.error} onRetry=${data.reload} />
+    ${data.loading && !data.data && html`<${Spinner} />`}
     ${list.length > 0 && html`<ul class="list passkeys">${list.map((p) => html`<li key=${p.id} class="row">
       <${Icon} name="passkey" />
       <span class="grow"><span class="title">${p.name}</span>
@@ -165,8 +165,12 @@ function AddPasskey({ close, onAdded }) {
 }
 
 export function Settings({ onLogout }) {
-  const status = useLoad(() => get('/status'), []);
-  const drive = useLoad(() => get('/drive'), []);
+  const status = useLoad(() => getInitial('/status'), []);
+  const drive = useLoad(() => getInitial('/drive'), []);
+  const passkeys = useLoad(() => getInitial('/passkeys'), []);
+  const connected = !!(drive.data && drive.data.status.connected);
+  const sync = useLoad(() => connected ? getInitial('/drive/sync') : Promise.resolve(null), [connected]);
+  const ready = useInitialLoad([status, drive, passkeys, sync]);
   const connect = async () => {
     try {
       const { url } = await post('/drive/auth', {});
@@ -181,30 +185,33 @@ export function Settings({ onLogout }) {
     onLogout();
   };
   const d = drive.data;
+  if (!ready) return html`<section aria-busy="true"><h1 class="page-title">設定</h1><${Spinner} /></section>`;
   return html`<section>
     <h1 class="page-title">設定</h1>
     <h2 class="section-title">Google Drive</h2>
     <div class="card pad">
-      ${drive.loading && html`<${Spinner} />`}
+      ${drive.loading && !d && html`<${Spinner} />`}
       <${ErrorBox} error=${drive.error} onRetry=${drive.reload} />
       ${d && (d.status.connected
         ? html`<div class="title">${d.account.email}</div>
             <div class="sub">已使用 ${fmtBytes(d.account.usage_bytes)}${d.account.limit_bytes ? ` / ${fmtBytes(d.account.limit_bytes)}` : ''}</div>
             ${d.status.testing_mode && html`<div class="task-error">OAuth 應用程式仍在「測試中」，授權 7 天後失效。</div>`}`
         : html`<div class="title">尚未連線</div>`)}
-      <div class="actions"><button class="btn tonal" onClick=${connect}><${Icon} name="refresh" />${d && d.status.connected ? '重新連線' : '連線 Google Drive'}</button></div>
+      <div class="actions"><button class="btn tonal" disabled=${drive.loading} onClick=${connect}><${Icon} name="refresh" />${connected ? '重新連線' : '連線 Google Drive'}</button></div>
     </div>
-    ${d && d.status.connected && html`<${DriveSync} />`}
+    ${connected && html`<${DriveSync} sync=${sync} />`}
     <${Appearance} />
     <h2 class="section-title">服務</h2>
     <div class="card pad">
+      <${ErrorBox} error=${status.error} onRetry=${status.reload} />
+      ${status.loading && !status.data && html`<${Spinner} />`}
       ${status.data && html`<div class="sub">下載器（aria2）：${status.data.aria2_ready ? '運作中' : '未就緒'}</div>
         <div class="sub">格式轉換與 CUE 分軌（FFmpeg）：${status.data.ffmpeg ? '可用' : '未安裝'}</div>
         ${status.data.disk && html`<div class=${'sub' + (status.data.disk.low ? ' state-failed' : '')}>磁碟：剩 ${fmtBytes(status.data.disk.free_bytes)}（保留 ${fmtBytes(status.data.disk.reserve_bytes)}）${status.data.disk.low ? '，空間不足' : ''}</div>`}
         <div class="sub">已運行 ${Math.floor(status.data.uptime_seconds / 3600)} 小時 ${Math.floor((status.data.uptime_seconds % 3600) / 60)} 分</div>`}
     </div>
     <h2 class="section-title">帳號</h2>
-    <${Passkeys} />
+    <${Passkeys} data=${passkeys} />
     <div class="actions"><button class="btn outlined" onClick=${logout}><${Icon} name="logout" />登出</button></div>
   </section>`;
 }

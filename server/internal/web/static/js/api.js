@@ -42,5 +42,24 @@ export async function api(method, path, body, opts = {}) {
 export const get = (path, opts) => api('GET', path, undefined, opts);
 export const post = (path, body, opts) => api('POST', path, body, opts);
 
+// Initial page reads must settle even if the server never sends a response. Keep this
+// opt-in: uploads, downloads and other long-running requests have different limits.
+export async function getInitial(path, { timeoutMs = 10000, ...opts } = {}) {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  try {
+    return await get(path, { ...opts, signal: controller.signal });
+  } catch (e) {
+    if (timedOut) throw new Error('載入逾時，請重試');
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export const streamURL = (assetId) => `/api/v1/stream/${assetId}`;
 export const coverURL = (coverId, size = 300) => (coverId ? `/api/v1/covers/${coverId}?size=${size}` : null);
