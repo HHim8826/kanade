@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
@@ -243,5 +244,78 @@ func TestTrashIsRetried(t *testing.T) {
 	}
 	if n, _, _ := lib.TrashPending(ctx); n != 0 {
 		t.Fatalf("still pending %d", n)
+	}
+}
+
+// A deleted song's file that a re-import takes up again before the trash retry is not trashed;
+// a trash under way makes the re-import refuse the file instead of pointing at the trash; a later
+// deletion owes the file to the trash again (review #44).
+func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
+	ctx := context.Background()
+	s, fd, lib, _ := setup(t)
+	deleteSong := func(sha string) {
+		t.Helper()
+		as, _ := lib.CreateAsset(ctx, library.Asset{SHA256: sha, Size: 1, Format: "flac", Codec: "flac"})
+		if err := lib.MarkVerified(ctx, as.ID, "drive-a"); err != nil {
+			t.Fatal(err)
+		}
+		res, _ := lib.Publish(ctx, as.ID, library.EntryInput{Title: "Song " + sha})
+		if files, err := lib.DeleteTrack(ctx, res.TrackID); err != nil || len(files) != 1 {
+			t.Fatalf("delete %v %v", files, err)
+		}
+	}
+	deleteSong("a1")
+	lib.TrashFailed(ctx, "drive-a", errors.New("drive is down")) // the request's own try failed
+
+	// Imported again: the upload found the same file in Drive and takes it up.
+	again, _ := lib.CreateAsset(ctx, library.Asset{SHA256: "a1", Size: 1, Format: "flac", Codec: "flac"})
+	if err := lib.MarkVerified(ctx, again.ID, "drive-a"); err != nil {
+		t.Fatal(err)
+	}
+	s.DB.Exec(`UPDATE drive_trash SET next_at = 0`)
+	if s.RetryTrash(ctx) != 0 || len(fd.trashed) != 0 {
+		t.Fatalf("trashed a file the library uses again: %v", fd.trashed)
+	}
+	if n, _, _ := lib.TrashPending(ctx); n != 0 {
+		t.Fatalf("debt kept %d", n)
+	}
+	// The same file with no asset at all (the debt left by an older deletion) is dropped too.
+	s.DB.Exec(`INSERT INTO drive_trash (file_id, created_at) VALUES ('drive-a', 0)`)
+	if n, _ := lib.TrashFile(ctx, "drive-a", func(context.Context, string) error { t.Fatal("trashed"); return nil }); n != library.TrashReused {
+		t.Fatalf("outcome %d", n)
+	}
+
+	// Deleted again; the trash runs while a re-import is about to take the file: the re-import
+	// waits for it and is refused.
+	s.DB.Exec(`DELETE FROM track_assets`)
+	s.DB.Exec(`DELETE FROM assets`)
+	s.DB.Exec(`INSERT INTO drive_trash (file_id, created_at) VALUES ('drive-a', 0)`)
+	inTrash, release := make(chan struct{}), make(chan struct{})
+	result := make(chan int)
+	go func() {
+		n, _ := lib.TrashFile(ctx, "drive-a", func(context.Context, string) error { close(inTrash); <-release; return nil })
+		result <- n
+	}()
+	<-inTrash
+	third, _ := lib.CreateAsset(ctx, library.Asset{SHA256: "a3", Size: 1, Format: "flac", Codec: "flac"})
+	verified := make(chan error)
+	go func() { verified <- lib.MarkVerified(ctx, third.ID, "drive-a") }()
+	select {
+	case err := <-verified:
+		t.Fatalf("the re-import did not wait for the trash: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if n := <-result; n != library.Trashed {
+		t.Fatalf("outcome %d", n)
+	}
+	if err := <-verified; !errors.Is(err, library.ErrInTrash) {
+		t.Fatalf("took up a file in the trash: %v", err)
+	}
+	// Restored from the trash by the user long after, the file can be taken up and owed again.
+	s.DB.Exec(`UPDATE drive_trash SET done_at = 1`)
+	deleteSong("a4")
+	if n, _, _ := lib.TrashPending(ctx); n != 1 {
+		t.Fatalf("new debt lost: %d", n)
 	}
 }

@@ -73,10 +73,33 @@ func (s *Store) CreateAsset(ctx context.Context, a Asset) (*Asset, error) {
 	return s.AssetByHash(ctx, a.SHA256, a.Size)
 }
 
+// A Drive file that left the library and is still owed to the trash is taken up again here, which
+// drops the debt; one that already went to the trash is refused with ErrInTrash (review #44).
 func (s *Store) MarkVerified(ctx context.Context, assetID int64, driveFileID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE assets SET state = ?, drive_file_id = ?, verified_at = ? WHERE id = ?`,
-		AssetVerified, driveFileID, db.Now(), assetID)
-	return err
+	trashMu.Lock()
+	defer trashMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var done int64
+	switch err := tx.QueryRowContext(ctx, `SELECT done_at FROM drive_trash WHERE file_id = ?`, driveFileID).Scan(&done); {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return err
+	case done > db.Now()-trashMemory.Milliseconds():
+		return ErrInTrash
+	default: // owed (or long since trashed and restored): nothing owed any more
+		if _, err := tx.ExecContext(ctx, `DELETE FROM drive_trash WHERE file_id = ?`, driveFileID); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, drive_file_id = ?, verified_at = ? WHERE id = ?`,
+		AssetVerified, driveFileID, db.Now(), assetID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Normalize prepares text for the search index and for queries (P2-2): NFKC folds full-width

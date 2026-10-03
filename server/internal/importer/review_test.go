@@ -442,3 +442,39 @@ func TestConversionWaitsForSpace(t *testing.T) {
 		t.Fatalf("tracks %d", len(tracks))
 	}
 }
+
+// A disc image is known with the cuts of its songs: the same sheet again is a duplicate, a sheet
+// corrected to cut elsewhere cuts the image again; songs it cuts the same stay duplicates
+// (review #19).
+func TestCorrectedCueCutsAgain(t *testing.T) {
+	ctx := context.Background()
+	im, _, _ := setup(t)
+	withFFmpeg(t, im)
+	startWorker(t, im)
+	src := t.TempDir()
+	makeAudio(t, im, filepath.Join(src, "Disc/image.flac"), "-c:a", "flac")
+	os.WriteFile(filepath.Join(src, "Disc/image.cue"), []byte(splitCue), 0o644)
+	first, _, _ := im.CreateBatch(ctx, "local", "", src, false)
+	waitState(t, im, first, BatchDone)
+	same, _, _ := im.CreateBatch(ctx, "local", "", src, false)
+	waitState(t, im, same, BatchDone)
+	if st := states(mustBatch(t, im, same)); st["Disc/image.flac"] != StateDuplicate {
+		t.Fatalf("same sheet: %v", st)
+	}
+	// Track 2 now starts ten frames later: tracks 1 and 2 change, track 3 does not.
+	fixed := strings.Replace(splitCue, "INDEX 01 00:00:60", "INDEX 01 00:00:70", 1)
+	os.WriteFile(filepath.Join(src, "Disc/image.cue"), []byte(fixed), 0o644)
+	again, _, _ := im.CreateBatch(ctx, "local", "", src, false)
+	waitState(t, im, again, BatchDone)
+	st := states(mustBatch(t, im, again))
+	if st["Disc/image.flac"] != StateSplit || st["Disc/01 一曲目.flac"] != StatePublished || st["Disc/02 二曲目.flac"] != StatePublished ||
+		st["Disc/03 三曲目.flac"] != StateDuplicate {
+		t.Fatalf("corrected sheet: %v", st)
+	}
+	// And the corrected sheet is then known too.
+	last, _, _ := im.CreateBatch(ctx, "local", "", src, false)
+	waitState(t, im, last, BatchDone)
+	if st := states(mustBatch(t, im, last)); st["Disc/image.flac"] != StateDuplicate {
+		t.Fatalf("corrected sheet again: %v", st)
+	}
+}

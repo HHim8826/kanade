@@ -417,3 +417,53 @@ func TestChosenNewAlbumKeepsIndependentEntry(t *testing.T) {
 		t.Fatal("both entries on one album")
 	}
 }
+
+// Field by field: a partial undo that left a field alone, and a redo of an undone correction, keep
+// protecting the field from undoing an earlier change (review #20).
+func TestRedoStillProtectsLaterCorrection(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	r := publish(t, s, "r1", EntryInput{Title: "A", Artist: "X"})
+	track := func() *TrackDetail { tr, _ := s.Track(ctx, r.TrackID); return tr }
+	edit := func(e TrackEdit) int64 {
+		g, err := s.EditTrack(ctx, r.TrackID, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return g
+	}
+	str := func(v string) *string { return &v }
+	g1 := edit(TrackEdit{Title: str("B")})
+	g2 := edit(TrackEdit{Title: str("C"), Artist: str("Y")})
+	g3 := edit(TrackEdit{Title: str("B")}) // corrected by hand
+	if _, conflicts, err := s.Undo(ctx, g2); err != nil || len(conflicts) != 1 || track().Artist != "X" || track().Title != "B" {
+		t.Fatalf("undo g2: %v %+v %+v", err, conflicts, track())
+	}
+	u5, _, err := s.Undo(ctx, g3)
+	if err != nil || track().Title != "C" {
+		t.Fatalf("undo g3: %v %q", err, track().Title)
+	}
+	if _, _, err := s.Undo(ctx, u5); err != nil || track().Title != "B" { // redo g3
+		t.Fatalf("redo g3: %v %q", err, track().Title)
+	}
+	if _, conflicts, err := s.Undo(ctx, g1); err != nil || len(conflicts) != 1 || track().Title != "B" {
+		t.Fatalf("undo g1 overwrote the redone correction: %v %+v %q", err, conflicts, track().Title)
+	}
+	// With the correction undone for good, undoing an undo of a later change cancels out again.
+	r2 := publish(t, s, "r2", EntryInput{Title: "P"})
+	set := func(v string) int64 { g, _ := s.EditTrack(ctx, r2.TrackID, TrackEdit{Title: &v}); return g }
+	h1 := set("Q")
+	h2 := set("R")
+	u, _, _ := s.Undo(ctx, h2)   // R → Q
+	redo, _, _ := s.Undo(ctx, u) // Q → R: h2 stands again
+	if _, conflicts, _ := s.Undo(ctx, h1); len(conflicts) != 1 {
+		t.Fatalf("undo h1 ignored the redone h2: %+v", conflicts)
+	}
+	s.Undo(ctx, redo) // R → Q: h2 reverted again, so undoing h1 goes through
+	if _, conflicts, err := s.Undo(ctx, h1); err != nil || len(conflicts) != 0 {
+		t.Fatalf("undo h1 after h2 was reverted again: %v %+v", err, conflicts)
+	}
+	if tr, _ := s.Track(ctx, r2.TrackID); tr.Title != "P" {
+		t.Fatalf("title %q", tr.Title)
+	}
+}

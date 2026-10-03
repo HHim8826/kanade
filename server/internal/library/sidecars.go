@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -83,25 +85,32 @@ func nullID(id int64) any {
 	return id
 }
 
+// SourcePiece is one output a source gives: a CUE track number and the cut that makes it (its
+// sample range in the disc image), or number 0 and no cut for a converted file.
+type SourcePiece struct {
+	Number int
+	Cut    string
+}
+
 // SourceComplete reports whether a source was imported in full and still is (decision D2 §2–3,
-// review #19): every output it should give (pieces: the CUE track numbers of a disc image, or 0
-// for a converted file) is a verified library file that a song uses. Then the source is skipped;
-// a partial import, or an output since deleted or missing from Drive, makes it import again.
-func (s *Store) SourceComplete(ctx context.Context, sha string, size int64, pieces []int) (bool, error) {
+// review #19): every output it should give, by the same cut, is a verified library file that a
+// song uses. Then the source is skipped; a partial import, an output since deleted or missing from
+// Drive, or a CUE sheet that now cuts elsewhere makes it import again.
+func (s *Store) SourceComplete(ctx context.Context, sha string, size int64, pieces []SourcePiece) (bool, error) {
 	if len(pieces) == 0 {
 		return false, nil
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT src.piece FROM import_sources src JOIN assets a ON a.id = src.asset_id
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT src.piece, src.cut FROM import_sources src JOIN assets a ON a.id = src.asset_id
 		WHERE src.sha256 = ? AND src.size = ? AND a.state = ? AND EXISTS (SELECT 1 FROM track_assets ta WHERE ta.asset_id = a.id)`,
 		sha, size, AssetVerified)
 	if err != nil {
 		return false, err
 	}
 	defer rows.Close()
-	have := map[int]bool{}
+	have := map[SourcePiece]bool{}
 	for rows.Next() {
-		var p int
-		if err := rows.Scan(&p); err != nil {
+		var p SourcePiece
+		if err := rows.Scan(&p.Number, &p.Cut); err != nil {
 			return false, err
 		}
 		have[p] = true
@@ -117,12 +126,12 @@ func (s *Store) SourceComplete(ctx context.Context, sha string, size int64, piec
 	return true, nil
 }
 
-// AddSource records that an asset was made from a source file: piece is the CUE track number, or 0
-// for a conversion.
-func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, kind string, piece int) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO import_sources (sha256, size, asset_id, kind, piece, created_at)
-		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (sha256, size, asset_id) DO UPDATE SET piece = excluded.piece`,
-		sha, size, assetID, kind, piece, db.Now())
+// AddSource records that an asset was made from a source file by piece: the CUE track number and
+// cut, or 0 and no cut for a conversion.
+func (s *Store) AddSource(ctx context.Context, sha string, size, assetID int64, kind string, piece SourcePiece) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO import_sources (sha256, size, asset_id, kind, piece, cut, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (sha256, size, asset_id) DO UPDATE SET piece = excluded.piece, cut = excluded.cut`,
+		sha, size, assetID, kind, piece.Number, piece.Cut, db.Now())
 	return err
 }
 
@@ -236,9 +245,24 @@ func (s *Store) Missing(ctx context.Context) ([]MissingItem, error) {
 
 // ---- the Drive trash owed (review #26) ----
 
+// trashMu orders moving files to the Drive trash against a re-import taking the same file up again
+// (review #44): one process, one lock.
+var trashMu sync.Mutex
+
+// ErrInTrash is a Drive file that went to the trash after it left the library; a re-import that
+// found it just before must upload the file again.
+var ErrInTrash = errors.New("this file in Drive was just moved to the trash; it is uploaded again on retry")
+
+// trashMemory is how long a file moved to the trash is remembered: long enough for a re-import
+// that found it just before, short enough that a file the user restored from the trash later can
+// be taken up again.
+const trashMemory = time.Hour
+
 // TrashDue lists files owed to the Drive trash whose next try is due.
 func (s *Store) TrashDue(ctx context.Context, limit int) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT file_id FROM drive_trash WHERE next_at <= ? ORDER BY created_at LIMIT ?`, db.Now(), limit)
+	s.db.ExecContext(ctx, `DELETE FROM drive_trash WHERE done_at > 0 AND done_at < ?`, db.Now()-trashMemory.Milliseconds())
+	rows, err := s.db.QueryContext(ctx, `SELECT file_id FROM drive_trash WHERE done_at = 0 AND next_at <= ? ORDER BY created_at LIMIT ?`,
+		db.Now(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -254,16 +278,49 @@ func (s *Store) TrashDue(ctx context.Context, limit int) ([]string, error) {
 	return out, rows.Err()
 }
 
-// TrashDone records that Drive has the file in its trash, or no longer has it.
-func (s *Store) TrashDone(ctx context.Context, fileID string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM drive_trash WHERE file_id = ?`, fileID)
-	return err
+// Trash outcomes.
+const (
+	TrashSkipped   = iota // nothing owed (done already, or taken up again)
+	Trashed               // in the Drive trash now, or gone from Drive
+	TrashReused           // the library uses the file again: the debt is dropped
+	TrashFailedTry        // Drive refused; tried again later
+)
+
+// TrashFile moves a file owed to the Drive trash there with trash (which reports a file Drive no
+// longer has as success). Under the trash lock it first checks the debt still stands and that
+// nothing in the library uses the file again (a re-import found it in Drive and took it up): then
+// the debt is dropped instead. A re-import taking the file waits for the lock, so it either cancels
+// the debt first or sees that the file went to the trash (review #44).
+func (s *Store) TrashFile(ctx context.Context, fileID string, trash func(context.Context, string) error) (int, error) {
+	trashMu.Lock()
+	defer trashMu.Unlock()
+	var done int64
+	if err := s.db.QueryRowContext(ctx, `SELECT done_at FROM drive_trash WHERE file_id = ?`, fileID).Scan(&done); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return TrashSkipped, nil
+		}
+		return TrashSkipped, err
+	}
+	if done > 0 {
+		return TrashSkipped, nil
+	}
+	var used int
+	if s.db.QueryRowContext(ctx, `SELECT 1 FROM assets WHERE drive_file_id = ? LIMIT 1`, fileID).Scan(&used) == nil {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM drive_trash WHERE file_id = ?`, fileID)
+		return TrashReused, err
+	}
+	if err := trash(ctx, fileID); err != nil {
+		s.TrashFailed(ctx, fileID, err)
+		return TrashFailedTry, err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE drive_trash SET done_at = ?, last_error = '' WHERE file_id = ?`, db.Now(), fileID)
+	return Trashed, err
 }
 
 // TrashFailed records a failed try; the next waits longer (a minute, doubling, at most a day).
 func (s *Store) TrashFailed(ctx context.Context, fileID string, cause error) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE drive_trash SET tries = tries + 1, last_error = ?,
-		next_at = ? + min(60000 << min(tries, 11), 86400000) WHERE file_id = ?`, cause.Error(), db.Now(), fileID)
+		next_at = ? + min(60000 << min(tries, 11), 86400000) WHERE file_id = ? AND done_at = 0`, cause.Error(), db.Now(), fileID)
 	return err
 }
 
@@ -271,7 +328,7 @@ func (s *Store) TrashFailed(ctx context.Context, fileID string, cause error) err
 func (s *Store) TrashPending(ctx context.Context) (int, string, error) {
 	var n int
 	var last string
-	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce((SELECT last_error FROM drive_trash WHERE last_error != ''
-		ORDER BY next_at DESC LIMIT 1), '') FROM drive_trash`).Scan(&n, &last)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce((SELECT last_error FROM drive_trash WHERE done_at = 0 AND last_error != ''
+		ORDER BY next_at DESC LIMIT 1), '') FROM drive_trash WHERE done_at = 0`).Scan(&n, &last)
 	return n, last, err
 }

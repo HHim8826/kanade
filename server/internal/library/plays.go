@@ -42,7 +42,13 @@ type PlayReport struct {
 	Seq int64 `json:"seq"`
 	// At is the client's clock when the report was made (ms); 0 when unknown.
 	At int64 `json:"at"`
+	// Client tells apart the devices (logins) reports come from, for their clock offsets; set by
+	// the server, never by the client.
+	Client string `json:"-"`
 }
+
+// offsetWindow is how far back a device's reports measure its clock offset.
+const offsetWindow = 12 * time.Hour
 
 var ErrBadPlay = errors.New("invalid play report")
 
@@ -80,29 +86,43 @@ func (s *Store) RecordPlay(ctx context.Context, r PlayReport) error {
 	if r.Finished {
 		finished = 1
 	}
+	// When the report was made, on the server's clock (review #8). Receiving it took the device's
+	// clock offset plus the time it spent in the network, which is never negative: so the offset is
+	// the smallest gap of the device's recent reports, this one included, and a report that sat in
+	// the network, even a playback's first, keeps the time it was made. Never later than now.
 	now := db.Now()
-	var skew int64
+	at, sample := now, int64(0)
 	if r.At > 0 {
-		skew = now - r.At // the first report is sent as playback starts: its delay is small
+		sample = now - r.At
+		offset := sample
+		var least sql.NullInt64
+		s.db.QueryRowContext(ctx, `SELECT min(skew) FROM (SELECT skew FROM plays WHERE client = ? AND seq > 0 AND updated_at > ?
+			ORDER BY updated_at DESC LIMIT 50)`, r.Client, now-offsetWindow.Milliseconds()).Scan(&least)
+		if least.Valid {
+			offset = min(offset, least.Int64)
+		}
+		at = min(now, r.At+offset)
 	}
-	// A newer report (higher seq) sets the position and the time. The time is when the client made
-	// the report, on the server's clock, never later than now nor earlier than the last one: a
-	// report that sat in the network does not lift an old playback above newer ones. Heard time,
-	// counting and finishing only ever grow, whatever the order.
+	// A newer report (higher seq) sets the position and the time, never earlier than the last; an
+	// older one arriving late changes neither, but can only move the start earlier. Heard time,
+	// counting and finishing only ever grow, whatever the order. skew keeps the session's smallest
+	// gap, for the offsets of later reports.
 	_, err = s.db.ExecContext(ctx, `INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at,
-		position_ms, listened_ms, duration_ms, counted, finished, seq, skew) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+		position_ms, listened_ms, duration_ms, counted, finished, seq, skew, client) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?15)
 		ON CONFLICT (session) DO UPDATE SET
-			updated_at = CASE WHEN excluded.seq = 0 THEN ?5
-				WHEN excluded.seq > plays.seq THEN max(plays.updated_at, min(?5, CASE WHEN ?13 > 0 THEN ?13 + plays.skew ELSE ?5 END))
+			updated_at = CASE WHEN excluded.seq = 0 THEN ?13
+				WHEN excluded.seq > plays.seq THEN max(plays.updated_at, ?5)
 				ELSE plays.updated_at END,
+			started_at = CASE WHEN excluded.seq > 0 THEN min(plays.started_at, ?5) ELSE plays.started_at END,
 			position_ms = CASE WHEN excluded.seq = 0 OR excluded.seq > plays.seq THEN excluded.position_ms ELSE plays.position_ms END,
 			seq = max(plays.seq, excluded.seq),
+			skew = CASE WHEN excluded.seq > 0 THEN min(plays.skew, excluded.skew) ELSE plays.skew END,
 			listened_ms = max(plays.listened_ms, excluded.listened_ms),
 			counted = max(plays.counted, excluded.counted,
 				CASE WHEN ?14 >= 0 AND max(plays.listened_ms, excluded.listened_ms) >= ?14 THEN 1 ELSE 0 END),
 			finished = max(plays.finished, excluded.finished)
 		WHERE plays.asset_id = excluded.asset_id`,
-		r.Session, r.AssetID, trackID, album, now, r.PositionMS, r.ListenedMS, duration, counted, finished, r.Seq, skew, r.At, need)
+		r.Session, r.AssetID, trackID, album, at, r.PositionMS, r.ListenedMS, duration, counted, finished, r.Seq, sample, now, need, r.Client)
 	return err
 }
 

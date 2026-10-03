@@ -16,6 +16,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/ffmpeg"
+	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/media"
 )
 
@@ -214,11 +215,17 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 	if err != nil {
 		return fail(err.Error())
 	}
-	numbers := make([]int, len(pieces))
+	// Each song is known by its track number and its cut: a sheet corrected to cut elsewhere is cut
+	// again (review #19).
+	outputs := make([]library.SourcePiece, len(pieces))
 	for i, p := range pieces {
-		numbers[i] = p.Number
+		end := p.End
+		if end == 0 {
+			end = s.Samples
+		}
+		outputs[i] = library.SourcePiece{Number: p.Number, Cut: fmt.Sprintf("%d-%d", p.Start, end)}
 	}
-	if done, err := im.lib.SourceComplete(ctx, sha, size, numbers); err != nil {
+	if done, err := im.lib.SourceComplete(ctx, sha, size, outputs); err != nil {
 		return err
 	} else if done { // every song of it is in the library; otherwise cut again, and songs the library has are duplicates
 		im.itemFailed(ctx, img.id, StateDuplicate, "every song of this disc image is in the library already")
@@ -323,9 +330,9 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 	for i, d := range dsts {
 		rel := path.Join(path.Dir(img.rel), filepath.Base(d))
 		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp,
-			source_path, source_kind, source_sha256, source_size, source_piece, drive_parent, updated_at)
-			VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
-			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, pieces[i].Number, img.driveParent, now); err != nil {
+			source_path, source_kind, source_sha256, source_size, source_piece, source_cut, drive_parent, updated_at)
+			VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, outputs[i].Number, outputs[i].Cut, img.driveParent, now); err != nil {
 			return err
 		}
 	}
@@ -376,7 +383,7 @@ func (im *Importer) convert(ctx context.Context, batchID int64, a audioItem) err
 	if err != nil {
 		return fail(err.Error())
 	}
-	if done, err := im.lib.SourceComplete(ctx, sha, size, []int{0}); err != nil {
+	if done, err := im.lib.SourceComplete(ctx, sha, size, []library.SourcePiece{{}}); err != nil {
 		return err
 	} else if done {
 		im.itemFailed(ctx, a.id, StateDuplicate, "this file was converted and imported before")
@@ -428,7 +435,8 @@ func (im *Importer) sourceOf(ctx context.Context, it *item, assetID int64) {
 	if it.sourceSHA == "" || assetID == 0 {
 		return
 	}
-	if err := im.lib.AddSource(ctx, it.sourceSHA, it.sourceSize, assetID, it.sourceKind, it.sourcePiece); err != nil {
+	if err := im.lib.AddSource(ctx, it.sourceSHA, it.sourceSize, assetID, it.sourceKind,
+		library.SourcePiece{Number: it.sourcePiece, Cut: it.sourceCut}); err != nil {
 		im.log.Warn("record import source", "item", it.id, "err", err)
 	}
 }

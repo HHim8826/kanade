@@ -175,3 +175,55 @@ func TestHistoryCursorKeepsEqualTimestampRows(t *testing.T) {
 		t.Fatalf("saw %d of 51", len(seen))
 	}
 }
+
+// A playback's first report that sat in the network keeps the time it was made: the device's clock
+// offset comes from its quickest recent report, not from that one (review #8). A later report
+// arriving before an earlier one moves the start back; each device's clock offset is its own.
+func TestDelayedFirstReportKeepsItsTime(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	newSong := assetWithDuration(t, s, "f1", 200_000)
+	s.Publish(ctx, newSong, EntryInput{Title: "New Song"})
+	oldSong := assetWithDuration(t, s, "f2", 200_000)
+	s.Publish(ctx, oldSong, EntryInput{Title: "Old Song"})
+	latest := func() string {
+		var session string
+		s.db.QueryRow(`SELECT session FROM plays ORDER BY updated_at DESC, id DESC LIMIT 1`).Scan(&session)
+		return session
+	}
+	now := time.Now().UnixMilli()
+	s.RecordPlay(ctx, PlayReport{Session: "new", AssetID: newSong, PositionMS: 1000, ListenedMS: 1000, Seq: 1, At: now, Client: "phone"})
+	// Started a minute earlier on the same clock; its first report arrives only now.
+	s.RecordPlay(ctx, PlayReport{Session: "old", AssetID: oldSong, PositionMS: 1000, ListenedMS: 1000, Seq: 1, At: now - 60_000, Client: "phone"})
+	if latest() != "new" {
+		t.Fatal("a delayed first report became the latest playback")
+	}
+	var started int64
+	s.db.QueryRow(`SELECT started_at FROM plays WHERE session = 'old'`).Scan(&started)
+	if started > now-59_000 {
+		t.Fatalf("delayed first report dated %d, made at %d", started, now-60_000)
+	}
+	// The second report of a playback arrives before its first: the start is the first's.
+	s.RecordPlay(ctx, PlayReport{Session: "x", AssetID: newSong, PositionMS: 15_000, ListenedMS: 15_000, Seq: 2, At: now - 30_000, Client: "phone"})
+	s.RecordPlay(ctx, PlayReport{Session: "x", AssetID: newSong, PositionMS: 0, ListenedMS: 0, Seq: 1, At: now - 45_000, Client: "phone"})
+	var start, updated, pos int64
+	s.db.QueryRow(`SELECT started_at, updated_at, position_ms FROM plays WHERE session = 'x'`).Scan(&start, &updated, &pos)
+	if start > now-44_000 || updated < now-31_000 || pos != 15_000 {
+		t.Fatalf("out of order: start %d updated %d pos %d", now-start, now-updated, pos)
+	}
+	// A device five minutes fast: its reports are dated by its own offset, not another device's,
+	// and never in the future.
+	time.Sleep(5 * time.Millisecond)
+	fast := time.Now().UnixMilli() + 300_000
+	s.RecordPlay(ctx, PlayReport{Session: "fast", AssetID: oldSong, PositionMS: 1000, ListenedMS: 1000, Seq: 1, At: fast, Client: "laptop"})
+	var fastAt int64
+	s.db.QueryRow(`SELECT updated_at FROM plays WHERE session = 'fast'`).Scan(&fastAt)
+	if fastAt > time.Now().UnixMilli() || latest() != "fast" {
+		t.Fatalf("fast clock: dated %d ahead, latest %s", fastAt-time.Now().UnixMilli(), latest())
+	}
+	time.Sleep(5 * time.Millisecond)
+	s.RecordPlay(ctx, PlayReport{Session: "new", AssetID: newSong, PositionMS: 9000, ListenedMS: 9000, Seq: 2, At: time.Now().UnixMilli(), Client: "phone"})
+	if latest() != "new" {
+		t.Fatalf("the phone's newer report lost to the fast laptop: %s", latest())
+	}
+}

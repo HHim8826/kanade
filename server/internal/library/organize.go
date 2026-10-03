@@ -1022,18 +1022,48 @@ func (s *Store) Undo(ctx context.Context, groupID int64) (int64, []Conflict, err
 	return g, conflicts, nil
 }
 
-// laterEdit reports whether a change after group touched the same field and still stands: one not
-// undone, and not itself the undo of a change after group (such a pair cancels out).
+// laterEdit reports whether a change after group touched the same field and still stands, field by
+// field (review #20). Going from the newest change of the field back: a change stands unless an
+// undo that stands reverted this very field of it; an undo whose own change was reverted (a redo)
+// no longer reverts, so the change it had reverted stands again. A partial undo that left this
+// field alone (a conflict) did not revert it. A standing change counts, and so does a standing undo
+// of a change before group; an undo of a change after group cancels out with it.
 func laterEdit(ctx context.Context, q querier, group, undoing int64, ed Edit) (bool, error) {
-	var one int
-	err := q.QueryRowContext(ctx, `SELECT 1 FROM edits x JOIN edit_groups g ON g.id = x.group_id
-		WHERE x.target = ? AND x.target_id = ? AND x.field = ? AND x.group_id > ? AND x.group_id != ?
-		AND g.undone_by IS NULL AND NOT (g.undo_of IS NOT NULL AND g.undo_of > ?) LIMIT 1`,
-		ed.Target, ed.ID, ed.Field, group, undoing, group).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	rows, err := q.QueryContext(ctx, `SELECT x.group_id, coalesce(g.undo_of, 0) FROM edits x JOIN edit_groups g ON g.id = x.group_id
+		WHERE x.target = ? AND x.target_id = ? AND x.field = ? AND x.group_id > ? AND x.group_id != ? ORDER BY x.group_id, x.id`,
+		ed.Target, ed.ID, ed.Field, group, undoing)
+	if err != nil {
+		return false, err
 	}
-	return err == nil, err
+	type change struct{ group, undoOf int64 }
+	var list []change
+	for rows.Next() {
+		var c change
+		if err := rows.Scan(&c.group, &c.undoOf); err != nil {
+			rows.Close()
+			return false, err
+		}
+		list = append(list, c)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	reverted := map[int64]bool{} // groups whose change of this field a standing undo reverted
+	stands := make([]bool, len(list))
+	for i := len(list) - 1; i >= 0; i-- {
+		c := list[i]
+		stands[i] = !reverted[c.group]
+		if stands[i] && c.undoOf != 0 {
+			reverted[c.undoOf] = true
+		}
+	}
+	for i, c := range list {
+		if stands[i] && (c.undoOf == 0 || c.undoOf < group) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // ---- the edit log ----
@@ -1213,7 +1243,8 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) ([]string, error) {
 		if fileID.Valid && fileID.String != "" {
 			drive = append(drive, fileID.String)
 			// Owed to the Drive trash until it is there, in the same transaction (review #26).
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO drive_trash (file_id, created_at) VALUES (?, ?)`,
+			if _, err := tx.ExecContext(ctx, `INSERT INTO drive_trash (file_id, created_at) VALUES (?, ?) ON CONFLICT (file_id)
+				DO UPDATE SET created_at = excluded.created_at, done_at = 0, tries = 0, next_at = 0, last_error = ''`,
 				fileID.String, db.Now()); err != nil {
 				return nil, err
 			}

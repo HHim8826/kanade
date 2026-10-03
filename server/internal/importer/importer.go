@@ -275,7 +275,8 @@ type item struct {
 	// Made by FFmpeg from another file (P2-4).
 	sourcePath, sourceKind, sourceSHA string
 	sourceSize                        int64
-	sourcePiece                       int // the CUE track number of a cut song
+	sourcePiece                       int    // the CUE track number of a cut song
+	sourceCut                         string // and the sample range it was cut from
 	// In the Drive inbox (P2-6, D6); sha is Drive's own checksum.
 	driveID, driveParent, sha string
 	driveSize                 int64
@@ -287,12 +288,12 @@ func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
 	var plan string
 	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp,
-		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.source_piece, i.drive_id, i.drive_parent, i.sha256, i.drive_size
+		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.source_piece, i.source_cut, i.drive_id, i.drive_parent, i.sha256, i.drive_size
 		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
 		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
 		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
 		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp,
-			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.sourcePiece, &it.driveID, &it.driveParent, &it.sha, &it.driveSize)
+			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.sourcePiece, &it.sourceCut, &it.driveID, &it.driveParent, &it.sha, &it.driveSize)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

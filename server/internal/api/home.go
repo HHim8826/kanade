@@ -1,6 +1,8 @@
 package api
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"net/http"
 
@@ -14,6 +16,8 @@ func (s *Server) recordPlay(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
+	token, _ := sessionToken(r)
+	rep.Client = clientKey(token) // the device, for its clock offset (review #8)
 	if err := s.lib.RecordPlay(r.Context(), rep); err != nil {
 		if errors.Is(err, library.ErrBadPlay) {
 			writeError(w, http.StatusBadRequest, err)
@@ -109,4 +113,13 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		"tasks":           tasks,
 		"attention":       attention,
 	})
+}
+
+// clientKey names a login without keeping its token: the first bytes of its SHA-256.
+func clientKey(token string) string {
+	if token == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:8])
 }

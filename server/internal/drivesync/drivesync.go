@@ -206,18 +206,24 @@ func (s *Syncer) position(ctx context.Context) (string, error) {
 }
 
 // RetryTrash moves files the library let go of to the Drive trash, where an earlier try failed.
+// trash moves a file to the Drive trash; one Drive no longer has counts as done.
+func (s *Syncer) trash(ctx context.Context, id string) error {
+	if err := s.Drive.Trash(ctx, id); err != nil && !gdrive.IsNotFound(err) {
+		return err
+	}
+	return nil
+}
+
 func (s *Syncer) RetryTrash(ctx context.Context) (done int) {
 	ids, err := s.Lib.TrashDue(ctx, 100)
 	if err != nil {
 		return 0
 	}
 	for _, id := range ids {
-		if err := s.Drive.Trash(ctx, id); err != nil && !gdrive.IsNotFound(err) {
-			s.Lib.TrashFailed(ctx, id, err)
-			continue
+		// Checked again under the trash lock: a re-import may have taken the file up (review #44).
+		if n, _ := s.Lib.TrashFile(ctx, id, s.trash); n == library.Trashed {
+			done++
 		}
-		s.Lib.TrashDone(ctx, id)
-		done++
 	}
 	if done > 0 {
 		s.Log.Info("deleted files moved to the drive trash", "count", done)
