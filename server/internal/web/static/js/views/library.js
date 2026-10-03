@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
-import { enqueue, fromEntry, fromTrack, playNext, playQueue, player, shuffled, toggle } from '../player.js';
+import { enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
 import { go, href } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
@@ -86,7 +86,10 @@ export function Home() {
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">首頁</h1>
-      <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="shuffle" />隨便聽一張</button>
+      <div class="actions">
+        <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
+        <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="album" />隨便聽一張</button>
+      </div>
     </div>
     ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
     ${live ? html`<${NowCard} />` : d && d.continue && html`<${LastPlayedCard} item=${d.continue} />`}
@@ -174,7 +177,10 @@ export function Library({ tab = 'albums', filter = '' }) {
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">曲庫</h1>
-      <a class="btn text" href=${href('edits')}><${Icon} name="history" />修改紀錄</a>
+      <div class="actions">
+        <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
+        <a class="btn text" href=${href('edits')}><${Icon} name="history" />修改紀錄</a>
+      </div>
     </div>
     <nav class="tabs" role="tablist">
       ${tabs.map(([k, label]) => html`<a role="tab" aria-selected=${k === tab} class=${k === tab ? 'active' : ''} href=${href('library/' + k)}>${label}</a>`)}

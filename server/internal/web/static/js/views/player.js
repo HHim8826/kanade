@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import { api, get, post } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
-  clearUpcoming, current, cycleMode, endScrub, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, scrubTo, seek,
-  setVolume, toggle, toggleMute,
+  clearUpcoming, current, cycleMode, endScrub, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, retryRadio,
+  scrubTo, seek, setPrefs, setVolume, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
 import { DragHandle, useReorder } from './common.js';
@@ -45,7 +45,8 @@ const modeLook = { order: ['order', '順序播放'], all: ['repeat', '列表循�
 
 // ModeButton shows the play mode and switches to the next one (review #40).
 function ModeButton({ s, size }) {
-  const [icon, name] = modeLook[s.mode];
+  const [icon, mode] = modeLook[s.mode];
+  const name = s.mode === 'shuffle' && s.scope === 'library' ? '隨機播放（全曲庫）' : mode;
   return html`<${IconButton} icon=${icon} label=${`播放模式：${name}（按一下切換）`} size=${size}
     className=${'mode' + (s.mode !== 'order' ? ' on' : '')} onClick=${cycleMode} />`;
 }
@@ -160,18 +161,27 @@ function Queue({ s }) {
     i < last && { icon: 'down', label: '下移', onClick: () => moveItem(i, i + 1) },
     { icon: 'close', label: '從佇列移除', onClick: () => removeAt(i) },
   ]);
+  const libraryShuffle = s.shuffle && s.scope === 'library';
+  const going = s.radio ? (s.radio.chosen || libraryShuffle ? '全曲庫隨機：會一直從曲庫挑歌接著播' : '已播完佇列，正從曲庫隨機挑歌接著播') : '';
   return html`<div class="queue">
     <div class="queue-head">
-      <span class="sub grow">${s.queue.length} 首 · ${modeLook[s.mode][1]}</span>
+      <span class="sub grow">${s.queue.length} 首 · ${libraryShuffle ? '全曲庫隨機' : modeLook[s.mode][1]}</span>
       <button class="btn text" disabled=${s.index >= last} onClick=${clearUpcoming}>清除待播</button>
       <button class="btn text" onClick=${() => resetPlayer()}>停止並清空</button>
     </div>
+    <label class="toggle-row queue-toggle">
+      <span class="grow"><span class="title">播完後自動接續</span>
+        <span class="sub">${going || (s.mode === 'all' ? '列表循環中：播完會從頭再播一次' : s.mode === 'one' ? '單曲循環中' : '佇列播完後，從曲庫隨機挑歌接著播')}</span></span>
+      <input type="checkbox" role="switch" checked=${s.autoContinue} onChange=${(e) => setPrefs({ autoContinue: e.target.checked })} />
+    </label>
+    ${s.radioError && html`<div class="error-box" role="alert"><span>沒能從曲庫挑歌接著播：${s.radioError}</span>
+      <button class="btn text" onClick=${retryRadio}>重試</button></div>`}
     <ol class=${'tracks queue-list' + (drag ? ' dragging' : '')}>${s.queue.map((q, i) => html`<li key=${q.qid || i} ...${lift(i)}>
       <div class=${'track' + (q.qid === current ? ' current' : '')}>
         <${DragHandle} onStart=${(e) => start(e, i)} label=${`拖曳「${q.title}」改變播放順序`} />
         <button class="track-main" onPointerDown=${(e) => press(e, i)} onClick=${() => playAt(i)} aria-current=${q.qid === current ? 'true' : undefined}>
           <span class="num">${i + 1}</span>
-          <span class="track-text"><span class="title">${q.title}</span><span class="sub">${q.artist}</span></span>
+          <span class="track-text"><span class="title">${q.title}${q.auto ? html` <span class="pill">自動</span>` : ''}</span><span class="sub">${q.artist}</span></span>
           <span class="meta">${fmtTime(q.durationMs)}</span>
         </button>
         <${IconButton} icon="more" label=${`「${q.title}」的佇列選項`} className="row-more" onClick=${(e) => menu(e, i)} />

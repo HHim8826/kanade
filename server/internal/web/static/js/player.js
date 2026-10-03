@@ -19,14 +19,24 @@ export function modeFrom(p) {
   return p.repeat === 'all' ? 'all' : 'order';
 }
 
+// Playback preferences (review #78), kept in this browser with the volume and the mode:
+//   scope: what shuffle draws from, the queue or the whole library (#72);
+//   autoContinue: when the queue's songs run out, go on with songs from the library (#73);
+//   resume: per kind, whether choosing a song starts it over or where it was left;
+//   preload: warm the next song's stream ahead.
 function loadPrefs() {
   let p = {};
   try {
     p = JSON.parse(localStorage.getItem(PREFS) || '{}') || {};
   } catch { /* storage blocked: defaults */ }
+  const r = p.resume || {};
   return {
     volume: typeof p.volume === 'number' ? Math.min(Math.max(p.volume, 0), 1) : 1, muted: !!p.muted,
     ...modeState(modeFrom(p)),
+    scope: p.scope === 'library' ? 'library' : 'queue',
+    autoContinue: !!p.autoContinue,
+    preload: p.preload !== false,
+    resume: { music: r.music === 'resume' ? 'resume' : 'start', spoken: r.spoken === 'start' ? 'start' : 'resume' },
   };
 }
 
@@ -39,15 +49,33 @@ export const player = createStore({
   duration: 0, // seconds
   nowPlayingOpen: false,
   original: null, // the queue in its own order while shuffle is on
+  from: 0, // the song (qid) a shuffle of the whole library began at: the list goes on after it
   scrub: null, // seconds the seek bar is being dragged to, not yet sought (review #41)
-  ...loadPrefs(), // volume 0–1, muted, mode, and from it shuffle and repeat: off | all | one
+  // The queue goes on by itself with songs from the whole library ({ kind }), a shuffle of the
+  // library or "keep playing" once the queue's own songs ran out; songs it adds are marked auto.
+  radio: null,
+  radioError: null, // why the last pick from the library failed
+  ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
 
 function savePrefs() {
-  const { volume, muted, mode } = player.get();
+  const { volume, muted, mode, scope, autoContinue, preload, resume } = player.get();
   try {
-    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode }));
+    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, preload, resume }));
   } catch { /* private mode: the choice lasts for this page */ }
+}
+
+// setPrefs changes playback preferences (the settings page, the queue's switch). Turning "keep
+// playing" off ends the library songs not reached yet; turning the library shuffle scope on or off
+// takes effect the next time shuffle starts.
+export function setPrefs(patch) {
+  player.set(patch);
+  savePrefs();
+  const s = player.get();
+  if (patch.autoContinue === false && s.radio && !(s.shuffle && s.scope === 'library') && !s.radio.chosen) {
+    endRadio();
+  }
+  if (patch.autoContinue) topUp();
 }
 
 const audio = new Audio();
@@ -115,7 +143,9 @@ function load(index, autoplay = true, again = false) {
   // A resume point ("continue" on the home page) is for the play it was asked for only.
   pendingSeek = again ? null : item.resumeMs || null;
   delete item.resumeMs;
-  if (!again && !pendingSeek && item.kind === 'spoken') { // drama and radio pick up where they stopped
+  // Otherwise as the settings say for its kind: drama and radio pick up where they stopped, music
+  // starts over (review #78). A loop coming round always starts over.
+  if (!again && !pendingSeek && s.resume[item.kind === 'spoken' ? 'spoken' : 'music'] === 'resume') {
     get(`/assets/${item.assetId}/resume`).then((r) => {
       if (session && session.item === item && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
@@ -150,18 +180,98 @@ document.addEventListener('visibilitychange', () => document.visibilityState ===
 addEventListener('pagehide', () => report(false, true));
 
 // playQueue plays a list from index. With shuffle on, the chosen song plays first and the rest
-// follow in random order; turning shuffle off goes back to the list's own order.
+// follow in random order; turning shuffle off goes back to the list's own order. Shuffling the
+// whole library, the chosen song plays first and songs from the library follow (review #72).
 export function playQueue(items, index = 0) {
   if (!items.length) return;
+  gen++;
   const list = tag(items);
-  if (player.get().shuffle) {
+  const s = player.get();
+  if (s.shuffle && s.scope === 'library') {
     const first = list[index];
-    player.set({ original: list, queue: [first, ...shuffled(list.filter((q) => q !== first))], index: 0 });
+    player.set({ original: list, from: first.qid, queue: [first], index: 0, radio: { kind: kindOf(first) }, radioError: null });
+    load(0);
+    topUp();
+    return;
+  }
+  if (s.shuffle) {
+    const first = list[index];
+    player.set({ original: list, queue: [first, ...shuffled(list.filter((q) => q !== first))], index: 0, radio: null, radioError: null });
     load(0);
     return;
   }
-  player.set({ queue: list, index, original: null });
+  player.set({ queue: list, index, original: null, radio: null, radioError: null });
   load(index);
+}
+
+// ---- songs from the whole library (reviews #72, #73) ----
+
+let gen = 0; // a new queue (or a reset) makes answers for the old one late: they are dropped
+let topping = false;
+const kindOf = (item) => (item && item.kind === 'spoken' ? 'spoken' : 'music');
+
+// playLibraryShuffle plays songs picked at random from the whole library, one after another, each
+// song as likely as any other; the queue goes on with more as it plays. kind: music (drama and
+// radio left out) or spoken.
+export async function playLibraryShuffle(kind = 'music') {
+  const my = ++gen;
+  const s = player.get();
+  try {
+    const list = await get(`/tracks/random?n=3&kind=${kind}&not=${recentIds(s).join(',')}`);
+    if (my !== gen) return;
+    if (!list.length) {
+      toast(kind === 'spoken' ? '曲庫沒有可以播放的廣播劇或談話' : '曲庫沒有可以播放的歌', 'error');
+      return;
+    }
+    player.set({ queue: tag(list.map(fromTrack).map(autoItem)), index: 0, original: null, radio: { kind, chosen: true }, radioError: null });
+    load(0);
+  } catch (e) {
+    if (my === gen) toast(e.message, 'error');
+  }
+}
+
+const autoItem = (it) => ({ ...it, auto: true });
+const recentIds = (s) => [...new Set(s.queue.slice(Math.max(s.index - 49, 0), s.index + 1).map((q) => q.trackId).filter(Boolean))];
+
+// topUp keeps library songs ahead while the queue goes on by itself: two ahead with preloading
+// (so the next one can be warmed), else one when the queue reaches its end (now).
+export async function topUp(now = false) {
+  const s = player.get();
+  if (!s.radio || topping) return false;
+  const ahead = s.queue.length - 1 - s.index;
+  const want = s.preload ? 2 : now ? 1 : 0;
+  if (ahead >= want) return true;
+  topping = true;
+  const my = gen;
+  try {
+    const list = await get(`/tracks/random?n=${Math.max(want - ahead, 1)}&kind=${s.radio.kind}&not=${recentIds(s).join(',')}`);
+    if (my !== gen || !player.get().radio) return false; // another queue began, or it was turned off
+    if (!list.length) throw new Error('曲庫沒有可以接續的歌');
+    const q = player.get();
+    player.set({ queue: [...q.queue, ...tag(list.map(fromTrack).map(autoItem))], radioError: null });
+    prefetchNext();
+    return true;
+  } catch (e) {
+    if (my === gen) player.set({ radioError: e.message });
+    return false;
+  } finally {
+    topping = false;
+  }
+}
+
+// retryRadio picks again after a failure, and plays on when the queue had stopped at its end.
+export async function retryRadio() {
+  const s = player.get();
+  const atEnd = s.index === s.queue.length - 1 && audio.paused;
+  if (await topUp(true) && atEnd && player.get().index + 1 < player.get().queue.length) load(player.get().index + 1);
+}
+
+// endRadio stops going on by itself: library songs not reached yet leave the queue.
+function endRadio() {
+  gen++;
+  const s = player.get();
+  const queue = s.queue.filter((q, i) => i <= s.index || !q.auto);
+  player.set({ queue, radio: null, radioError: null });
 }
 
 export function shuffled(items) {
@@ -173,14 +283,19 @@ export function shuffled(items) {
   return a;
 }
 
-// enqueue adds one item or a list at the end of the queue.
+// enqueue adds one item or a list at the end of the queue: before the songs the queue picked by
+// itself from the library, which come after what the user chose (review #73).
 export function enqueue(items) {
   const raw = Array.isArray(items) ? items : [items];
   const s = player.get();
   if (!raw.length) return;
   if (s.index < 0) return playQueue(raw);
   const list = tag(raw);
-  player.set({ queue: [...s.queue, ...list], original: s.original && [...s.original, ...list] });
+  const queue = [...s.queue];
+  let at = queue.findIndex((q, i) => i > s.index && q.auto);
+  if (at < 0) at = queue.length;
+  queue.splice(at, 0, ...list);
+  player.set({ queue, original: s.original && [...s.original, ...list] });
   toast(list.length > 1 ? `已將 ${list.length} 首加入佇列` : `已加入佇列：${list[0].title}`);
 }
 
@@ -218,22 +333,43 @@ export function toggleMute() {
   savePrefs();
 }
 
-// cycleMode goes in order → loop the queue → loop this song → shuffle → in order. The current song
-// keeps playing: shuffling puts the rest of the queue in random order after it, and leaving
-// shuffle puts the queue back in its own order around it.
+// cycleMode goes in order → loop the queue → loop this song → shuffle → in order.
 export function cycleMode() {
   const s = player.get();
-  const mode = MODES[(MODES.indexOf(s.mode) + 1) % MODES.length];
+  setMode(MODES[(MODES.indexOf(s.mode) + 1) % MODES.length]);
+}
+
+// setMode changes the play mode (the player bar's button, the settings page). The current song keeps
+// playing: shuffling puts the rest of the queue in random order after it, or with the library
+// scope, songs from the whole library (review #72); leaving shuffle puts the queue back in its own
+// order around it.
+export function setMode(mode) {
+  const s = player.get();
+  if (mode === s.mode || !MODES.includes(mode)) return;
   const cur = s.queue[s.index];
   let queue = {};
-  if (mode === 'shuffle' && cur) {
+  if (mode === 'shuffle' && cur && s.scope === 'library') {
+    gen++;
+    queue = { original: s.queue, from: cur.qid, queue: s.queue.slice(0, s.index + 1), radio: { kind: kindOf(cur) }, radioError: null };
+  } else if (mode === 'shuffle' && cur) {
     queue = { original: s.queue, queue: [cur, ...shuffled(s.queue.filter((q) => q !== cur))], index: 0 };
   } else if (s.shuffle) {
-    const list = s.original || s.queue;
-    queue = { original: null, queue: list, index: cur ? Math.max(list.findIndex((q) => q.qid === cur.qid), 0) : -1 };
+    let list = s.original || s.queue;
+    let index = cur ? list.findIndex((q) => q.qid === cur.qid) : -1;
+    if (cur && index < 0) { // a library song: it stays, and the list goes on after the song shuffling began at
+      const at = list.findIndex((q) => q.qid === s.from);
+      list = [...list.slice(0, at + 1), cur, ...list.slice(at + 1)];
+      index = at + 1;
+    }
+    queue = { original: null, queue: list, index: Math.max(index, cur ? 0 : -1) };
+    if (s.radio && !s.radio.chosen) {
+      gen++;
+      queue.radio = null;
+    }
   }
   player.set({ ...modeState(mode), ...queue });
   savePrefs();
+  topUp();
 }
 
 const without = (list, gone) => list && list.filter((q) => !gone.has(q.qid));
@@ -262,10 +398,11 @@ export function removeAt(i) {
   load(index, wasPlaying);
 }
 
-// clearUpcoming keeps the songs up to the current one.
+// clearUpcoming keeps the songs up to the current one; library songs on their way are dropped.
 export function clearUpcoming() {
   const s = player.get();
   if (s.index < 0) return;
+  gen++;
   const gone = new Set(s.queue.slice(s.index + 1).map((q) => q.qid));
   player.set({ queue: s.queue.slice(0, s.index + 1), original: without(s.original, gone) });
 }
@@ -290,12 +427,14 @@ export function playAfterCurrent(i) {
 // the playback so far is reported first.
 export function resetPlayer(withReport = true) {
   if (withReport) report(false, true);
+  gen++;
   session = null;
   pendingSeek = null;
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
-  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, scrub: null, duration: 0, nowPlayingOpen: false });
+  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, scrub: null, duration: 0, nowPlayingOpen: false,
+    radio: null, radioError: null });
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
 }
 
@@ -305,12 +444,25 @@ export function toggle() {
   else audio.pause();
 }
 
-// next moves on. Past the end it starts over in the looping modes (shuffle in a new order), and
-// stops in order mode.
-export function next() {
+// next moves on. Past the end: a queue going on by itself picks from the library; looping the
+// queue starts it over; with "keep playing" the queue goes on with library songs, also after a
+// round of a shuffled queue; else a shuffled queue starts over in a new order, and in order it
+// stops (review #73: looping a song or the list comes first).
+export async function next() {
   const s = player.get();
-  if (s.index + 1 < s.queue.length) load(s.index + 1);
-  else if (s.repeat !== 'off' && s.queue.length) {
+  if (s.index + 1 < s.queue.length) return load(s.index + 1);
+  if (!s.queue.length) return;
+  if (s.radio || (s.autoContinue && s.mode !== 'all')) {
+    if (!s.radio) player.set({ radio: { kind: kindOf(s.queue[s.index]) }, radioError: null });
+    const my = gen;
+    if (await topUp(true) && my === gen && player.get().index + 1 < player.get().queue.length) {
+      load(player.get().index + 1);
+      return;
+    }
+    if (my === gen) stopAtEnd(); // nothing to go on with: radioError says why
+    return;
+  }
+  if (s.repeat !== 'off') {
     if (s.shuffle && s.queue.length > 1) {
       const queue = shuffled(s.queue);
       if (queue[0] === s.queue[s.index]) queue.push(queue.shift()); // not the song that just played
@@ -318,9 +470,13 @@ export function next() {
     }
     load(0, true, true);
   } else {
-    audio.pause();
-    player.set({ playing: false });
+    stopAtEnd();
   }
+}
+
+function stopAtEnd() {
+  audio.pause();
+  player.set({ playing: false });
 }
 
 export function prev() {
@@ -346,10 +502,12 @@ export const endScrub = (commit) => {
   else player.set({ scrub: null });
 };
 
-// Warm the server's stream cache for the next track (plan §5: preload at most the next one).
+// Warm the server's stream cache for the next track (plan §5: preload at most the next one),
+// unless the settings turned it off (review #78).
 function prefetchNext() {
   const s = player.get();
-  const n = s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' ? s.queue[0] : null);
+  if (!s.preload) return;
+  const n = s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
   if (n) fetch(streamURL(n.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' }).catch(() => {});
 }
 
@@ -370,6 +528,7 @@ audio.addEventListener('pause', () => {
 audio.addEventListener('waiting', () => player.set({ buffering: true }));
 audio.addEventListener('playing', () => {
   player.set({ buffering: false, playing: true });
+  topUp();
   prefetchNext();
 });
 audio.addEventListener('ended', () => {

@@ -617,3 +617,4 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .facts dt { color: var(--on-surface-variant); }
 .facts dd { margin: 0; min-width: 0; }
 .facts dd.break { overflow-wrap: anywhere; }
+.card > .hint.tight { margin-bottom: 12px; }

@@ -1,9 +1,10 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
-import { resetPlayer } from '../player.js';
+import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
+import { useStore } from '../store.js';
 import { Dialog, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
@@ -238,6 +239,36 @@ function StorageSettings({ conf, status }) {
         <dt>FFmpeg</dt><dd class="break">${sv.ffmpeg || '沒有（轉檔與 CUE 切割停用）'}</dd>
       </dl>
       <p class="hint tight">在伺服器上用 <code>sudo kanade-manager config</code> 修改公開網址與監聽位址、<code>sudo kanade-manager tools</code> 安裝 aria2 與 FFmpeg，重新啟動後生效。</p>
+    </div>`;
+}
+
+// Playback: the play mode (the player bar's own), what shuffle draws from, keeping on after the
+// queue, where a chosen song starts and preloading (reviews #72, #73, #78); kept in this browser and
+// applied at once without stopping the song playing.
+function PlaybackSettings() {
+  // One value each: a fresh object would re-render this four times a second while a song plays.
+  const s = {
+    mode: useStore(player, (p) => p.mode), scope: useStore(player, (p) => p.scope), autoContinue: useStore(player, (p) => p.autoContinue),
+    preload: useStore(player, (p) => p.preload), resume: useStore(player, (p) => p.resume),
+  };
+  const choices = (label, list, value, pick) => html`<div class="sub">${label}</div>
+    <div class="choices" role="radiogroup" aria-label=${label}>
+      ${list.map(([k, text]) => html`<button type="button" class="choice" role="radio" aria-checked=${value === k} onClick=${() => pick(k)}>${text}</button>`)}
+    </div>`;
+  const resume = (kind, k) => setPrefs({ resume: { ...s.resume, [kind]: k } });
+  return html`<h2 class="section-title">播放</h2>
+    <div class="card pad">
+      ${choices('播放模式（與播放列的按鈕相同）', [['order', '順序播放'], ['all', '列表循環'], ['one', '單曲循環'], ['shuffle', '隨機播放']], s.mode, setMode)}
+      ${choices('隨機播放的範圍', [['queue', '目前的佇列'], ['library', '全曲庫']], s.scope, (k) => setPrefs({ scope: k }))}
+      <p class="hint tight">「全曲庫」時，隨機播放會從整個曲庫挑歌（每首歌機會相同，不限專輯；音樂與廣播劇分開），一直接著播。首頁與曲庫的「全曲庫隨機播放」不論模式都這樣播。</p>
+      <${Toggle} label="播完後自動接續" sub="佇列（專輯、歌單）播完後，從曲庫隨機挑歌接著播；自己加入的歌先播。單曲循環與列表循環時照常循環；隨機播放目前佇列時，播完一輪改為接續。"
+        checked=${s.autoContinue} onChange=${(on) => setPrefs({ autoContinue: on })} />
+      ${choices('音樂：點一首歌時', [['start', '從頭播放'], ['resume', '從上次停下的地方']], s.resume.music, (k) => resume('music', k))}
+      ${choices('廣播劇與談話：點一集時', [['resume', '從上次停下的地方'], ['start', '從頭播放']], s.resume.spoken, (k) => resume('spoken', k))}
+      <p class="hint tight">首頁的「繼續播放／繼續收聽」一定從記錄的位置開始；單曲與列表循環再播一次時一定從頭開始。</p>
+      <${Toggle} label="預先載入下一首" sub="播放時先讓伺服器從 Drive 讀好下一首的開頭，切歌較快；網路流量有限時可以關閉。"
+        checked=${s.preload} onChange=${(on) => setPrefs({ preload: on })} />
+      <p class="hint tight">這些設定存在這個瀏覽器。</p>
     </div>`;
 }
 
@@ -644,6 +675,7 @@ function SettingsPage({ first, onLogout }) {
     <h2 class="section-title">Google Drive</h2>
     <${Drive} drive=${drive} />
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
+    <${PlaybackSettings} />
     <${Appearance} />
     <${DownloadSettings} conf=${conf} />
     <h2 class="section-title">服務</h2>

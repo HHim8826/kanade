@@ -145,6 +145,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/albums", s.authed(s.albums))
 	mux.Handle("GET /api/v1/albums/{id}", s.authed(s.album))
 	mux.Handle("GET /api/v1/tracks", s.authed(s.tracks))
+	mux.Handle("GET /api/v1/tracks/random", s.authed(s.randomTracks))
 	mux.Handle("GET /api/v1/artists", s.authed(s.artists))
 	mux.Handle("GET /api/v1/artists/{id}", s.authed(s.artist))
 	mux.Handle("GET /api/v1/search", s.authed(s.search))

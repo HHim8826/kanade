@@ -81,6 +81,40 @@ func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+// randomTracks picks ?n (1 to 50, default 10) songs at random from the whole library, of ?kind
+// (music, spoken or all; music by default), leaving out ?not (IDs, comma-separated: songs just
+// played).
+func (s *Server) randomTracks(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	n, _ := strconv.Atoi(q.Get("n"))
+	if n <= 0 || n > 50 {
+		n = 10
+	}
+	kind := q.Get("kind")
+	switch kind {
+	case "", "music":
+		kind = "music"
+	case "all":
+		kind = ""
+	case "spoken":
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("kind: music, spoken or all"))
+		return
+	}
+	var not []int64
+	for _, f := range strings.Split(q.Get("not"), ",") {
+		if id, err := strconv.ParseInt(strings.TrimSpace(f), 10, 64); err == nil && id > 0 && len(not) < 200 {
+			not = append(not, id)
+		}
+	}
+	list, err := s.lib.RandomTracks(r.Context(), n, kind, not)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
 func (s *Server) artists(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageArgs(r)
 	list, err := s.lib.Artists(r.Context(), limit, offset)

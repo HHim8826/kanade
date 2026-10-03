@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sort"
 	"strings"
 )
 
@@ -411,4 +412,56 @@ func (s *Store) TrackBySameAudio(ctx context.Context, audioMD5 string) (string, 
 		return "", nil
 	}
 	return title, err
+}
+
+// RandomTracks picks up to n songs at random from the whole library (reviews #72, #73): each song
+// as likely as any other, whatever album or how many versions it has; only songs with a playable
+// file; of kind (music or spoken, "" both); leaving out not (the songs just played) unless that
+// leaves nothing to play.
+func (s *Store) RandomTracks(ctx context.Context, n int, kind string, not []int64) ([]TrackItem, error) {
+	pick := func(not []int64) ([]any, error) {
+		args := []any{kind, kind}
+		q := `SELECT t.id FROM tracks t WHERE (? = '' OR t.kind = ?) AND EXISTS (SELECT 1 FROM track_assets ta
+			JOIN assets a ON a.id = ta.asset_id WHERE ta.track_id = t.id AND a.state = 'verified')`
+		if len(not) > 0 {
+			q += ` AND t.id NOT IN (` + strings.Repeat("?, ", len(not)-1) + `?)`
+			for _, id := range not {
+				args = append(args, id)
+			}
+		}
+		rows, err := s.db.QueryContext(ctx, q+` ORDER BY random() LIMIT ?`, append(args, n)...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var ids []any
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			ids = append(ids, id)
+		}
+		return ids, rows.Err()
+	}
+	ids, err := pick(not)
+	if err == nil && len(ids) == 0 && len(not) > 0 {
+		ids, err = pick(not[len(not)-1:]) // a small library: anything but the song just played
+		if err == nil && len(ids) == 0 {
+			ids, err = pick(nil) // a library of one song
+		}
+	}
+	if err != nil || len(ids) == 0 {
+		return []TrackItem{}, err
+	}
+	list, err := scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id IN (`+strings.Repeat("?, ", len(ids)-1)+`?)`, ids...))
+	if err != nil {
+		return nil, err
+	}
+	order := map[int64]int{}
+	for i, id := range ids {
+		order[id.(int64)] = i
+	}
+	sort.Slice(list, func(i, j int) bool { return order[list[i].ID] < order[list[j].ID] })
+	return list, nil
 }
