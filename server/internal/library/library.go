@@ -205,6 +205,9 @@ type EntryInput struct {
 type Tagged struct {
 	Album, AlbumArtist string
 	Disc, Track        int
+	// Derived: the file names no album artist; AlbumArtist was worked out from the songs imported
+	// with it, so a later import of it may work out another (review #81).
+	Derived bool `json:",omitempty"`
 }
 
 type PublishResult struct {
@@ -273,6 +276,9 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 		if !(in.NewAlbum && in.Chosen) {
 			err := tx.QueryRowContext(ctx, `SELECT id FROM album_entries WHERE asset_id = ? AND origin = ? ORDER BY id LIMIT 1`,
 				assetID, origin).Scan(&res.EntryID)
+			if errors.Is(err, sql.ErrNoRows) && in.Tagged != nil && in.Tagged.Derived {
+				res.EntryID, err = sameEntry(ctx, tx, assetID, origin)
+			}
 			if err == nil {
 				return res, tx.Commit()
 			}
@@ -307,6 +313,37 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 		}
 	}
 	return res, tx.Commit()
+}
+
+// sameEntry finds the entry an earlier import made of a file that names no album artist: the same
+// album tag, disc and track, whatever album artist was worked out then from the songs imported with
+// it (review #81: importing one song of an album again is not another album).
+func sameEntry(ctx context.Context, tx *sql.Tx, assetID int64, origin string) (int64, error) {
+	album, disc, track, ok := splitEntryOrigin(origin)
+	title, _, _ := strings.Cut(album, sep)
+	if !ok {
+		return 0, sql.ErrNoRows
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, origin FROM album_entries WHERE asset_id = ? AND origin IS NOT NULL ORDER BY id`, assetID)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var o string
+		if err := rows.Scan(&id, &o); err != nil {
+			return 0, err
+		}
+		a, d, t, ok := splitEntryOrigin(o)
+		if t2, _, _ := strings.Cut(a, sep); ok && t2 == title && d == disc && t == track {
+			return id, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	return 0, sql.ErrNoRows
 }
 
 func upsertArtist(ctx context.Context, tx *sql.Tx, name string) (int64, error) {
@@ -417,4 +454,45 @@ func (s *Store) Cover(ctx context.Context, id int64) (*Cover, error) {
 		return nil, nil
 	}
 	return &c, err
+}
+
+// AlbumNow is the album id is now, following merges, with its album artist; 0 when it is gone.
+func (s *Store) AlbumNow(ctx context.Context, id int64) (int64, string, error) {
+	for hops := 0; hops < 10; hops++ {
+		var artist string
+		var merged sql.NullInt64
+		err := s.db.QueryRowContext(ctx, `SELECT album_artist, merged_into FROM albums WHERE id = ?`, id).Scan(&artist, &merged)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, "", nil
+		}
+		if err != nil {
+			return 0, "", err
+		}
+		if !merged.Valid {
+			return id, artist, nil
+		}
+		id = merged.Int64
+	}
+	return 0, "", errors.New("albums merged in a loop")
+}
+
+// ReplaceAlbumArtist changes an album's artist from one an import worked out to another, unless it
+// was changed since (review #81).
+func (s *Store) ReplaceAlbumArtist(ctx context.Context, id int64, from, to string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	r, err := tx.ExecContext(ctx, `UPDATE albums SET album_artist = ?, updated_at = ? WHERE id = ? AND album_artist = ?`, to, db.Now(), id, from)
+	if err != nil {
+		return err
+	}
+	if n, _ := r.RowsAffected(); n == 0 {
+		return nil
+	}
+	if err := reindex(ctx, tx, "album", id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

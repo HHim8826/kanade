@@ -165,8 +165,8 @@ func (im *Importer) CreateBatchLinked(ctx context.Context, kind, source, root st
 	}
 	defer tx.Rollback()
 	now := db.Now()
-	r, err := tx.ExecContext(ctx, `INSERT INTO import_batches (kind, source, state, preview, created_at) VALUES (?, ?, ?, ?, ?)`,
-		kind, source, BatchAnalyzing, preview, now)
+	r, err := tx.ExecContext(ctx, `INSERT INTO import_batches (kind, source, state, preview, root, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		kind, source, BatchAnalyzing, preview, root, now)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -833,6 +833,9 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	if it.plan != nil {
 		in = it.plan.input()
 		in.AlbumID = im.groupAlbum(ctx, it.batchID, it.plan.Group)
+		if in.AlbumID == 0 {
+			in.AlbumID = im.sourceAlbum(ctx, it)
+		}
 	} else { // queued before plans existed
 		in = entryInput(it.rel, info)
 		if info.Tags.AlbumArtist == "" && in.Album != "" {
@@ -879,6 +882,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	if err != nil {
 		return out, err
 	}
+	im.rememberSourceAlbum(ctx, it, res.EntryID)
 	out.trackID, out.entry = res.TrackID, res.EntryID
 	im.sourceOf(ctx, it, asset.ID)
 	switch {

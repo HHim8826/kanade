@@ -61,6 +61,9 @@ type Plan struct {
 	// Chosen marks a new album the user asked for in the preview: files imported before then go
 	// into it too, instead of back to their earlier entries (review #21).
 	Chosen bool `json:"chosen,omitempty"`
+	// DerivedArtist: no file of the group names its album artist; AlbumArtist was worked out from
+	// the songs' artists (or is empty), and may change as more songs of the album come (review #81).
+	DerivedArtist bool `json:"derived_artist,omitempty"`
 
 	// Tagged is what the file's own tags (and folder and file name) said, kept through preview edits:
 	// later imports of the same file are matched by it.
@@ -497,7 +500,8 @@ func defaultPlans(list []probed) []planned {
 			performers[k][t.Artist] = true
 		}
 	}
-	decide := func(k key) string {
+	// decide also says whether the album artist was worked out rather than named by a tag.
+	decide := func(k key) (string, bool) {
 		if len(explicit[k]) > 0 {
 			best, n := "", 0
 			for a, c := range explicit[k] {
@@ -505,17 +509,17 @@ func defaultPlans(list []probed) []planned {
 					best, n = a, c
 				}
 			}
-			return best
+			return best, false
 		}
 		switch len(performers[k]) {
 		case 0:
-			return ""
+			return "", true
 		case 1:
 			for a := range performers[k] {
-				return a
+				return a, true
 			}
 		}
-		return "Various Artists"
+		return "Various Artists", true
 	}
 	// Files without an album tag take one from their album folder: when no file there has one, the
 	// folder names the album, its album artist decided from the files' artists the same way; when
@@ -538,24 +542,26 @@ func defaultPlans(list []probed) []planned {
 		}
 	}
 	groups := map[string]string{}
+	named := map[string]bool{} // groups a file of which names the album artist
 	out := make([]planned, 0, len(list))
 	for _, p := range list {
 		in := entryInput(p.rel, &p.info)
 		root := albumRoot(path.Dir(p.rel))
 		tags := albumsIn[root]
+		derived := p.info.Tags.AlbumArtist == ""
 		switch name := FolderAlbum(root); {
 		case in.Album != "":
 			if p.info.Tags.AlbumArtist == "" {
-				in.AlbumArtist = decide(key{root, in.Album})
+				in.AlbumArtist, derived = decide(key{root, in.Album})
 			}
 		case name == "":
 		case len(tags) == 1:
 			for a := range tags {
 				in.Album = a
 			}
-			in.AlbumArtist = decide(key{root, in.Album})
+			in.AlbumArtist, derived = decide(key{root, in.Album})
 		case len(tags) == 0:
-			in.Album, in.AlbumArtist = name, ""
+			in.Album, in.AlbumArtist, derived = name, "", true
 			switch artists := folderArtists[root]; len(artists) {
 			case 0:
 			case 1:
@@ -575,15 +581,22 @@ func defaultPlans(list []probed) []planned {
 		}
 		plan := Plan{Folder: root, Title: in.Title, Artist: in.Artist, Album: in.Album, AlbumArtist: in.AlbumArtist, Date: in.Date,
 			Disc: max(in.DiscNo, 1), Track: in.TrackNo, Kind: kind,
-			Tagged: library.Tagged{Album: in.Album, AlbumArtist: in.AlbumArtist, Disc: max(in.DiscNo, 1), Track: in.TrackNo}}
+			Tagged: library.Tagged{Album: in.Album, AlbumArtist: in.AlbumArtist, Disc: max(in.DiscNo, 1), Track: in.TrackNo,
+				Derived: in.Album != "" && p.info.Tags.AlbumArtist == ""}}
 		if in.Album != "" {
 			gk := in.Album + "\x1f" + in.AlbumArtist
 			if groups[gk] == "" {
 				groups[gk] = "g" + strconv.Itoa(len(groups)+1)
 			}
 			plan.Group = groups[gk]
+			named[plan.Group] = named[plan.Group] || !derived
 		}
 		out = append(out, planned{p.id, p.rel, plan})
+	}
+	for i := range out {
+		if g := out[i].plan.Group; g != "" {
+			out[i].plan.DerivedArtist = !named[g]
+		}
 	}
 	return out
 }
@@ -687,4 +700,82 @@ func sortedGroups(keys []string) []string {
 		return a < b
 	})
 	return keys
+}
+
+// scopeOf names the album folder of a download batch's file for album_scopes: the download's
+// folder, the album folder in it and the group's album tag. Other batches have none.
+func (im *Importer) scopeOf(ctx context.Context, it *item) string {
+	p := it.plan
+	if it.kind != "download" || p == nil || p.Group == "" || p.Album == "" || p.NewAlbum {
+		return ""
+	}
+	var root string
+	if im.db.QueryRowContext(ctx, `SELECT root FROM import_batches WHERE id = ?`, it.batchID).Scan(&root) != nil || root == "" {
+		return ""
+	}
+	return root + "\x1f" + p.Folder + "\x1f" + cmp.Or(p.Anchor.Album, p.Album)
+}
+
+// sourceAlbum is the album an earlier round of the same download made for the file's album folder
+// and album tag, for the first file of a group (review #81): a download's rounds are imported apart,
+// and the album artist one round works out from its own songs may not be another's. Joining it
+// brings its album artist up to date, as one import of the whole folder would have decided it: one
+// worked out from the songs' artists becomes Various Artists when another artist comes, and gives
+// way to one a song's tag names; one a tag named stays (and a group that names another is another
+// album).
+func (im *Importer) sourceAlbum(ctx context.Context, it *item) int64 {
+	scope := im.scopeOf(ctx, it)
+	if scope == "" {
+		return 0
+	}
+	var id int64
+	var artist string
+	var derived bool
+	err := im.db.QueryRowContext(ctx, `SELECT album_id, artist, derived FROM album_scopes WHERE scope = ?`, scope).Scan(&id, &artist, &derived)
+	if err != nil {
+		if !errors.Is(err, sql.ErrNoRows) {
+			im.log.Warn("album of the download folder", "item", it.id, "err", err)
+		}
+		return 0
+	}
+	album, now, err := im.lib.AlbumNow(ctx, id)
+	if err != nil || album == 0 {
+		return 0
+	}
+	p := it.plan
+	next, nextDerived := artist, derived
+	switch {
+	case !p.DerivedArtist && !derived && p.AlbumArtist != artist:
+		return 0 // a tag names another album artist: another album
+	case !p.DerivedArtist:
+		next, nextDerived = p.AlbumArtist, false
+	case derived && p.AlbumArtist != artist && p.AlbumArtist != "":
+		next = "Various Artists"
+		if artist == "" {
+			next = p.AlbumArtist
+		}
+	}
+	if next != artist || nextDerived != derived {
+		if now == artist {
+			if err := im.lib.ReplaceAlbumArtist(ctx, album, artist, next); err != nil {
+				im.log.Warn("album artist", "album", album, "err", err)
+				return album
+			}
+		}
+		im.db.ExecContext(ctx, `UPDATE album_scopes SET artist = ?, derived = ? WHERE scope = ?`, next, nextDerived, scope)
+	}
+	return album
+}
+
+// rememberSourceAlbum records the album a download's file went to, for later rounds' files of the
+// same album folder (sourceAlbum).
+func (im *Importer) rememberSourceAlbum(ctx context.Context, it *item, entryID int64) {
+	scope := im.scopeOf(ctx, it)
+	if scope == "" || entryID == 0 {
+		return
+	}
+	if _, err := im.db.ExecContext(ctx, `INSERT OR IGNORE INTO album_scopes (scope, album_id, artist, derived, created_at)
+		SELECT ?, album_id, ?, ?, ? FROM album_entries WHERE id = ?`, scope, it.plan.AlbumArtist, it.plan.DerivedArtist, db.Now(), entryID); err != nil {
+		im.log.Warn("remember the album of the download folder", "item", it.id, "err", err)
+	}
 }
