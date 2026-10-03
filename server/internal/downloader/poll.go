@@ -76,6 +76,7 @@ func (s *Service) tick(ctx context.Context) {
 		if r.State == StateDownloading {
 			active = true
 		}
+		s.handBack(ctx, r) // a hand-over that failed, or was cut short by a restart
 	}
 	if !active && !s.lowDisk.Load() { // one download at a time (plan §6); start the oldest queued one that fits
 		for _, r := range list {
@@ -388,11 +389,16 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 		return errors.New("waiting to retry the import")
 	}
 	round := func(f FileView) bool { return f.Selected && f.Round == r.Round && f.Again == 0 }
+	// The round's files go to the new batch; those it fetched again for the import that lost them
+	// are ready to go back to it, which the same write records.
 	mark := func(batch int64) []FileView {
 		files := slices.Clone(r.files)
 		for i := range files {
-			if round(files[i]) {
-				files[i].Batch = batch
+			switch f := &files[i]; {
+			case round(*f):
+				f.Batch = batch
+			case f.Selected && f.Round == r.Round && f.Again != 0:
+				f.Fetched = true
 			}
 		}
 		return files
@@ -411,7 +417,7 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 			r.files = mark(noImport)
 			delete(s.importWait, r.ID)
 			s.log.Info("round has nothing to import", "download", r.ID, "round", r.Round)
-			s.retryAgain(ctx, r)
+			s.handBack(ctx, r)
 			return nil
 		}
 	}
@@ -425,32 +431,69 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 	delete(s.importWait, r.ID)
 	r.ImportBatchID, r.files, r.Error = batch, mark(batch), ""
 	s.log.Info("download complete; import queued", "download", r.ID, "round", r.Round, "batch", batch, "files", n)
-	s.retryAgain(ctx, r)
+	s.handBack(ctx, r)
 	return nil
 }
 
-// retryAgain retries the imports that lost files this round fetched again (Refetch). The retry runs
-// apart: it reads the files from disk and never needs the download's lock.
-func (s *Service) retryAgain(ctx context.Context, r *row) {
-	fetched := map[int64][]string{} // batch -> its files this round fetched again
-	for i := range r.files {
-		if f := &r.files[i]; f.Selected && f.Round == r.Round && f.Again != 0 {
+// handBack retries the imports that lost files a round fetched again (Refetch), apart: the retry
+// reads the files from disk and can call Refetch, which takes the download's lock. A file stays
+// marked until its import has it back in its queue, so a hand-over that fails, or that a restart
+// cuts short, is done again on a later poll (review #66).
+func (s *Service) handBack(ctx context.Context, r *row) {
+	fetched := map[int64][]string{} // batch -> its files fetched again
+	for _, f := range r.files {
+		if f.Selected && f.Again != 0 && f.Fetched {
 			fetched[f.Again] = append(fetched[f.Again], filepath.Join(r.dir, filepath.FromSlash(f.Path)))
-			f.Again = 0
 		}
 	}
-	if len(fetched) == 0 {
+	for b, paths := range fetched {
+		if s.handing[b] || time.Now().Before(s.handWait[b]) {
+			continue
+		}
+		s.handing[b] = true
+		go s.handOver(context.WithoutCancel(ctx), r.ID, b, paths)
+	}
+}
+
+func (s *Service) handOver(ctx context.Context, id, batch int64, paths []string) {
+	res, err := s.imp.RetryFetched(ctx, batch, paths)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.handing, batch)
+	if err == nil {
+		err = s.handedBack(ctx, id, batch, paths)
+	}
+	if err != nil {
+		s.handWait[batch] = time.Now().Add(importRetry)
+		s.log.Warn("hand files fetched again back to their import; trying again", "download", id, "batch", batch, "err", err)
 		return
 	}
-	files, _ := json.Marshal(r.files)
-	s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, updated_at = ? WHERE id = ?`, string(files), db.Now(), r.ID)
-	ctx = context.WithoutCancel(ctx)
-	for b, paths := range fetched {
-		go func() {
-			res, err := s.imp.RetryFetched(ctx, b, paths)
-			s.log.Info("retried the import of files fetched again", "download", r.ID, "batch", b, "requeued", res.Requeued, "err", err)
-		}()
+	delete(s.handWait, batch)
+	s.log.Info("retried the import of files fetched again", "download", id, "batch", batch, "requeued", res.Requeued,
+		"fetching", res.Fetching, "lost", res.Lost)
+}
+
+// handedBack unmarks files the import has back, unless Refetch marked one again meanwhile (lost
+// again, for another round to fetch).
+func (s *Service) handedBack(ctx context.Context, id, batch int64, paths []string) error {
+	r, err := s.load(ctx, id)
+	if err != nil || r == nil {
+		return err
 	}
+	changed := false
+	for i := range r.files {
+		f := &r.files[i]
+		if f.Again == batch && f.Fetched && slices.Contains(paths, filepath.Join(r.dir, filepath.FromSlash(f.Path))) {
+			f.Again, f.Fetched = 0, false
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	files, _ := json.Marshal(r.files)
+	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, updated_at = ? WHERE id = ?`, string(files), db.Now(), id)
+	return err
 }
 
 // endRound finishes a round that is not the last: the round's files are handed to the importer,
@@ -521,7 +564,7 @@ func (s *Service) clearImported(ctx context.Context, r *row) bool {
 	// torrent afresh and fetches those whole.
 	for _, f := range r.files {
 		p := filepath.Join(r.dir, filepath.FromSlash(f.Path))
-		if !keep[p] && !(f.Round > 0 && keepAfterRound(r.files, f)) {
+		if !keep[p] && f.Again == 0 && !(f.Round > 0 && keepAfterRound(r.files, f)) { // fetched again: its import's
 			s.removeUnder(r.dir, p)
 		}
 	}

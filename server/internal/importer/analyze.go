@@ -177,11 +177,48 @@ func (im *Importer) expandZips(ctx context.Context, batchID int64, kind string) 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		under := dir + string(filepath.Separator)
 		if err != nil {
 			os.RemoveAll(dir)
-			im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE id = ?`, StateFailed, err.Error(), db.Now(), z.id)
+			now := db.Now()
+			im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE id = ?`, StateFailed, err.Error(), now, z.id)
+			// Files of it to be made again cannot be (review #65).
+			im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE batch_id = ? AND state = 'pending'
+				AND source_kind = '' AND substr(local_path, 1, length(?)) = ?`, StateFailed, "its archive could not be unpacked: "+err.Error(),
+				now, batchID, under, under)
 			continue
 		}
+		// Unpacked again (a retry, review #65): the files go back to the items they were, keeping their
+		// plans; those in the library already, or left out, are not imported again. A file converted
+		// before is converted again, and a disc image cut before is cut again.
+		type earlier struct {
+			id    int64
+			state string
+		}
+		before := map[string]earlier{}
+		rows, err := im.db.QueryContext(ctx, `SELECT i.id, i.state, CASE WHEN i.source_kind = ? THEN i.source_path ELSE i.local_path END,
+			EXISTS (SELECT 1 FROM import_items c WHERE c.batch_id = i.batch_id AND c.source_kind = ? AND c.source_path = i.local_path
+				AND `+KeepsSource("c")+`)
+			FROM import_items i WHERE i.batch_id = ? AND i.source_kind IN ('', ?)
+			AND (substr(i.local_path, 1, length(?)) = ? OR substr(i.source_path, 1, length(?)) = ?)`,
+			SourceConverted, SourceSplit, batchID, SourceConverted, under, under, under, under)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var e earlier
+			var p string
+			var unsavedCuts bool
+			if err := rows.Scan(&e.id, &e.state, &p, &unsavedCuts); err != nil {
+				rows.Close()
+				return err
+			}
+			if e.state == StateSplit && !unsavedCuts {
+				e.state = StatePublished // every song cut from it is in the library or let go of
+			}
+			before[p] = e
+		}
+		rows.Close()
 		base := strings.TrimSuffix(z.rel, path.Ext(z.rel))
 		tx, err := im.db.BeginTx(ctx, nil)
 		if err != nil {
@@ -197,8 +234,18 @@ func (im *Importer) expandZips(ctx context.Context, batchID int64, kind string) 
 			case !audioExt[ext]:
 				continue // lyrics and pictures are read next to the audio
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp, updated_at)
-				VALUES (?, ?, ?, 'pending', ?, 1, ?)`, batchID, filepath.Join(dir, filepath.FromSlash(f)), base+"/"+f, role, now); err != nil {
+			p := filepath.Join(dir, filepath.FromSlash(f))
+			e, ok := before[p]
+			switch {
+			case ok && (saved(e.state) || e.state == StateExcluded || e.state == StateDiscarded):
+			case ok:
+				_, err = tx.ExecContext(ctx, `UPDATE import_items SET local_path = ?, source_path = '', source_kind = '', source_sha256 = '',
+					source_size = 0, state = 'pending', error = '', info = NULL, updated_at = ? WHERE id = ?`, p, now, e.id)
+			default:
+				_, err = tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp, updated_at)
+					VALUES (?, ?, ?, 'pending', ?, 1, ?)`, batchID, p, base+"/"+f, role, now)
+			}
+			if err != nil {
 				tx.Rollback()
 				return err
 			}

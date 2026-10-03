@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -98,28 +99,42 @@ func (im *Importer) pendingAudio(ctx context.Context, batchID int64) ([]audioIte
 	return out, rows.Err()
 }
 
-// splitCues cuts each disc image that a CUE sheet of the batch describes into songs.
+// splitCues cuts each disc image that a CUE sheet of the batch describes into songs. A sheet already
+// imported is read again only for an image cut before whose songs are to be made again (review #65).
 func (im *Importer) splitCues(ctx context.Context, batchID int64) error {
-	rows, err := im.db.QueryContext(ctx, `SELECT local_path, rel_path FROM import_items WHERE batch_id = ? AND role = ?
-		AND state = 'pending' AND lower(rel_path) LIKE '%.cue'`, batchID, RoleSidecar)
+	rows, err := im.db.QueryContext(ctx, `SELECT local_path, rel_path, state = 'pending' FROM import_items WHERE batch_id = ? AND role = ?
+		AND state NOT IN (?, ?) AND lower(rel_path) LIKE '%.cue'`, batchID, RoleSidecar, StateExcluded, StateDiscarded)
 	if err != nil {
 		return err
 	}
-	type cueItem struct{ path, rel string }
+	type cueItem struct {
+		path, rel string
+		pending   bool
+	}
 	var cues []cueItem
 	for rows.Next() {
 		var c cueItem
-		if err := rows.Scan(&c.path, &c.rel); err != nil {
+		if err := rows.Scan(&c.path, &c.rel, &c.pending); err != nil {
 			rows.Close()
 			return err
 		}
 		cues = append(cues, c)
 	}
 	rows.Close()
+	cutBefore, err := im.strings(ctx, `SELECT DISTINCT source_path FROM import_items WHERE batch_id = ? AND source_kind = ?`, batchID, SourceSplit)
+	if err != nil {
+		return err
+	}
 	for _, c := range cues {
 		audio, err := im.pendingAudio(ctx, batchID)
 		if err != nil {
 			return err
+		}
+		if !c.pending {
+			audio = slices.DeleteFunc(audio, func(a audioItem) bool { return !slices.Contains(cutBefore, a.path) })
+			if len(audio) == 0 {
+				continue
+			}
 		}
 		data, err := os.ReadFile(c.path)
 		if err != nil || len(data) > 1<<20 {
@@ -189,6 +204,9 @@ func safeName(s string) string {
 func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioItem, sheet *cueSheet, f cueFile) error {
 	fail := func(msg string) error {
 		im.itemFailed(ctx, img.id, StateFailed, msg)
+		// Songs of it to be made again cannot be (review #65).
+		im.db.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE batch_id = ? AND source_kind = ?
+			AND source_path = ? AND state = 'pending'`, StateFailed, "its disc image could not be cut: "+msg, db.Now(), batchID, SourceSplit, img.path)
 		return nil
 	}
 	if im.FFmpeg == nil {
@@ -321,20 +339,64 @@ func (im *Importer) splitImage(ctx context.Context, batchID int64, img *audioIte
 		return fail("the disc image does not match its own checksum: the file is damaged")
 	}
 
+	// Cut again (a retry, review #65): the songs go back to the items they were, keeping their plans;
+	// those in the library already, or left out, are not imported again.
+	type earlier struct {
+		id    int64
+		state string
+	}
+	before := map[library.SourcePiece]earlier{}
+	rows, err := im.db.QueryContext(ctx, `SELECT id, state, source_piece, source_cut FROM import_items WHERE batch_id = ?
+		AND source_kind = ? AND source_path = ?`, batchID, SourceSplit, img.path)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var e earlier
+		var p library.SourcePiece
+		if err := rows.Scan(&e.id, &e.state, &p.Number, &p.Cut); err != nil {
+			rows.Close()
+			return err
+		}
+		before[p] = e
+	}
+	rows.Close()
 	tx, err := im.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 	now := db.Now()
+	kept := []any{StateDiscarded, "the corrected CUE sheet cuts it differently", now, batchID, SourceSplit, img.path}
 	for i, d := range dsts {
 		rel := path.Join(path.Dir(img.rel), filepath.Base(d))
-		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp,
-			source_path, source_kind, source_sha256, source_size, source_piece, source_cut, drive_parent, updated_at)
-			VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, outputs[i].Number, outputs[i].Cut, img.driveParent, now); err != nil {
-			return err
+		e, ok := before[outputs[i]]
+		switch {
+		case ok && (saved(e.state) || e.state == StateExcluded || e.state == StateDiscarded):
+			os.Remove(d)
+		case ok:
+			if _, err := tx.ExecContext(ctx, `UPDATE import_items SET local_path = ?, rel_path = ?, state = 'pending', error = '',
+				info = NULL, source_sha256 = ?, source_size = ?, updated_at = ? WHERE id = ?`, d, rel, sha, size, now, e.id); err != nil {
+				return err
+			}
+			kept = append(kept, e.id)
+		default:
+			r, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, temp,
+				source_path, source_kind, source_sha256, source_size, source_piece, source_cut, drive_parent, updated_at)
+				VALUES (?, ?, ?, 'pending', ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				batchID, d, rel, RoleAudio, img.path, SourceSplit, sha, size, outputs[i].Number, outputs[i].Cut, img.driveParent, now)
+			if err != nil {
+				return err
+			}
+			id, _ := r.LastInsertId()
+			kept = append(kept, id)
 		}
+	}
+	// A song cut before by a sheet since corrected, waiting to be made again, is not one this sheet
+	// cuts: it is let go of.
+	if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE batch_id = ? AND source_kind = ?
+		AND source_path = ? AND state = 'pending' AND id NOT IN (0`+strings.Repeat(", ?", len(kept)-6)+`)`, kept...); err != nil {
+		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE id = ?`,
 		StateSplit, fmt.Sprintf("split into %d songs by the CUE sheet", len(dsts)), now, img.id); err != nil {

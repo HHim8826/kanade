@@ -306,3 +306,75 @@ func TestLostFilesFetchedAgain(t *testing.T) {
 		})
 	}
 }
+
+// Files fetched again stay marked for the import that lost them until it has them back in its
+// queue: a hand-over that fails is done again later, and a service started afresh (a restart) does
+// it too; the user does not have to retry again (review #66).
+func TestFetchedAgainSurvivesFailedHandOver(t *testing.T) {
+	old := importRetry
+	importRetry = 300 * time.Millisecond
+	t.Cleanup(func() { importRetry = old })
+	r := newRigWith(t, 10<<20, map[string]string{"A/rip.log": "Exact Audio Copy V1.0 beta 3 from 29. August 2011\n"}, false)
+	id := r.add(t, nil)
+	var first int64
+	waitFor(t, "handed over", 30*time.Second, func() bool {
+		v, _ := r.svc.Get(r.ctx, id)
+		first = v.ImportBatchID
+		return first != 0 && v.State != StateDownloading
+	})
+	dir := filepath.Join(r.tmp, "downloads", fmt.Sprint(id), "Box", "A")
+	for _, name := range []string{"rip.log", "02 tone.mp3"} {
+		os.Remove(filepath.Join(dir, name))
+	}
+	go r.imp.Run(r.ctx)
+	waitFor(t, "imported", 60*time.Second, func() bool { return r.finished(id) })
+	if _, err := r.d.Exec(`CREATE TRIGGER deny_handoff BEFORE UPDATE OF error ON import_items WHEN NEW.error = 'fetched again'
+		BEGIN SELECT RAISE(ABORT, 'simulated transient hand-over failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if res, err := r.imp.Retry(r.ctx, first); err != nil || res.Fetching != 2 {
+		t.Fatalf("retry %+v %v", res, err)
+	}
+	marked := func() (again, fetched int) {
+		row, _ := r.svc.load(r.ctx, id)
+		for _, f := range row.files {
+			if f.Again == first {
+				again++
+				if f.Fetched {
+					fetched++
+				}
+			}
+		}
+		return
+	}
+	waitFor(t, "fetched again", 60*time.Second, func() bool { _, n := marked(); return n == 2 })
+	time.Sleep(time.Second) // a few hand-overs, each refused
+	if again, _ := marked(); again != 2 {
+		t.Fatalf("marks after failed hand-overs: %d", again)
+	}
+	if b, _ := r.imp.Batch(r.ctx, first); b.State != "done" || b.Counts["failed"] != 2 {
+		t.Fatalf("batch %s %v", b.State, b.Counts)
+	}
+	// A service started afresh on the same database (a restart) hands them over once it can; the
+	// running one is held off, so the fresh one is what does it.
+	r.svc.mu.Lock()
+	r.svc.handWait[first] = time.Now().Add(time.Hour)
+	r.svc.mu.Unlock()
+	time.Sleep(500 * time.Millisecond) // a hand-over under way ends (refused)
+	r.d.Exec(`DROP TRIGGER deny_handoff`)
+	fresh := NewService(r.d, nil, r.imp, filepath.Join(r.tmp, "downloads"), 10<<20, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	row, _ := fresh.load(r.ctx, id)
+	fresh.mu.Lock()
+	fresh.handBack(r.ctx, row)
+	fresh.mu.Unlock()
+	waitFor(t, "imported again", 60*time.Second, func() bool {
+		b, _ := r.imp.Batch(r.ctx, first)
+		again, _ := marked()
+		return b.State == "done" && b.Counts["failed"] == 0 && b.Counts["pending"] == 0 && again == 0
+	})
+	var logs int
+	r.d.QueryRow(`SELECT count(*) FROM sidecars WHERE kind = 'log'`).Scan(&logs)
+	if logs != 1 {
+		t.Fatalf("rip logs %d", logs)
+	}
+}

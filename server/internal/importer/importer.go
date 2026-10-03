@@ -17,6 +17,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -213,11 +214,13 @@ type RetryResult struct {
 // edits included, and new songs get groups of their own. Sidecars that found no album are tried
 // again with the rest. An upload that failed resumes where it stopped.
 //
-// A failed file whose source is gone is not queued only to fail again (review #57): when another
-// import has the same file in the library (a later round of a download brought an earlier round's
-// CUE sheet again), it is marked a duplicate; when it came from a download, Refetch has the
-// download fetch it again, and the download retries the batch once it has it; otherwise it stays
-// failed and says how to get it back.
+// A failed file whose source is gone is not queued only to fail again (review #57): when the
+// library still has the same file from another import (a later round of a download brought an
+// earlier round's CUE sheet again), it is marked a duplicate; when it came from a download, Refetch
+// has the download fetch it again, and the download retries the batch once it has it; otherwise it
+// stays failed and says how to get it back. A file made here (converted, cut from a disc image,
+// unpacked from an archive) is made again from what it was made from, and when that is gone too,
+// that is what the download fetches again (review #65).
 func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, error) {
 	var res RetryResult
 	var kind string
@@ -228,46 +231,75 @@ func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, erro
 	if err != nil {
 		return res, err
 	}
-	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, source_path, drive_id, error FROM import_items
-		WHERE batch_id = ? AND state = 'failed'`, batchID)
+	rows, err := im.db.QueryContext(ctx, `SELECT id, role, local_path, source_path, source_kind, source_sha256, source_size,
+		source_piece, source_cut, drive_id, error FROM import_items WHERE batch_id = ? AND state = 'failed'`, batchID)
 	if err != nil {
 		return res, err
 	}
-	type file struct {
-		id   int64
-		path string
-	}
 	// A file is gone when it is not there, or was not when the import failed: whatever is there now
 	// was not checked (aria2 may have written a fragment of it for a later round's pieces).
-	var missing []file
+	var lost []lostFile
 	for rows.Next() {
-		var f file
-		var source, driveID, why string
-		if err := rows.Scan(&f.id, &f.path, &source, &driveID, &why); err != nil {
+		var f lostFile
+		var driveID, why string
+		if err := rows.Scan(&f.id, &f.role, &f.path, &f.origin, &f.made, &f.sha, &f.size, &f.piece.Number, &f.piece.Cut,
+			&driveID, &why); err != nil {
 			rows.Close()
 			return res, err
 		}
-		if driveID != "" || (source != "" && exists(source)) {
-			continue // an inbox file is fetched from Drive again; a cut or converted one made again
+		if driveID != "" {
+			continue // an inbox file is fetched from Drive again
 		}
-		if !exists(f.path) || strings.Contains(why, syscall.ENOENT.Error()) || strings.HasPrefix(why, msgFetching) ||
-			strings.HasPrefix(why, msgGone) {
-			missing = append(missing, f)
+		if exists(f.path) && !strings.Contains(why, syscall.ENOENT.Error()) && !strings.HasPrefix(why, msgFetching) &&
+			!strings.HasPrefix(why, msgGone) {
+			continue
 		}
+		if f.made == "" {
+			f.origin = f.path
+		}
+		lost = append(lost, f)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return res, err
 	}
+	var missing, remake []lostFile
+	for _, f := range lost {
+		if f.made != "" && exists(f.origin) {
+			remake = append(remake, f)
+			continue
+		}
+		// Unpacked here from an archive (itself, or what it was made from): the archive.
+		if id := im.zipOf(batchID, f.origin); id != 0 {
+			var zip string
+			err := im.db.QueryRowContext(ctx, `SELECT local_path FROM import_items WHERE id = ? AND batch_id = ? AND role = ?`,
+				id, batchID, RoleZip).Scan(&zip)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return res, err
+			}
+			if err == nil {
+				f.zip, f.origin = id, zip
+				if exists(zip) {
+					remake = append(remake, f)
+					continue
+				}
+			}
+		}
+		missing = append(missing, f)
+	}
 	now := db.Now()
-	var gone []file
-	for _, f := range missing {
-		var saved int
-		if err := im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items WHERE local_path = ? AND id != ?
-			AND state IN ('published', 'duplicate')`, f.path, f.id).Scan(&saved); err != nil {
+	for _, f := range remake {
+		if err := im.remake(ctx, batchID, f); err != nil {
 			return res, err
 		}
-		if saved == 0 {
+	}
+	var gone []lostFile
+	for _, f := range missing {
+		saved, err := im.savedElsewhere(ctx, f)
+		if err != nil {
+			return res, err
+		}
+		if !saved {
 			gone = append(gone, f)
 			continue
 		}
@@ -279,9 +311,11 @@ func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, erro
 	}
 	held := []any{now, batchID, BatchDone}
 	if len(gone) > 0 {
-		paths := make([]string, len(gone))
-		for i, f := range gone {
-			paths[i] = f.path
+		var paths []string
+		for _, f := range gone {
+			if !slices.Contains(paths, f.origin) {
+				paths = append(paths, f.origin)
+			}
 		}
 		why := errors.New("nothing keeps a copy of it")
 		if kind == "download" && im.Refetch != nil {
@@ -338,12 +372,100 @@ func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, erro
 	return res, nil
 }
 
+// lostFile is a failed item whose file is gone.
+type lostFile struct {
+	id         int64
+	role, path string
+	made       string // converted, split, or "" (a file as it was found)
+	// origin is what it is made again from: for a converted or cut file the original or disc image;
+	// for a file unpacked here from an archive (or made from one that was), the archive (zip, its
+	// item); else the file itself.
+	origin string
+	zip    int64
+	sha    string // of what it was converted or cut from
+	size   int64
+	piece  library.SourcePiece
+}
+
+// zipOf is the archive item a file unpacked into the batch's work folder came from: they are
+// unpacked into work/<batch>/<archive item>/.
+func (im *Importer) zipOf(batchID int64, p string) int64 {
+	rel, err := filepath.Rel(im.workDir(batchID), p)
+	if err != nil || !filepath.IsLocal(rel) {
+		return 0
+	}
+	first, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+	id, _ := strconv.ParseInt(first, 10, 64)
+	return id
+}
+
+// remake has a lost file made again by the batch's next analysis, from what it was made from
+// (review #65): a converted file goes back to its original, to be converted again; the disc image of
+// a cut song is cut again, and the archive of an unpacked file unpacked again, where analysis gives
+// the files it makes back to the items they were (keeping their plans).
+func (im *Importer) remake(ctx context.Context, batchID int64, f lostFile) error {
+	var err error
+	now := db.Now()
+	switch {
+	case f.zip != 0:
+		_, err = im.db.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
+			WHERE id = ? AND batch_id = ? AND state = ?`, now, f.zip, batchID, StateExpanded)
+	case f.made == SourceConverted:
+		_, err = im.db.ExecContext(ctx, `UPDATE import_items SET local_path = source_path, source_path = '', source_kind = '',
+			source_sha256 = '', source_size = 0, temp = ?, info = NULL, updated_at = ? WHERE id = ?`,
+			im.inWork(batchID, f.origin), now, f.id)
+	case f.made == SourceSplit:
+		_, err = im.db.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
+			WHERE batch_id = ? AND local_path = ? AND source_kind = '' AND state = ?`, now, batchID, f.origin, StateSplit)
+	}
+	return err
+}
+
+func (im *Importer) inWork(batchID int64, p string) bool {
+	rel, err := filepath.Rel(im.workDir(batchID), p)
+	return err == nil && filepath.IsLocal(rel)
+}
+
+// savedElsewhere reports whether the library has a lost file from another import and still has
+// it, not merely had it (review #67): a song made from a source has that piece of it in the library,
+// on a verified asset a song uses; a file imported as it is was imported by another item whose
+// asset (verified, used by a song) or, for a CUE sheet or log, album copy is still there.
+func (im *Importer) savedElsewhere(ctx context.Context, f lostFile) (bool, error) {
+	var n int
+	var err error
+	switch {
+	case f.made != "":
+		if f.sha == "" {
+			return false, nil
+		}
+		return im.lib.SourceComplete(ctx, f.sha, f.size, []library.SourcePiece{f.piece})
+	case f.zip != 0:
+		return false, nil // unpacked here: another import has it under another path
+	case f.role == RoleSidecar:
+		err = im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i WHERE i.local_path = ? AND i.id != ?
+			AND i.state IN ('published', 'duplicate') AND i.sha256 != ''
+			AND EXISTS (SELECT 1 FROM sidecars s WHERE s.sha256 = i.sha256 AND s.album_id IS NOT NULL)`, f.path, f.id).Scan(&n)
+	default:
+		err = im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i JOIN assets a ON a.id = i.asset_id
+			WHERE i.local_path = ? AND i.id != ? AND i.state IN ('published', 'duplicate') AND a.state = ?
+			AND EXISTS (SELECT 1 FROM track_assets ta WHERE ta.asset_id = a.id)`, f.path, f.id, library.AssetVerified).Scan(&n)
+	}
+	return n > 0, err
+}
+
 // RetryFetched retries a batch after its download fetched the files (local paths) it had lost
-// again, checked against the torrent: they are imported as they are now.
+// again, checked against the torrent: they are imported as they are now, and what was made from
+// them is made again.
 func (im *Importer) RetryFetched(ctx context.Context, batchID int64, paths []string) (RetryResult, error) {
+	now := db.Now()
 	for _, p := range paths {
+		var zip int64
+		im.db.QueryRowContext(ctx, `SELECT id FROM import_items WHERE batch_id = ? AND role = ? AND local_path = ?`, batchID, RoleZip, p).Scan(&zip)
+		dir := filepath.Join(im.workDir(batchID), strconv.FormatInt(zip, 10)) + string(filepath.Separator)
 		if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET error = 'fetched again', updated_at = ?
-			WHERE batch_id = ? AND local_path = ? AND state = 'failed'`, db.Now(), batchID, p); err != nil {
+			WHERE batch_id = ? AND state = 'failed' AND (local_path = ?3 OR source_path = ?3
+				OR (?4 > 0 AND (substr(local_path, 1, length(?5)) = ?5 OR substr(source_path, 1, length(?5)) = ?5)))`,
+			now, batchID, p, zip, dir); err != nil {
 			return RetryResult{}, err
 		}
 	}
@@ -355,6 +477,24 @@ const (
 	msgFetching = "the file was gone: its download is fetching it again, then it is imported"
 	msgGone     = "the file is gone and cannot be had again here"
 )
+
+// strings reads a query's one text column.
+func (im *Importer) strings(ctx context.Context, query string, args ...any) ([]string, error) {
+	rows, err := im.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
 
 func exists(p string) bool {
 	_, err := os.Stat(p)

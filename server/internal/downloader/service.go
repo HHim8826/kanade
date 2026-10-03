@@ -62,8 +62,10 @@ type FileView struct {
 	Round     int    `json:"round,omitempty"` // the round that fetches it (review #28); 0: not yet
 	Batch     int64  `json:"batch,omitempty"` // the import batch its round made
 	// Again is the import batch to retry when a round has fetched the file again: it was lost after
-	// that batch had it (review #57). Its own Batch stays.
-	Again int64 `json:"again,omitempty"`
+	// that batch had it (review #57). Its own Batch stays. Fetched: its round has it; it stays marked
+	// until that import has it back in its queue (review #66).
+	Again   int64 `json:"again,omitempty"`
+	Fetched bool  `json:"fetched,omitempty"`
 }
 
 type View struct {
@@ -107,11 +109,16 @@ type Service struct {
 	kick    chan struct{}
 
 	importWait map[int64]time.Time // a failed hand-over to the importer is tried again after this (under mu)
+	// Files fetched again are handed back to their import apart (review #66): the batches being
+	// handed now, and when a failed hand-over is tried again (under mu).
+	handing  map[int64]bool
+	handWait map[int64]time.Time
 }
 
 // NewService makes the service with a budget of its own; ShareBudget puts it on the shared one.
 func NewService(d *sql.DB, aria *Aria2, imp *importer.Importer, root string, budget, reserve int64, log *slog.Logger) *Service {
-	s := &Service{db: d, aria: aria, imp: imp, root: root, log: log, kick: make(chan struct{}, 1), importWait: map[int64]time.Time{}}
+	s := &Service{db: d, aria: aria, imp: imp, root: root, log: log, kick: make(chan struct{}, 1), importWait: map[int64]time.Time{},
+		handing: map[int64]bool{}, handWait: map[int64]time.Time{}}
 	s.ShareBudget(&staging.Budget{Limit: budget, Reserve: reserve, Dir: root, Free: freeSpace})
 	return s
 }
@@ -1030,7 +1037,7 @@ func (s *Service) Refetch(ctx context.Context, batchID int64, paths []string) er
 		if i < 0 {
 			return fmt.Errorf("%s is not a file of its download", filepath.Base(p))
 		}
-		r.files[i].Round, r.files[i].Again = 0, batchID
+		r.files[i].Round, r.files[i].Again, r.files[i].Fetched = 0, batchID, false
 	}
 	var other int64
 	if s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE info_hash = ? AND id != ? AND state NOT IN (?, ?, ?)`,
