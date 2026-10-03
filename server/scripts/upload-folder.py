@@ -45,7 +45,7 @@ def parse(raw):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("folder")
-    ap.add_argument("--server", default="https://music.ser1ka.com")
+    ap.add_argument("--server", default=os.environ.get("KANADE_SERVER", "http://localhost:8080"))
     ap.add_argument("--token")
     ap.add_argument("--token-file")
     ap.add_argument("--stop-after-chunks", type=int, default=0, help="simulate a dropped connection")

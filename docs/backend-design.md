@@ -382,10 +382,25 @@ DIR/
   - 登入頁確定能否使用 passkey（最多等 3 秒）後才一次顯示完整表單；設定頁同時讀取服務、Drive、passkey（各最多 10 秒，Drive 已連線才讀同步狀態），確定後依固定順序一次顯示，之後的重試與輪詢只更新各自的區塊（#62）。`api()` 新增 `timeout`。
   - RSS 尚未下載的列不再顯示「0」（#55）；外觀設定移除「只記在這個瀏覽器。」（#56）；VGMdb 匯入的搜尋步驟加上「用 Google 搜尋 VGMdb」（`site:vgmdb.net`，以 URLSearchParams 編碼，#63）。
 
+### 發佈與安裝腳本（2026-10-03）
+
+- 設定改放資料目錄的 `config.json`（`listen`、`public_url`、`aria2`），由 `kanade config set` 寫入並檢查格式；`serve` 依「內建預設 → config.json → 參數」決定。內建的公開網址改為 `http://localhost:8080`，不再寫死 music.ser1ka.com。正式環境的設定已寫進 `var/config.json`。首頁與隱私權頁以設定的網址顯示站名（`{{SITE}}`）。
+- 新指令：`kanade version`（版本在編譯時以 `-X main.version` 帶入，`/status` 也回報）、`kanade backup FILE`（`VACUUM INTO`，服務執行中也一致，0600）、`kanade config`。
+- 發佈（`.github/workflows/release.yml`）：推送 `v*` 標籤時，安裝 aria2 與 FFmpeg 跑完 vet 與測試，以 `CGO_ENABLED=0 -trimpath` 編譯 linux/amd64、arm64，發佈 `kanade-linux-<arch>.tar.gz`、`SHA256SUMS`、`VERSION`、`kanade.sh`；含連字號的標籤為 pre-release。手動執行只產生 artifact。
+- 安裝與管理腳本（`scripts/kanade.sh`，安裝後為 `kanade-manager`），仿 OpenList 的一鍵腳本：
+  - 需要 root、curl、tar、sha256sum；支援 amd64、arm64；服務用 systemd（`kanade` 系統帳號、`ProtectSystem=full`、資料目錄可寫、`KillMode=mixed` 讓 Kanade 自己停 aria2）或 OpenRC，兩者都沒有時在背景執行（以 `exec` 脫離腳本，不占住終端或管線），有 crontab 時可加 @reboot。
+  - 安裝：詢問安裝位置、連線方式（網域＋反向代理，只聽 127.0.0.1；或直接用 IP，聽 0.0.0.0，但 Google 授權與 passkey 需要 https 網域）、連接埠、管理員帳號、GitHub 代理；以套件管理員安裝 aria2 與 FFmpeg（可略過）；下載後核對 SHA-256；程式屬於 root，只有資料目錄屬於服務帳號（0700）；隨機產生管理員密碼並只顯示一次；在保留資料的位置重裝時沿用原有帳號。
+  - 更新：比對 `VERSION`，先備份資料庫，換上新程式後 30 秒內沒有回應就退回舊版。解除安裝預設保留資料，輸入 DELETE 才刪除（連同系統帳號）。另有狀態、啟停、記錄、重設密碼、修改網址、備份與還原（還原前先另存目前的資料庫）。
+  - `KANADE_YES` 等環境變數可不經詢問安裝；`KANADE_RELEASE_URL` 可改從其他位置下載（測試用）。
+  - 驗證：shellcheck、actionlint；本機以 root 在背景模式實測安裝（自動與互動）、啟動、狀態、以印出的密碼登入、重設密碼、備份、更新、更新失敗自動退回、在保留資料的位置重裝、從選單還原、解除安裝（保留與刪除資料）；systemd 單元以 `systemd-analyze verify` 檢查（這台容器沒有 systemd，未實際啟動）；OpenRC 未測。
+- 重啟服務會讓做種中的任務結束（aria2 的 session 不保存做種中的任務），更新時的提示已說明；尚未修正。
+- 刪除 `spikes/p0-drive`（P0 的一次性實驗，結果在 `docs/p0-checklist.md`）。
+
 ## 使用方式（開發環境）
 
 ```bash
-# 啟動（工作目錄 server/）；日誌寫到 var/logs/kanade.log，server.log 只留啟動前的輸出
+# 啟動（工作目錄 server/）；日誌寫到 var/logs/kanade.log，server.log 只留啟動前的輸出。
+# 公開網址與監聽位址在 var/config.json（kanade config 查看、kanade config set 修改）。
 KANADE_DATA=/data/music-platform/var nohup ./bin/kanade serve >> /data/music-platform/var/server.log 2>&1 &
 # 帳號
 printf '%s\n' '新密碼至少10字' | KANADE_DATA=... ./bin/kanade user passwd admin

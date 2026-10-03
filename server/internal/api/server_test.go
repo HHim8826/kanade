@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/HHim8826/kanade/server/internal/auth"
@@ -274,5 +275,16 @@ func TestEditUndoEndpoints(t *testing.T) {
 	}
 	if rec := do(t, h, "POST", "/api/v1/albums/1/merge", token, map[string]int{"into": 1}); rec.Code != http.StatusBadRequest {
 		t.Fatalf("self merge: %d", rec.Code)
+	}
+}
+
+// The landing and privacy pages name the site they are served from.
+func TestPagesNameTheSite(t *testing.T) {
+	_, h := newTestServer(t) // public URL https://music.example
+	for _, path := range []string{"/", "/privacy"} {
+		body := do(t, h, "GET", path, "", nil).Body.String()
+		if !strings.Contains(body, "music.example") || strings.Contains(body, "{{SITE}}") || strings.Contains(body, "ser1ka") {
+			t.Fatalf("%s: %s", path, body)
+		}
 	}
 }

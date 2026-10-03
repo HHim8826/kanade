@@ -1,0 +1,77 @@
+# Builds Kanade for Linux and publishes a release when a version tag (v1.2.3) is pushed. Run by
+# hand (workflow_dispatch), it builds the same files as an artifact without releasing them.
+#
+# Release files, which scripts/kanade.sh downloads:
+#   kanade-linux-amd64.tar.gz, kanade-linux-arm64.tar.gz   the program
+#   SHA256SUMS                                              their checksums
+#   VERSION                                                 the tag, for update checks
+#   kanade.sh                                               the install and manage script
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Tools for the tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq aria2 ffmpeg
+
+      - name: Test
+        working-directory: server
+        env:
+          KANADE_ARIA2: /usr/bin/aria2c
+        run: |
+          go vet ./...
+          go test -count=1 ./...
+
+      - name: Build
+        working-directory: server
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            version="$GITHUB_REF_NAME"
+          else
+            version="dev-${GITHUB_SHA::7}"
+          fi
+          mkdir -p ../dist
+          for arch in amd64 arm64; do
+            out="../dist/kanade-linux-$arch"
+            mkdir -p "$out"
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$version" -o "$out/kanade" ./cmd/kanade
+            cp ../README.md "$out/"
+            tar -C "$out" -czf "../dist/kanade-linux-$arch.tar.gz" kanade README.md
+            rm -rf "$out"
+          done
+          cp ../scripts/kanade.sh ../dist/
+          echo "$version" > ../dist/VERSION
+          cd ../dist && sha256sum kanade-linux-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+
+      - name: Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pre=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && pre=(--prerelease) # v1.2.3-rc1 and the like
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Kanade $GITHUB_REF_NAME" --generate-notes "${pre[@]}"
+
+      - name: Artifact
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: kanade-${{ github.sha }}
+          path: dist/

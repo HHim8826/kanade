@@ -41,15 +41,23 @@ import (
 	"github.com/HHim8826/kanade/server/internal/uploads"
 )
 
+// version is set at build time (-ldflags "-X main.version=v1.2.3"); releases are tagged so.
+var version = "dev"
+
 const usage = `usage: kanade [-data DIR] <command>
 
   serve [-listen ADDR] [-public-url URL]   run the service
   user add NAME                             create an account (password on stdin)
   user passwd NAME                          set a password (password on stdin)
+  config                                    show the settings kept in the data directory
+  config set KEY VALUE                      change one: listen, public_url or aria2 ("" for the default)
+  backup FILE                               copy the database to FILE while the service runs
   google client FILE                        load the OAuth client JSON from Google Cloud
-  google token FILE                         load an existing token (from the P0 spike)
+  google token FILE                         load an existing OAuth token
+  version                                   print the version
 
-The data directory defaults to $KANADE_DATA, then ./data.
+The data directory defaults to $KANADE_DATA, then ./data. Its config.json holds the settings;
+the flags of serve override them for one run.
 `
 
 func main() {
@@ -70,7 +78,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	cfg := config.Config{DataDir: *dataDir, Listen: "127.0.0.1:8080", PublicURL: "https://music.ser1ka.com",
+	cfg := config.Config{DataDir: *dataDir, Listen: "127.0.0.1:8080", PublicURL: "http://localhost:8080",
 		Aria2Path: defaultAria2()}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -83,6 +91,12 @@ func main() {
 		err = userCmd(ctx, cfg, args[1:])
 	case "google":
 		err = googleCmd(ctx, cfg, args[1:])
+	case "config":
+		err = configCmd(cfg, args[1:])
+	case "backup":
+		err = backupCmd(ctx, cfg, args[1:])
+	case "version":
+		fmt.Println("kanade", version)
 	default:
 		global.Usage()
 		os.Exit(2)
@@ -94,6 +108,9 @@ func main() {
 }
 
 func serve(ctx context.Context, cfg config.Config, args []string) error {
+	if err := cfg.Apply(); err != nil { // config.json, then the flags over it
+		return err
+	}
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	fs.StringVar(&cfg.Listen, "listen", cfg.Listen, "listen address")
 	fs.StringVar(&cfg.PublicURL, "public-url", cfg.PublicURL, "public base URL (OAuth redirect)")
@@ -198,7 +215,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 		DL: downloads, UL: ups, Log: log}
 	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget}
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
-		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log,
+		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
@@ -284,6 +301,58 @@ func userCmd(ctx context.Context, cfg config.Config, args []string) error {
 		return err
 	}
 	fmt.Println("password updated; existing logins were ended")
+	return nil
+}
+
+// configCmd shows or changes the settings in the data directory's config.json.
+func configCmd(cfg config.Config, args []string) error {
+	switch {
+	case len(args) == 0:
+		if err := cfg.Apply(); err != nil {
+			return err
+		}
+		out, _ := json.MarshalIndent(map[string]string{"data": cfg.DataDir, "listen": cfg.Listen, "public_url": cfg.PublicURL,
+			"aria2": cfg.Aria2Path}, "", "  ")
+		fmt.Println(string(out))
+		return nil
+	case len(args) == 3 && args[0] == "set":
+		if err := cfg.Set(args[1], args[2]); err != nil {
+			return err
+		}
+		fmt.Printf("%s set; restart the service to use it\n", args[1])
+		return nil
+	}
+	return errors.New("usage: config [set KEY VALUE]")
+}
+
+// backupCmd copies the database, consistent while the service runs (VACUUM INTO). The Google
+// account, the OAuth client and the signing keys are in it; the music is in Drive.
+func backupCmd(ctx context.Context, cfg config.Config, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: backup FILE")
+	}
+	dst, err := filepath.Abs(args[0])
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(dst); err == nil {
+		return fmt.Errorf("%s exists", dst)
+	}
+	if _, err := os.Stat(cfg.DBPath()); err != nil {
+		return fmt.Errorf("no database in %s: %w", cfg.DataDir, err)
+	}
+	d, err := db.Open(ctx, cfg.DBPath())
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	if _, err := d.ExecContext(ctx, `VACUUM INTO ?`, dst); err != nil {
+		return err
+	}
+	if err := os.Chmod(dst, 0o600); err != nil {
+		return err
+	}
+	fmt.Println("database copied to", dst)
 	return nil
 }
 

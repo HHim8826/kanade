@@ -2,16 +2,19 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
 	"encoding/json"
 	"errors"
+	"html"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -54,6 +57,7 @@ type Deps struct {
 	Sync      *drivesync.Syncer
 	StreamKey []byte // HMAC key for signed stream URLs
 	Log       *slog.Logger
+	Version   string
 }
 
 type Server struct {
@@ -74,12 +78,13 @@ type Server struct {
 	sync      *drivesync.Syncer
 	streamKey []byte
 	log       *slog.Logger
+	version   string
 	started   time.Time
 }
 
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now()}
 }
 
 type ctxKey int
@@ -368,11 +373,17 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 	})
 }
 
+// page serves an embedded page, naming this site where it says {{SITE}}.
 func (s *Server) page(name string) http.HandlerFunc {
 	body, err := pages.ReadFile(name)
 	if err != nil {
 		panic(err)
 	}
+	site := strings.TrimRight(s.cfg.PublicURL, "/")
+	if u, err := url.Parse(site); err == nil && u.Host != "" {
+		site = u.Host
+	}
+	body = bytes.ReplaceAll(body, []byte("{{SITE}}"), []byte(html.EscapeString(site)))
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "public, max-age=3600")
@@ -469,6 +480,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"version":        s.version,
 		"uptime_seconds": int(time.Since(s.started).Seconds()),
 		"drive":          ds,
 		"aria2_ready":    s.aria2 != nil && s.aria2.Ready(),

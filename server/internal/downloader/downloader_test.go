@@ -103,7 +103,10 @@ func (l *localDrive) Upload(_ context.Context, u gdrive.Upload) (gdrive.File, er
 }
 
 func aria2Path(t *testing.T) string {
-	p := os.Getenv("SER1KA_ARIA2")
+	p := os.Getenv("KANADE_ARIA2")
+	if p == "" {
+		p = os.Getenv("SER1KA_ARIA2")
+	}
 	if p == "" {
 		p = "/data/music-platform/tools/aria2/aria2c"
 	}
