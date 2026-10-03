@@ -1040,14 +1040,21 @@ Kanade 管理腳本
 
 用法：kanade-manager [指令]   （不帶指令時顯示選單）
 
-  install     安裝            update      更新到最新版本
-  uninstall   解除安裝        status      狀態
-  start       啟動            stop        停止
-  restart     重新啟動        log [-f]    查看記錄
-  password    重設密碼        config      修改網址與監聽位址
-  backup      備份資料庫      restore     還原資料庫
+  install     安裝
+  update      更新到最新版本
+  uninstall   解除安裝
+  status      狀態
+  start       啟動
+  stop        停止
+  restart     重新啟動
+  log [-f]    查看記錄
+  password    重設密碼
+  config      修改網址與監聽位址
+  backup      備份資料庫
+  restore     還原資料庫
   tools       安裝 aria2 與 FFmpeg
-  version     版本            help        說明
+  version     版本
+  help        說明
 
 專案：https://github.com/$REPO
 EOF
@@ -1066,12 +1073,23 @@ menu() {
       printf "   尚未安裝\n"
     fi
     line
-    echo "  1) 安裝          2) 更新          3) 解除安裝"
-    echo "  4) 狀態          5) 啟動          6) 停止          7) 重新啟動"
-    echo "  8) 查看記錄      9) 重設密碼     10) 修改網址與監聽位址"
-    echo " 11) 備份資料庫   12) 還原資料庫   13) 版本"
-    echo " 14) 安裝 aria2 與 FFmpeg"
-    echo "  0) 離開"
+    cat <<'EOF'
+   1) 安裝
+   2) 更新
+   3) 解除安裝
+   4) 狀態
+   5) 啟動
+   6) 停止
+   7) 重新啟動
+   8) 查看記錄
+   9) 重設密碼
+  10) 修改網址與監聽位址
+  11) 備份資料庫
+  12) 還原資料庫
+  13) 版本
+  14) 安裝 aria2 與 FFmpeg
+   0) 離開
+EOF
     line
     local choice
     choice=$(ask "請選擇" "0")
