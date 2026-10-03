@@ -352,7 +352,7 @@ install_deps() {
 load_state() {
   INSTALL_DIR="${KANADE_DIR:-/opt/kanade}"
   GH_PROXY="${KANADE_GH_PROXY:-}"
-  if [ -f "$STATE_FILE" ]; then
+  if [ -r "$STATE_FILE" ]; then # only root can read it; help and version run without
     # shellcheck disable=SC1090
     . "$STATE_FILE"
     [ -n "${KANADE_DIR:-}" ] && INSTALL_DIR="$KANADE_DIR"
@@ -1023,7 +1023,9 @@ do_tools() {
 }
 
 do_version() {
-  if installed; then
+  if [ -f "$STATE_FILE" ] && [ ! -r "$STATE_FILE" ]; then
+    echo "已安裝的版本：要用 sudo 才看得到（sudo kanade-manager version）"
+  elif installed; then
     echo "已安裝：$(installed_version)（$INSTALL_DIR）"
   else
     echo "尚未安裝"
