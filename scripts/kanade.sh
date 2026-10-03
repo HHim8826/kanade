@@ -61,6 +61,21 @@ die() {
 }
 line() { printf '%s\n' "────────────────────────────────────────────────────────────"; }
 
+# Temporary directories of this run, removed when it ends: done, failed or interrupted. The list
+# is global, as a local variable is gone by the time the shell exits (review #71); the traps are
+# set again in each new one, as a menu command runs in a subshell, which starts without them.
+TEMPS=()
+cleanup() { [ ${#TEMPS[@]} -eq 0 ] || rm -rf "${TEMPS[@]}"; }
+new_temp() { # new_temp VAR: a new temporary directory in VAR
+  local d
+  d=$(mktemp -d) || die "無法建立暫存目錄。"
+  TEMPS+=("$d")
+  trap cleanup EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM HUP
+  printf -v "$1" '%s' "$d"
+}
+
 # ask PROMPT DEFAULT: reads an answer from the terminal (also when the script came through a pipe);
 # with KANADE_YES or no terminal, the default.
 ask() {
@@ -450,11 +465,10 @@ ask_proxy() {
 
 latest_version() {
   local tmp
-  tmp=$(mktemp)
-  if fetch "$(release_url VERSION)" "$tmp" 2>/dev/null; then
-    tr -d ' \r\n' <"$tmp"
+  new_temp tmp
+  if fetch "$(release_url VERSION)" "$tmp/VERSION" 2>/dev/null; then
+    tr -d ' \r\n' <"$tmp/VERSION"
   fi
-  rm -f "$tmp"
 }
 
 # download_release DIR: the program for this machine into DIR/kanade, checked against SHA256SUMS.
@@ -614,6 +628,17 @@ service_stop() {
   esac
 }
 
+# stop_service: service_stop, then makes sure it is no longer running.
+stop_service() {
+  local i
+  service_stop || return 1
+  for i in 1 2 3 4 5; do
+    running || return 0
+    sleep 1
+  done
+  return 1
+}
+
 # wait_up: until the service answers, for up to 30 seconds.
 wait_up() {
   local url i
@@ -687,8 +712,7 @@ do_install() {
   WANT_VERSION="${KANADE_VERSION:-latest}"
 
   local tmp
-  tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
+  new_temp tmp
   download_release "$tmp"
   fetch "$(release_url kanade.sh)" "$tmp/kanade.sh" >/dev/null 2>&1 || true
 
@@ -702,11 +726,9 @@ do_install() {
       adduser -S -D -H -h "$INSTALL_DIR" -s /sbin/nologin -G "$RUN_USER" "$RUN_USER"
     fi || die "無法建立系統帳號 $RUN_USER。"
   fi
-  mkdir -p "$INSTALL_DIR" "$DATA_DIR"
-  chmod 755 "$INSTALL_DIR"
-  install -m 755 "$tmp/kanade" "$BIN"
-  chown "$RUN_USER:$RUN_USER" "$DATA_DIR"
-  chmod 700 "$DATA_DIR"
+  { mkdir -p "$INSTALL_DIR" "$DATA_DIR" && chmod 755 "$INSTALL_DIR"; } || die "無法建立 $INSTALL_DIR。"
+  install -m 755 "$tmp/kanade" "$BIN" || die "無法寫入 $BIN（磁碟空間不足？）。"
+  { chown "$RUN_USER:$RUN_USER" "$DATA_DIR" && chmod 700 "$DATA_DIR"; } || die "無法設定 $DATA_DIR 的權限。"
   install_deps
 
   kanade config set listen "$listen" >/dev/null || die "設定監聽位址失敗。"
@@ -720,13 +742,12 @@ do_install() {
     printf '%s\n' "$password" | kanade user add "$admin" >/dev/null 2>"$tmp/err" || die "建立管理員失敗：$(cat "$tmp/err")"
   fi
 
-  save_state
+  save_state || die "無法寫入 $STATE_FILE。"
   install_manager "$tmp/kanade.sh"
-  write_service
+  write_service || die "無法建立服務。"
   info "啟動服務……"
-  service_start
   local ok=1
-  wait_up || ok=0
+  { service_start && wait_up; } || ok=0
 
   echo
   line
@@ -782,34 +803,61 @@ do_update() {
   warn "更新會重新啟動服務：播放中的歌會中斷；下載中的任務會在重新啟動後繼續，做種中的任務會結束。"
   confirm "繼續更新嗎？" y || return 0
 
-  local tmp backup
-  tmp=$(mktemp -d)
-  trap 'rm -rf "$tmp"' EXIT
+  local tmp backup got
+  new_temp tmp
   download_release "$tmp"
+  got=$("$tmp/kanade" version 2>/dev/null | awk '{print $2}')
+  [ "$got" = "$latest" ] || die "下載到的程式是 ${got:-未知的版本}，不是 $latest，沒有更新。剛發佈新版時 GitHub 可能還在提供舊的檔案，請過幾分鐘再試。"
   fetch "$(release_url kanade.sh)" "$tmp/kanade.sh" >/dev/null 2>&1 || true
 
-  mkdir -p "$DATA_DIR/backups"
-  chown "$RUN_USER:$RUN_USER" "$DATA_DIR/backups"
+  # Every step is checked (review #69). The new program goes next to the old one first, on the
+  # same file system, so switching to it is a rename.
+  rm -f "$BIN.new"
+  if ! install -m 755 "$tmp/kanade" "$BIN.new"; then
+    rm -f "$BIN.new"
+    die "無法寫入 $BIN.new（磁碟空間不足？），沒有更新。"
+  fi
+  { mkdir -p "$DATA_DIR/backups" && chown "$RUN_USER:$RUN_USER" "$DATA_DIR/backups"; } || {
+    rm -f "$BIN.new"
+    die "無法建立 $DATA_DIR/backups，沒有更新。"
+  }
   backup="$DATA_DIR/backups/before-$latest-$(date +%Y%m%d-%H%M%S).sqlite"
-  kanade backup "$backup" >/dev/null || die "更新前備份資料庫失敗，沒有更新。"
+  if ! kanade backup "$backup" >/dev/null; then
+    rm -f "$BIN.new"
+    die "更新前備份資料庫失敗，沒有更新。"
+  fi
   info "已備份資料庫：$backup"
 
-  service_stop
-  cp -p "$BIN" "$BIN.old"
-  install -m 755 "$tmp/kanade" "$BIN"
-  service_start
-  if wait_up; then
+  if ! stop_service; then
+    rm -f "$BIN.new"
+    service_start
+    die "無法停止服務，沒有更新。"
+  fi
+  # The old program stays as kanade.old (a hard link where the file system has them) until the new
+  # one answers as the version asked for.
+  rm -f "$BIN.old"
+  if ! { ln "$BIN" "$BIN.old" 2>/dev/null || cp -p "$BIN" "$BIN.old"; } || ! mv -f "$BIN.new" "$BIN"; then
+    rm -f "$BIN.new"
+    service_start
+    die "無法替換程式（磁碟空間不足？），沒有更新；服務已用 $current 重新啟動。"
+  fi
+  if service_start && wait_up && [ "$(installed_version)" = "$latest" ]; then
     rm -f "$BIN.old"
     install_manager "$tmp/kanade.sh"
-    info "已更新到 $(installed_version)。"
+    info "已更新到 $latest。"
     return 0
   fi
   error "新版本沒有正常啟動，退回 $current。"
-  service_stop
-  mv -f "$BIN.old" "$BIN"
-  service_start
-  wait_up && warn "已退回 $current 並重新啟動。資料庫未變更前的備份在 $backup。" ||
+  stop_service
+  if ! mv -f "$BIN.old" "$BIN"; then
+    error "無法放回舊的程式（$BIN.old），請手動處理。資料庫更新前的備份在 $backup。"
+    return 1
+  fi
+  if service_start && wait_up; then
+    warn "已退回 $current 並重新啟動。資料庫更新前的備份在 $backup。"
+  else
     error "退回後仍無法啟動，請用 kanade-manager log 查看記錄。"
+  fi
   return 1
 }
 
@@ -958,18 +1006,42 @@ do_restore() {
     echo "  $i) $(basename "$f")（$(du -h "$f" | awk '{print $1}')）"
   done
   choice=$(ask "要還原哪一個" "1")
+  case "$choice" in
+  '' | *[!0-9]*) die "沒有這個選項。" ;;
+  esac
   file="${files[$((choice - 1))]:-}"
-  [ -n "$file" ] || die "沒有這個選項。"
+  [ "$choice" -ge 1 ] && [ -n "$file" ] || die "沒有這個選項。"
+  [ "$(head -c 15 "$file")" = "SQLite format 3" ] || die "$(basename "$file") 不是 SQLite 資料庫，沒有還原。"
   warn "還原會以 $(basename "$file") 取代目前的資料庫；之後的變更（新匯入、播放記錄等）都會消失。目前的資料庫會先另存一份。"
   confirm "確定還原嗎？" n || return 0
   local now
   now="$dir/before-restore-$(date +%Y%m%d-%H%M%S).sqlite"
   kanade backup "$now" >/dev/null || die "無法先備份目前的資料庫，沒有還原。"
-  service_stop
-  install -m 600 -o "$RUN_USER" -g "$RUN_USER" "$file" "$DATA_DIR/db.sqlite"
+  # Every step is checked, and the current database is left alone until the chosen one is in
+  # place: copied next to it first, on the same file system, then renamed over it (review #69).
+  local next="$DATA_DIR/db.sqlite.restore"
+  rm -f "$next"
+  if ! install -m 600 -o "$RUN_USER" -g "$RUN_USER" "$file" "$next" || ! cmp -s "$file" "$next"; then
+    rm -f "$next"
+    die "無法複製備份（磁碟空間不足？），沒有還原。"
+  fi
+  if ! stop_service; then
+    rm -f "$next"
+    service_start
+    die "無法停止服務，沒有還原。"
+  fi
+  if ! mv -f "$next" "$DATA_DIR/db.sqlite"; then
+    rm -f "$next"
+    service_start
+    die "無法替換資料庫，沒有還原；服務已用原本的資料庫重新啟動。"
+  fi
+  # The write-ahead log belonged to the database just replaced.
   rm -f "$DATA_DIR/db.sqlite-wal" "$DATA_DIR/db.sqlite-shm"
-  service_start
-  wait_up && info "已還原並重新啟動。原本的資料庫存為 $now。" || warn "已還原，但服務沒有回應，請查看記錄。"
+  if service_start && wait_up; then
+    info "已還原並重新啟動。原本的資料庫存為 $now。"
+  else
+    warn "已還原，但服務沒有回應，請用 kanade-manager log 查看記錄。原本的資料庫存為 $now。"
+  fi
 }
 
 do_config() {
