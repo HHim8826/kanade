@@ -7,10 +7,13 @@
 #
 # 不帶參數時顯示選單；也可以直接下指令：
 #   install | update | uninstall | status | start | stop | restart | log |
-#   password | backup | restore | config | version | help
+#   password | backup | restore | config | tools | version | help
 #
 # 需要：Linux（amd64 或 arm64）、root、curl、tar、sha256sum。服務管理用 systemd 或
 # OpenRC；兩者都沒有時（例如容器）在背景執行。安裝後可用 kanade-manager 開啟這個選單。
+#
+# aria2 和 FFmpeg 先用系統的套件管理員安裝；套件庫沒有時（RHEL 系、Amazon Linux 等）改用
+# GitHub 上的靜態版，放在安裝位置的 tools/。之後補裝：kanade-manager tools。
 #
 # 不經詢問安裝（自動化）時可設定：
 #   KANADE_YES=1                 全部採用預設或下列設定
@@ -33,6 +36,15 @@ MANAGER_PATH="/usr/local/bin/kanade-manager"
 STATE_FILE="/etc/kanade/manager.conf"
 SERVICE="kanade"
 RUN_USER="kanade"
+
+# Static aria2 and FFmpeg for systems whose packages have neither: the builds Kanade is developed
+# and tested with. aria2 publishes no Linux build; this one is pinned by checksum. FFmpeg's is the
+# latest build of the release branch, checked against the checksums published with it.
+ARIA2_STATIC="https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0"
+ARIA2_SHA256_amd64="e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a"
+ARIA2_SHA256_arm64="0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6"
+FFMPEG_STATIC="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+FFMPEG_BRANCH="8.1"
 
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -120,7 +132,11 @@ need_tools() {
 # install_packages PKG...: with the system's package manager; false when there is none or it fails.
 install_packages() {
   if command -v apt-get >/dev/null 2>&1; then
-    DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
+    if [ -z "${APT_UPDATED:-}" ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get update -qq || return 1
+      APT_UPDATED=1
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$@"
   elif command -v dnf >/dev/null 2>&1; then
     dnf install -y "$@"
   elif command -v yum >/dev/null 2>&1; then
@@ -136,26 +152,199 @@ install_packages() {
   fi
 }
 
-# aria2 downloads BitTorrent; FFmpeg converts lossless formats to FLAC and cuts CUE disc images.
-# Kanade works without either, without those features.
-install_deps() {
-  [ "${KANADE_DEPS:-}" = "skip" ] && return
-  local want=""
-  command -v aria2c >/dev/null 2>&1 || want="$want aria2"
-  if ! command -v ffmpeg >/dev/null 2>&1 || ! command -v ffprobe >/dev/null 2>&1; then
-    want="$want ffmpeg"
+# Where Kanade finds them (among other places): the static builds in tools/ of the install
+# directory, or PATH. Empty when there is none.
+aria2_path() {
+  if [ -x "$INSTALL_DIR/tools/aria2/aria2c" ]; then
+    printf '%s\n' "$INSTALL_DIR/tools/aria2/aria2c"
+  else
+    command -v aria2c 2>/dev/null
   fi
-  [ -n "$want" ] || return
+}
+
+ffmpeg_path() {
+  local d="$INSTALL_DIR/tools/ffmpeg/bin"
+  if [ -x "$d/ffmpeg" ] && [ -x "$d/ffprobe" ]; then
+    printf '%s\n' "$d/ffmpeg"
+  elif command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    command -v ffmpeg
+  fi
+}
+
+missing_tools() {
+  [ -n "$(aria2_path)" ] || printf ' aria2'
+  [ -n "$(ffmpeg_path)" ] || printf ' ffmpeg'
+}
+
+# unzip_one ZIP NAME OUT: one file out of a zip archive, with whatever this system has for it.
+unzip_one() {
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -p "$1" "$2" >"$3"
+  elif command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xOf "$1" "$2" >"$3"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys, zipfile; sys.stdout.buffer.write(zipfile.ZipFile(sys.argv[1]).read(sys.argv[2]))' "$1" "$2" >"$3"
+  else
+    return 1
+  fi
+}
+
+# untar_xz ARCHIVE DIR MEMBER...: those members of a .tar.xz into DIR.
+untar_xz() {
+  local archive="$1" dir="$2"
+  shift 2
+  if command -v xz >/dev/null 2>&1; then
+    tar -xJf "$archive" -C "$dir" "$@"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$archive" "$dir" "$@" <<'EOF'
+import sys, tarfile
+want = set(sys.argv[3:])
+safe = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+with tarfile.open(sys.argv[1]) as t:
+    for m in t:  # in one pass: the archive is compressed, going back means decompressing again
+        if m.name in want:
+            t.extract(m, sys.argv[2], **safe)
+            want.discard(m.name)
+            if not want:
+                break
+sys.exit(1 if want else 0)
+EOF
+  else
+    return 1
+  fi
+}
+
+# static_aria2 WORK: aria2c into tools/aria2.
+static_aria2() {
+  local work="$1" arch sum zip
+  case "$ARCH" in
+  amd64) arch="x86_64" sum="$ARIA2_SHA256_amd64" ;;
+  arm64) arch="aarch64" sum="$ARIA2_SHA256_arm64" ;;
+  esac
+  zip="aria2-$arch-linux-musl_static.zip"
+  info "下載 aria2 靜態版（約 6 MB）……"
+  if ! fetch "$GH_PROXY$ARIA2_STATIC/$zip" "$work/$zip"; then
+    warn "下載 aria2 失敗。"
+    return 1
+  fi
+  if ! printf '%s  %s\n' "$sum" "$work/$zip" | sha256sum -c --status; then
+    warn "aria2 校驗失敗（SHA-256 不符），沒有安裝。請重試，或換一個代理。"
+    return 1
+  fi
+  if ! unzip_one "$work/$zip" aria2c "$work/aria2c"; then
+    warn "無法解開 aria2 的 zip 檔：需要 unzip、bsdtar 或 python3 其中之一。"
+    return 1
+  fi
+  chmod 755 "$work/aria2c"
+  if ! "$work/aria2c" --version >/dev/null 2>&1; then
+    warn "下載的 aria2 無法在這台機器執行。"
+    return 1
+  fi
+  install -d -m 755 "$INSTALL_DIR/tools/aria2"
+  install -m 755 "$work/aria2c" "$INSTALL_DIR/tools/aria2/aria2c"
+  info "已安裝 aria2：$INSTALL_DIR/tools/aria2/aria2c"
+}
+
+# static_ffmpeg WORK: ffmpeg and ffprobe into tools/ffmpeg/bin.
+static_ffmpeg() {
+  local work="$1" arch dir pkg free
+  case "$ARCH" in
+  amd64) arch="linux64" ;;
+  arm64) arch="linuxarm64" ;;
+  esac
+  dir="ffmpeg-n$FFMPEG_BRANCH-latest-$arch-gpl-$FFMPEG_BRANCH"
+  pkg="$dir.tar.xz"
+  free=$(df -Pk "$INSTALL_DIR" 2>/dev/null | awk 'NR == 2 {print $4}')
+  if [ "${free:-0}" -lt $((600 * 1024)) ]; then
+    warn "$INSTALL_DIR 所在的磁碟剩不到 600 MB，沒有下載 FFmpeg。"
+    return 1
+  fi
+  info "下載 FFmpeg $FFMPEG_BRANCH 靜態版（約 150 MB）……"
+  if ! fetch "$GH_PROXY$FFMPEG_STATIC/$pkg" "$work/$pkg" || ! fetch "$GH_PROXY$FFMPEG_STATIC/checksums.sha256" "$work/ffmpeg.sha256"; then
+    warn "下載 FFmpeg 失敗。"
+    return 1
+  fi
+  # The build is replaced daily: a mismatch can also mean it changed between the two downloads.
+  if ! (cd "$work" && grep " $pkg\$" ffmpeg.sha256 | sha256sum -c --status); then
+    warn "FFmpeg 校驗失敗（SHA-256 不符），沒有安裝。請稍後重試，或換一個代理。"
+    return 1
+  fi
+  info "解壓縮 FFmpeg……"
+  if ! untar_xz "$work/$pkg" "$work" "$dir/bin/ffmpeg" "$dir/bin/ffprobe" "$dir/LICENSE.txt"; then
+    warn "無法解壓縮 FFmpeg：需要 xz 或 python3。"
+    return 1
+  fi
+  rm -f "$work/$pkg"
+  if ! "$work/$dir/bin/ffmpeg" -hide_banner -version >/dev/null 2>&1; then
+    warn "下載的 FFmpeg 無法在這台機器執行（需要 glibc 2.28 以上）。"
+    return 1
+  fi
+  install -d -m 755 "$INSTALL_DIR/tools/ffmpeg" "$INSTALL_DIR/tools/ffmpeg/bin"
+  # Moved, not copied: each is about 165 MB.
+  chown 0:0 "$work/$dir/bin/ffmpeg" "$work/$dir/bin/ffprobe" "$work/$dir/LICENSE.txt"
+  chmod 755 "$work/$dir/bin/ffmpeg" "$work/$dir/bin/ffprobe"
+  chmod 644 "$work/$dir/LICENSE.txt"
+  mv -f "$work/$dir/bin/ffmpeg" "$work/$dir/bin/ffprobe" "$INSTALL_DIR/tools/ffmpeg/bin/"
+  mv -f "$work/$dir/LICENSE.txt" "$INSTALL_DIR/tools/ffmpeg/"
+  info "已安裝 FFmpeg：$INSTALL_DIR/tools/ffmpeg/bin/ffmpeg"
+}
+
+# install_static NAME...: static builds of aria2 and FFmpeg. They are downloaded in the install
+# directory, not /tmp, which can be in memory.
+install_static() {
+  local work="$INSTALL_DIR/tools/.download" t
+  install -d -m 755 "$INSTALL_DIR/tools"
+  rm -rf "$work"
+  mkdir -p "$work"
+  for t in "$@"; do
+    case "$t" in
+    aria2) static_aria2 "$work" ;;
+    ffmpeg) static_ffmpeg "$work" ;;
+    esac
+  done
+  rm -rf "$work"
+  return 0
+}
+
+remove_static() {
+  local d="$INSTALL_DIR/tools"
+  rm -rf "$d/.download"
+  rm -f "$d/aria2/aria2c" "$d/ffmpeg/bin/ffmpeg" "$d/ffmpeg/bin/ffprobe" "$d/ffmpeg/LICENSE.txt"
+  rmdir "$d/aria2" "$d/ffmpeg/bin" "$d/ffmpeg" "$d" 2>/dev/null
+  return 0
+}
+
+# aria2 downloads BitTorrent; FFmpeg converts lossless formats to FLAC and cuts CUE disc images.
+# Kanade works without either, without those features. From the system's packages first; static
+# builds for what those do not have.
+install_deps() {
+  [ "${KANADE_DEPS:-}" = "skip" ] && return 0
+  local want p
+  want=$(missing_tools)
+  [ -n "$want" ] || return 0
   echo
   info "Kanade 用 aria2 下載 BitTorrent，用 FFmpeg 轉檔與切割 CUE 整軌；沒有也能執行，只是少了這些功能。"
   if confirm "要用系統的套件管理員安裝$want 嗎？" y; then
-    # shellcheck disable=SC2086
-    if ! install_packages $want; then
-      warn "安裝$want 失敗。之後可以自己安裝，再執行 kanade-manager restart。"
+    for p in $want; do
+      install_packages "$p" || warn "套件管理員裝不了 $p。"
+    done
+    want=$(missing_tools)
+  fi
+  if [ -n "$want" ]; then
+    echo
+    info "可以改用 GitHub 上的靜態版（Kanade 開發時用的同一版），裝在 $INSTALL_DIR/tools，解除安裝時一併移除。"
+    case "$want" in
+    *ffmpeg*) echo "  FFmpeg 要下載約 150 MB，裝好後佔約 330 MB。" ;;
+    esac
+    if confirm "要下載$want 的靜態版嗎？" y; then
+      [ -n "${PROXY_ASKED:-}" ] || ask_proxy
+      # shellcheck disable=SC2086
+      install_static $want
     fi
   fi
-  command -v aria2c >/dev/null 2>&1 || warn "沒有 aria2c：BitTorrent 下載會停用。"
-  command -v ffmpeg >/dev/null 2>&1 || warn "沒有 FFmpeg：APE、WAV、整軌 CUE 等檔案會等到裝了 FFmpeg 再處理。"
+  [ -n "$(aria2_path)" ] || warn "沒有 aria2c：BitTorrent 下載會停用。之後可以用 kanade-manager tools 安裝。"
+  [ -n "$(ffmpeg_path)" ] || warn "沒有 FFmpeg：APE、WAV、整軌 CUE 等檔案會等到裝了 FFmpeg 再處理。之後可以用 kanade-manager tools 安裝。"
+  return 0
 }
 
 # ---- state ----
@@ -245,6 +434,7 @@ fetch() { # fetch URL FILE
 }
 
 ask_proxy() {
+  PROXY_ASKED=1
   [ -n "${KANADE_RELEASE_URL:-}" ] && return
   echo
   info "在中國大陸連 GitHub 較慢時，可以用代理（https 開頭、/ 結尾，例如 https://ghproxy.net/）。"
@@ -495,7 +685,6 @@ do_install() {
 
   ask_proxy
   WANT_VERSION="${KANADE_VERSION:-latest}"
-  install_deps
 
   local tmp
   tmp=$(mktemp -d)
@@ -518,6 +707,7 @@ do_install() {
   install -m 755 "$tmp/kanade" "$BIN"
   chown "$RUN_USER:$RUN_USER" "$DATA_DIR"
   chmod 700 "$DATA_DIR"
+  install_deps
 
   kanade config set listen "$listen" >/dev/null || die "設定監聽位址失敗。"
   kanade config set public_url "$public" >/dev/null || die "設定公開網址失敗。"
@@ -633,6 +823,7 @@ do_uninstall() {
   service_stop
   remove_service
   rm -f "$BIN" "$BIN.old" "$MANAGER_PATH"
+  remove_static
   local keep=1
   if [ -d "$DATA_DIR" ]; then
     warn "資料目錄 $DATA_DIR 有資料庫（帳號、曲庫、Drive 的授權）、設定和下載暫存。"
@@ -672,9 +863,9 @@ do_status() {
   fi
   local a f
   a=$(setting aria2)
-  f=$(command -v ffmpeg || true)
-  echo "aria2：${a:-沒有（BitTorrent 下載停用）}"
-  echo "FFmpeg：${f:-沒有（轉檔與 CUE 切割停用）}"
+  f=$(ffmpeg_path)
+  echo "aria2：${a:-沒有（BitTorrent 下載停用；可用 kanade-manager tools 安裝）}"
+  echo "FFmpeg：${f:-沒有（轉檔與 CUE 切割停用；可用 kanade-manager tools 安裝）}"
   line
 }
 
@@ -806,6 +997,32 @@ do_config() {
   return 0
 }
 
+# do_tools: aria2 and FFmpeg after the installation (declined then, or the packages had none).
+do_tools() {
+  check_root
+  require_installed
+  detect_arch
+  detect_init
+  need_tools
+  local before
+  before=$(missing_tools)
+  if [ -z "$before" ]; then
+    info "aria2 和 FFmpeg 都有了：$(aria2_path)、$(ffmpeg_path)"
+    return 0
+  fi
+  install_deps
+  [ "$(missing_tools)" = "$before" ] && return 0
+  save_state # the proxy, when one was given
+  install_manager # run from a newer script: a manager that knows the tools (status, uninstall)
+  if running; then
+    warn "重新啟動後才會用到：播放中的歌會中斷；下載中的任務會在重新啟動後繼續，做種中的任務會結束。"
+    confirm "現在重新啟動嗎？" y && do_restart
+  else
+    info "下次啟動時會用到。"
+  fi
+  return 0
+}
+
 do_version() {
   if installed; then
     echo "已安裝：$(installed_version)（$INSTALL_DIR）"
@@ -829,6 +1046,7 @@ Kanade 管理腳本
   restart     重新啟動        log [-f]    查看記錄
   password    重設密碼        config      修改網址與監聽位址
   backup      備份資料庫      restore     還原資料庫
+  tools       安裝 aria2 與 FFmpeg
   version     版本            help        說明
 
 專案：https://github.com/$REPO
@@ -852,6 +1070,7 @@ menu() {
     echo "  4) 狀態          5) 啟動          6) 停止          7) 重新啟動"
     echo "  8) 查看記錄      9) 重設密碼     10) 修改網址與監聽位址"
     echo " 11) 備份資料庫   12) 還原資料庫   13) 版本"
+    echo " 14) 安裝 aria2 與 FFmpeg"
     echo "  0) 離開"
     line
     local choice
@@ -870,6 +1089,7 @@ menu() {
     11) (do_backup) ;;
     12) (do_restore) ;;
     13) (do_version) ;;
+    14) (do_tools) ;;
     0 | q | "") return 0 ;;
     *) warn "沒有這個選項。" ;;
     esac
@@ -897,6 +1117,7 @@ main() {
   backup) do_backup ;;
   restore) do_restore ;;
   config) do_config ;;
+  tools) do_tools ;;
   version) do_version ;;
   help | -h | --help) usage ;;
   "") menu ;;

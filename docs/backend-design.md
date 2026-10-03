@@ -397,6 +397,16 @@ DIR/
 - 重啟服務會讓做種中的任務結束（aria2 的 session 不保存做種中的任務），更新時的提示已說明；尚未修正。
 - 刪除 `spikes/p0-drive`（P0 的一次性實驗，結果在 `docs/p0-checklist.md`）。
 
+### 安裝腳本：沒有 aria2／FFmpeg 套件的系統（2026-10-03）
+
+- 回報：在 dnf 系統（RHEL 系）上安裝時，`dnf install aria2 ffmpeg` 找不到套件（aria2 在 EPEL、FFmpeg 在 RPM Fusion，預設都沒啟用），兩者都沒裝；Amazon Linux 2023 也一樣。
+- 先用套件管理員逐一安裝（一個找不到不再拖累另一個，例如 Fedora 有 aria2 沒有 FFmpeg）；仍缺的改下載靜態版到 `<安裝位置>/tools`，正是 Kanade 本來就會找的位置（`tools/aria2/aria2c`、資料目錄旁的 `tools/ffmpeg/bin`），不必另外設定：
+  - aria2：abcfy2/aria2-static-build 1.37.0（musl 靜態），與正式環境同一個檔案；aria2 官方沒有 Linux 版，SHA-256 寫死在腳本裡。
+  - FFmpeg：BtbN/FFmpeg-Builds 的 8.1 分支最新版（glibc 2.28 以上），以同一 release 的 `checksums.sha256` 核對；每天重建，無法固定版本。下載約 150 MB，只取出 ffmpeg、ffprobe 與授權檔（約 330 MB）；剩不到 600 MB 時不下載。
+  - 在安裝位置裡下載與解壓縮（`/tmp` 可能在記憶體裡）；沒有 xz 時用 python3 解 .tar.xz，沒有 unzip 時用 bsdtar 或 python3；下載後先試執行，不能執行就不裝。解除安裝時一併移除。
+- 新指令 `kanade-manager tools`（選單 14）：安裝時略過或當時沒裝成功的，之後補裝，再詢問是否重新啟動；同時把 kanade-manager 換成執行的這份腳本，讓舊版裝好的機器也知道這些檔案。狀態頁顯示實際使用的路徑。
+- 驗證：本機以背景模式實測安裝時改用靜態版（套件管理員那題答否）、Kanade 記錄 `aria2 ready`／`ffmpeg ready` 指向 tools、`tools` 在兩者都有時與缺 aria2 時的行為與重新啟動、kanade-manager 由 v0.1.0 換成新版、解除安裝後 tools 與安裝位置都已刪除。xz 的路徑（`tar -xJ`）與 arm64 未實測。
+
 ## 使用方式（開發環境）
 
 ```bash

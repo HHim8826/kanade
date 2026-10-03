@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade
 
 Where GitHub is slow (mainland China), put a proxy in front of the address, for example `https://ghproxy.net/https://raw.githubusercontent.com/…`; the script asks for the same proxy for its downloads.
 
-The script installs the release for the machine into `/opt/kanade` (data in `/opt/kanade/data`), runs it as a `kanade` system account under systemd or OpenRC (in the background where there is neither, as in a container), installs aria2 and FFmpeg from the system's packages if you agree, creates an administrator with a random password and prints it. Afterwards `sudo kanade-manager` opens the same menu:
+The script installs the release for the machine into `/opt/kanade` (data in `/opt/kanade/data`), runs it as a `kanade` system account under systemd or OpenRC (in the background where there is neither, as in a container), installs aria2 and FFmpeg if you agree (from the system's packages, or, where those have neither, as on RHEL and its relatives or Amazon Linux, the static builds Kanade is developed with, into `/opt/kanade/tools`; FFmpeg's is a 150 MB download), creates an administrator with a random password and prints it. Afterwards `sudo kanade-manager` opens the same menu:
 
 | Command | |
 |---|---|
@@ -21,6 +21,7 @@ The script installs the release for the machine into `/opt/kanade` (data in `/op
 | `kanade-manager password` | Reset a password (random or your own); every login of that account ends. |
 | `kanade-manager config` | Change the public address and the listen address. |
 | `kanade-manager backup` / `restore` | Backups go to `data/backups/`; a restore saves the current database first. |
+| `kanade-manager tools` | Install aria2 and FFmpeg later, when they were skipped or the packages had none. |
 
 Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=https://music.example.com bash kanade.sh install`; the header of `scripts/kanade.sh` lists the other settings.
 
