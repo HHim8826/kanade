@@ -3,6 +3,7 @@ import { useEffect, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
 import { player, resetPlayer } from './player.js';
+import './scrollbars.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
 import { History, Playlist } from './views/collections.js';

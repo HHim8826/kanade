@@ -38,11 +38,14 @@ var dummyHash = sync.OnceValue(func() []byte {
 type Service struct {
 	db *sql.DB
 
-	mu       sync.Mutex
-	failures map[string][]time.Time // client IP -> recent failed logins
+	mu         sync.Mutex
+	failures   map[string][]time.Time // client IP -> recent failed logins
+	challenges map[string]challenge   // pending passkey requests
 }
 
-func New(d *sql.DB) *Service { return &Service{db: d, failures: map[string][]time.Time{}} }
+func New(d *sql.DB) *Service {
+	return &Service{db: d, failures: map[string][]time.Time{}, challenges: map[string]challenge{}}
+}
 
 func (s *Service) HasUsers(ctx context.Context) (bool, error) {
 	var n int
@@ -149,6 +152,11 @@ func (s *Service) Login(ctx context.Context, username, password, deviceName, cli
 		s.recordFailure(clientIP)
 		return "", ErrBadCredentials
 	}
+	return s.newSession(ctx, id, deviceName)
+}
+
+// newSession starts a login for the user and returns its token; only the token's hash is kept.
+func (s *Service) newSession(ctx context.Context, id int64, deviceName string) (string, error) {
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err

@@ -25,6 +25,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/lrclib"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
@@ -47,6 +48,7 @@ type Deps struct {
 	Aria2     *downloader.Aria2
 	Uploads   *uploads.Store
 	Identify  *identify.MusicBrainz
+	Lyrics    *lrclib.Client
 	RSS       *rss.Service
 	Disk      *diskguard.Guard
 	Sync      *drivesync.Syncer
@@ -66,6 +68,7 @@ type Server struct {
 	aria2     *downloader.Aria2
 	uploads   *uploads.Store
 	mb        *identify.MusicBrainz
+	lrclib    *lrclib.Client
 	rss       *rss.Service
 	disk      *diskguard.Guard
 	sync      *drivesync.Syncer
@@ -76,7 +79,7 @@ type Server struct {
 
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, started: time.Now()}
 }
 
 type ctxKey int
@@ -93,6 +96,14 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("POST /api/v1/setup", s.setup)
 	mux.HandleFunc("POST /api/v1/login", s.login)
+	mux.HandleFunc("GET /api/v1/passkeys/available", s.passkeysAvailable)
+	mux.HandleFunc("POST /api/v1/passkeys/login/options", s.passkeyLoginOptions)
+	mux.HandleFunc("POST /api/v1/passkeys/login", s.passkeyLogin)
+	mux.Handle("GET /api/v1/passkeys", s.authed(s.listPasskeys))
+	mux.Handle("POST /api/v1/passkeys/options", s.authed(s.passkeyOptions))
+	mux.Handle("POST /api/v1/passkeys", s.authed(s.addPasskey))
+	mux.Handle("PATCH /api/v1/passkeys/{id}", s.authed(s.renamePasskey))
+	mux.Handle("DELETE /api/v1/passkeys/{id}", s.authed(s.deletePasskey))
 	mux.Handle("POST /api/v1/logout", s.authed(s.logout))
 	mux.Handle("GET /api/v1/status", s.authed(s.status))
 	mux.Handle("GET /api/v1/drive", s.authed(s.driveInfo))
@@ -132,6 +143,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tracks/{id}/lyrics", s.authed(s.lyrics))
 	mux.Handle("PUT /api/v1/tracks/{id}/lyrics", s.authed(s.setLyrics))
 	mux.Handle("DELETE /api/v1/tracks/{id}/lyrics", s.authed(s.setLyrics))
+	mux.Handle("GET /api/v1/tracks/{id}/lyrics/online", s.authed(s.findLyrics))
+	mux.Handle("POST /api/v1/tracks/{id}/lyrics/online", s.authed(s.useFoundLyrics))
 	mux.Handle("GET /api/v1/history", s.authed(s.history))
 	mux.Handle("GET /api/v1/history/top", s.authed(s.topTracks))
 
@@ -386,13 +399,20 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, err)
 	case err != nil:
 		s.internal(w, r, err)
-	case req.Cookie:
-		http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: 90 * 24 * 3600,
-			HttpOnly: true, Secure: strings.HasPrefix(s.cfg.PublicURL, "https://"), SameSite: http.SameSiteStrictMode})
-		writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 	default:
-		writeJSON(w, http.StatusOK, map[string]string{"token": token})
+		s.loggedIn(w, token, req.Cookie)
 	}
+}
+
+// loggedIn answers a successful login: the web client gets an HttpOnly cookie instead of the token.
+func (s *Server) loggedIn(w http.ResponseWriter, token string, cookie bool) {
+	if !cookie {
+		writeJSON(w, http.StatusOK, map[string]string{"token": token})
+		return
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: 90 * 24 * 3600,
+		HttpOnly: true, Secure: strings.HasPrefix(s.cfg.PublicURL, "https://"), SameSite: http.SameSiteStrictMode})
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

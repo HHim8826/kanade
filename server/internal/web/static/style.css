@@ -93,6 +93,19 @@
 }
 
 * { box-sizing: border-box; }
+
+/* Scroll bars: thin, in the look's colours, and out of sight until the area scrolls or the mouse
+   comes near the bar (scrollbars.js marks the area .scrolling or .scroll-near). Phones keep their
+   own overlay bars. The colour is set on every element, so a shown bar is not inherited. */
+:root { --scroll-thumb: color-mix(in srgb, var(--on-surface) 34%, transparent); }
+* { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+.scrolling, .scroll-near, :focus-visible { scrollbar-color: var(--scroll-thumb) transparent; }
+@supports not (scrollbar-color: auto) { /* Safari */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 6px; background: transparent padding-box; }
+  .scrolling::-webkit-scrollbar-thumb, .scroll-near::-webkit-scrollbar-thumb { background-color: var(--scroll-thumb); }
+}
 html, body { margin: 0; }
 body {
   background: var(--surface); color: var(--on-surface);
@@ -353,6 +366,18 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .lyrics.synced button:hover { background: var(--surface-container); }
 .lyrics.plain { white-space: pre-wrap; font-size: 17px; line-height: 1.8; padding: 8px; }
 .lyrics-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+/* Lyrics found in LRCLIB, to choose from. */
+.found-wait { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; }
+.found-wait .spinner { margin: 0; }
+.found-none { text-align: center; }
+.found-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.found-item { display: grid; gap: 2px; width: 100%; padding: 10px 12px; border: 1px solid var(--outline-variant); border-radius: var(--radius-m);
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.found-item:hover:not(:disabled) { background: var(--surface-container); }
+.found-item:disabled { opacity: .6; cursor: default; }
+.found-item .title, .found-item .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.found-preview { white-space: pre-line; color: var(--on-surface-variant); font-size: 13px; line-height: 1.5;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
 @media (min-width: 840px) {
   .np-main { flex-direction: row; align-items: center; justify-content: center; gap: 48px; padding-top: 24px; }
 }
@@ -360,6 +385,12 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 /* ---- misc ---- */
 .login { min-height: 100dvh; display: grid; place-items: center; padding: 16px; }
 .login-card { width: min(400px, 100%); }
+.login-card .or { display: flex; align-items: center; gap: 12px; margin: 16px 0; color: var(--on-surface-variant); font-size: 13px; }
+.login-card .or::before, .login-card .or::after { content: ''; flex: 1; border-top: 1px solid var(--outline-variant); }
+.passkeys { margin-top: 8px; }
+.passkeys .row { padding: 6px 0; }
+.passkeys .row > .icon { color: var(--on-surface-variant); }
+.passkeys .grow { display: flex; flex-direction: column; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 12px; color: var(--primary); margin-bottom: 24px; }
 .brand h1 { font-size: 24px; margin: 0; color: var(--on-surface); }
 .spinner { width: 32px; height: 32px; margin: 32px auto; border-radius: 50%; border: 3px solid var(--surface-container-high); border-top-color: var(--primary); animation: spin .8s linear infinite; }
@@ -396,7 +427,19 @@ body.locked .content { overflow: hidden; }
 .pill { display: inline-block; padding: 2px 10px; margin: 2px 6px 2px 0; border-radius: 12px; font-size: 13px; background: var(--surface-container-high); }
 .pill.warn { background: var(--error-container); color: var(--on-error-container); }
 .progress.thin { height: 3px; margin: 6px 0 2px; }
-.row.plain { border: 0; background: none; cursor: pointer; text-align: left; font: inherit; color: inherit; }
+/* A row that is a button keeps the row's padding (button.plain would take it away). */
+.row.plain { border: 0; background: none; cursor: pointer; text-align: left; font: inherit; color: inherit; padding: 10px 8px; }
+.row.plain:hover { background: var(--surface-container); }
+/* Unfinished dramas: cover, title / album / progress, time left in a column of its own width, so
+   every row is as tall and every bar as long. */
+.spoken-list { display: grid; gap: 2px; }
+.spoken-list .spoken-row { display: grid; grid-template-columns: 48px minmax(0, 1fr) 5.5em; column-gap: 16px; align-items: center;
+  min-height: 72px; padding: 8px; border-radius: var(--radius-m); }
+.spoken-row .cover.thumb { width: 48px; height: 48px; border-radius: var(--radius-s); }
+.spoken-row .track-text { gap: 1px; }
+.spoken-row .progress.thin { margin: 6px 0 0; }
+.spoken-row .left { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.spoken-row .sub.missing { font-style: italic; opacity: .75; }
 .row.wide { width: 100%; }
 @media (max-width: 480px) { .track-main:has(.thumb) .meta .quality { display: none; } }
 

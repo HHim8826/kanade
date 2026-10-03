@@ -4,9 +4,11 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/lrclib"
 )
 
 // Favorites, playlists, lyrics and history (P2-1).
@@ -267,4 +269,86 @@ func (s *Server) topTracks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// findLyrics looks the track's lyrics up in LRCLIB (on request: only this song's title and artist
+// are sent; its length ranks the answers) and lists what fits, best first.
+func (s *Server) findLyrics(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.lyricsTrack(w, r)
+	if !ok {
+		return
+	}
+	list, err := s.lrclib.Find(r.Context(), lrclib.Song{Title: t.Title, Artist: t.Artist, Album: t.Album, DurationMS: t.Asset.DurationMS})
+	if err != nil {
+		s.lrclibError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+// useFoundLyrics stores lyrics found in LRCLIB: {"id": n} as the user's choice, which replaces
+// what is there, or with "auto": true only where the track has none yet (an exact match the page
+// took without asking).
+func (s *Server) useFoundLyrics(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.lyricsTrack(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		ID   int64 `json:"id"`
+		Auto bool  `json:"auto"`
+	}
+	if err := readJSON(r, &req); err != nil || req.ID <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("expected the LRCLIB id"))
+		return
+	}
+	l, err := s.lrclib.Get(r.Context(), req.ID)
+	if err != nil {
+		s.lrclibError(w, r, err)
+		return
+	}
+	if l.Instrumental || strings.TrimSpace(l.Text()) == "" {
+		writeError(w, http.StatusUnprocessableEntity, errors.New("LRCLIB has no words for it (instrumental)"))
+		return
+	}
+	saved, err := s.lib.SetFoundLyrics(r.Context(), t.ID, l.Text(), !req.Auto)
+	if err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"saved": saved})
+}
+
+func (s *Server) lyricsTrack(w http.ResponseWriter, r *http.Request) (*library.TrackDetail, bool) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return nil, false
+	}
+	if s.lrclib == nil {
+		writeError(w, http.StatusServiceUnavailable, errors.New("online lyrics are not set up"))
+		return nil, false
+	}
+	t, err := s.lib.Track(r.Context(), id)
+	if err != nil {
+		s.internal(w, r, err)
+		return nil, false
+	}
+	if t == nil {
+		writeError(w, http.StatusNotFound, errors.New("no such track"))
+		return nil, false
+	}
+	return t, true
+}
+
+func (s *Server) lrclibError(w http.ResponseWriter, r *http.Request, err error) {
+	switch {
+	case errors.Is(err, lrclib.ErrNotFound):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, lrclib.ErrUnavailable):
+		writeError(w, http.StatusBadGateway, err)
+	default:
+		s.log.Warn("lrclib", "path", r.URL.Path, "err", err)
+		writeError(w, http.StatusBadGateway, err)
+	}
 }

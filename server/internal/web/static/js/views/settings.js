@@ -1,9 +1,10 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
-import { get, post } from '../api.js';
+import { api, get, post } from '../api.js';
+import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { resetPlayer } from '../player.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
-import { ErrorBox, Icon, Spinner, fmtBytes, html, toast, useLoad } from '../ui.js';
+import { Dialog, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
 
@@ -78,6 +79,91 @@ function Appearance() {
     </div>`;
 }
 
+// deviceName guesses a name for a passkey made on this device.
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone|iPad/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android' : /Mac OS X/.test(ua) ? 'Mac'
+    : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '';
+  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
+  return [os, browser].filter(Boolean).join(' · ') || 'Passkey';
+}
+
+// Passkeys: adding one (after the password) makes the login page offer it.
+function Passkeys() {
+  const data = useLoad(() => get('/passkeys'), []);
+  const add = () => showDialog((close) => html`<${AddPasskey} close=${close} onAdded=${data.reload} />`);
+  const rename = async (p) => {
+    const name = prompt('Passkey 名稱', p.name);
+    if (!name || name === p.name) return;
+    try {
+      await api('PATCH', `/passkeys/${p.id}`, { name });
+      data.reload();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  const remove = async (p) => {
+    if (!confirm(`移除 passkey「${p.name}」？之後就不能用它登入（裝置上的 passkey 也可以一併刪除）。`)) return;
+    try {
+      await api('DELETE', `/passkeys/${p.id}`);
+      toast('已移除 passkey');
+      data.reload();
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  const list = data.data || [];
+  return html`<div class="card pad">
+    <div class="title">Passkey</div>
+    <div class="sub">加入 passkey 後，登入頁會出現「使用 passkey 登入」，用裝置的指紋、臉部或螢幕鎖定登入，不必輸入密碼；密碼仍然可以使用。</div>
+    <${ErrorBox} error=${data.error} onRetry=${data.reload} />
+    ${list.length > 0 && html`<ul class="list passkeys">${list.map((p) => html`<li key=${p.id} class="row">
+      <${Icon} name="passkey" />
+      <span class="grow"><span class="title">${p.name}</span>
+        <span class="sub">加入於 ${when(p.created_at)} · 上次使用 ${p.last_used_at ? when(p.last_used_at) : '還沒有'}</span></span>
+      <${IconButton} icon="edit" label=${`重新命名「${p.name}」`} onClick=${() => rename(p)} />
+      <${IconButton} icon="delete" label=${`移除「${p.name}」`} onClick=${() => remove(p)} />
+    </li>`)}</ul>`}
+    <div class="actions">
+      ${passkeysSupported()
+        ? html`<button class="btn tonal" onClick=${add}><${Icon} name="passkey" />新增 passkey</button>`
+        : html`<span class="sub">這個瀏覽器不支援 passkey。</span>`}
+    </div>
+  </div>`;
+}
+
+function AddPasskey({ close, onAdded }) {
+  const [name, setName] = useState(deviceName);
+  const [password, setPassword] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await addPasskey(password, name.trim());
+      toast('已加入 passkey，之後可以在登入頁使用');
+      onAdded();
+      close();
+    } catch (err) {
+      setError(new Error(passkeyMessage(err) || '已取消，沒有加入 passkey。'));
+      setBusy(false);
+    }
+  };
+  return html`<${Dialog} title="新增 passkey" onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button type="submit" form="passkey-form" class="btn filled" disabled=${busy || !password}>${busy ? '請在裝置上確認…' : '繼續'}</button>`}>
+    <form id="passkey-form" onSubmit=${submit}>
+      <p class="hint">先輸入目前的密碼確認是你本人，接著依裝置的提示建立 passkey（指紋、臉部或螢幕鎖定）。</p>
+      <label class="field"><span>名稱</span><input value=${name} maxlength="60" onInput=${(e) => setName(e.target.value)} /></label>
+      <label class="field"><span>目前的密碼</span><input type="password" autocomplete="current-password" value=${password}
+        onInput=${(e) => setPassword(e.target.value)} required /></label>
+      <${ErrorBox} error=${error} />
+    </form>
+  <//>`;
+}
+
 export function Settings({ onLogout }) {
   const status = useLoad(() => get('/status'), []);
   const drive = useLoad(() => get('/drive'), []);
@@ -118,6 +204,7 @@ export function Settings({ onLogout }) {
         <div class="sub">已運行 ${Math.floor(status.data.uptime_seconds / 3600)} 小時 ${Math.floor((status.data.uptime_seconds % 3600) / 60)} 分</div>`}
     </div>
     <h2 class="section-title">帳號</h2>
+    <${Passkeys} />
     <div class="actions"><button class="btn outlined" onClick=${logout}><${Icon} name="logout" />登出</button></div>
   </section>`;
 }

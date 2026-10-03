@@ -103,11 +103,12 @@ export function Home() {
     ${d && html`<${Shelf} title="最近播放" albums=${d.recently_played}
       more=${html`<a class="btn text" href=${href('history')}><${Icon} name="history" />播放記錄</a>`} />`}
     ${spoken.length > 0 && html`<h2 class="section-title">未聽完的廣播劇</h2>
-      <ul class="list">${spoken.map((t) => html`<li key=${t.id}><button class="row plain wide" onClick=${() => playInAlbum(t)}>
+      <ul class="list spoken-list">${spoken.map((t) => html`<li key=${t.id}><button class="row plain wide spoken-row" onClick=${() => playInAlbum(t)}>
         <${Cover} id=${t.cover_id} size=${96} className="thumb" />
-        <span class="grow track-text"><span class="title">${t.title}</span><span class="sub">${t.album || t.artist}</span>
+        <span class="track-text"><span class="title">${t.title}</span>
+          <span class=${'sub' + (t.album || t.artist ? '' : ' missing')}>${t.album || t.artist || '沒有專輯'}</span>
           <${ProgressLine} position=${t.position_ms} duration=${t.asset.duration_ms} /></span>
-        <span class="sub">剩 ${fmtTime(t.asset.duration_ms - t.position_ms)}</span>
+        <span class="sub left">剩 ${fmtTime(Math.max(t.asset.duration_ms - t.position_ms, 0))}</span>
       </button></li>`)}</ul>`}
     ${d && html`<${Shelf} title="最近加入" albums=${d.recently_added} />`}
     ${att && (att.without_album > 0 || att.unknown_artist > 0 || att.missing > 0) && html`<h2 class="section-title">待整理</h2>

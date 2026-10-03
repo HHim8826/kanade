@@ -1,5 +1,6 @@
-import { useState } from '../../vendor/hooks.module.js';
-import { post } from '../api.js';
+import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { get, post } from '../api.js';
+import { loginWithPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { ErrorBox, Icon, html } from '../ui.js';
 
 export function Login({ onLogin }) {
@@ -7,6 +8,23 @@ export function Login({ onLogin }) {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  // The passkey button shows only once a passkey was added (in the settings) and the browser can use it.
+  const [passkeys, setPasskeys] = useState(false);
+  useEffect(() => {
+    if (passkeysSupported()) get('/passkeys/available', { allow401: true }).then((r) => setPasskeys(r.available), () => {});
+  }, []);
+  const withPasskey = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await loginWithPasskey();
+      onLogin();
+    } catch (err) {
+      const msg = passkeyMessage(err);
+      if (msg) setError(new Error(msg));
+      setBusy(false);
+    }
+  };
   const submit = async (e) => {
     e.preventDefault();
     setBusy(true);
@@ -26,6 +44,8 @@ export function Login({ onLogin }) {
       <label class="field"><span>密碼</span><input type="password" autocomplete="current-password" value=${password} onInput=${(e) => setPassword(e.target.value)} required /></label>
       <${ErrorBox} error=${error} />
       <button class="btn filled wide" disabled=${busy}>${busy ? '登入中…' : '登入'}</button>
+      ${passkeys && html`<div class="or"><span>或</span></div>
+        <button type="button" class="btn outlined wide" disabled=${busy} onClick=${withPasskey}><${Icon} name="passkey" />使用 passkey 登入</button>`}
     </form>
   </main>`;
 }

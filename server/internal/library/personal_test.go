@@ -170,3 +170,28 @@ func TestHistoryAndTop(t *testing.T) {
 		t.Fatalf("top = %+v %v", top, err)
 	}
 }
+
+// Lyrics found online: taken without asking only where there are none; chosen, they replace even
+// lyrics typed by hand.
+func TestFoundLyrics(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	r := publish(t, s, "l9", EntryInput{Title: "Song"})
+	s.SetLyrics(ctx, r.TrackID, LyricsManual, "my own")
+	if saved, _ := s.SetFoundLyrics(ctx, r.TrackID, "[00:01.00]found", false); saved {
+		t.Fatal("an automatic match replaced lyrics")
+	}
+	if saved, err := s.SetFoundLyrics(ctx, r.TrackID, "[00:01.00]found", true); err != nil || !saved {
+		t.Fatalf("chosen: %v", err)
+	}
+	if l, _ := s.Lyrics(ctx, r.TrackID); l.Source != LyricsLRCLIB || !l.Synced || l.Text != "[00:01.00]found" {
+		t.Fatalf("stored %+v", l)
+	}
+	other := publish(t, s, "l10", EntryInput{Title: "Other"})
+	if saved, _ := s.SetFoundLyrics(ctx, other.TrackID, "plain words", false); !saved {
+		t.Fatal("an automatic match where there were none was not stored")
+	}
+	if saved, _ := s.SetFoundLyrics(ctx, 999, "x", true); saved {
+		t.Fatal("stored for a track that does not exist")
+	}
+}

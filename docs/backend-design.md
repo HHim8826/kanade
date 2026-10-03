@@ -97,6 +97,8 @@ DIR/
 |---|---|
 | `POST /setup` | 首次建立管理員；需資料目錄 `setup-code` 檔內的一次性設定碼 |
 | `POST /login`、`POST /logout` | 登入取得 token（失敗 5 次／15 分鐘依 IP 節流）、登出 |
+| `GET /passkeys/available`、`POST /passkeys/login/options`、`POST /passkeys/login` | 不需登入：是否有任何 passkey（登入頁據此顯示按鈕）、取得一次性 challenge、以 passkey 的回應登入（同密碼登入的節流與 cookie） |
+| `GET /passkeys`、`POST /passkeys/options`、`POST /passkeys`、`PATCH`／`DELETE /passkeys/{id}` | 列出自己的 passkey；`{"password"}` 確認密碼後取得建立選項（密碼錯回 403）；儲存裝置建立的 passkey；改名、移除 |
 | `GET /status` | Drive 連線、aria2 是否就緒 |
 | `GET /drive`、`POST /drive/client` | Drive 帳號與容量；載入 OAuth client JSON |
 | `POST /drive/auth`、`POST /drive/auth/paste` | 產生授權網址（回呼 `GET /oauth/google/callback`，公開但只接受本服務產生的 state）；貼上回呼網址完成授權 |
@@ -133,6 +135,7 @@ DIR/
 | `POST /playlists/{id}/items`、`DELETE /playlists/{id}/items/{item}` | 加入 `{"items": [{"track_id", "album_id", "asset_id"}]}`；移除一個條目 |
 | `PUT /playlists/{id}/order` | `{"items": [條目 ID...]}`，必須剛好是歌單現有的全部條目 |
 | `GET`／`PUT`／`DELETE /tracks/{id}/lyrics` | 歌詞；手動輸入或刪除 |
+| `GET`／`POST /tracks/{id}/lyrics/online` | 在 LRCLIB 尋找這首歌的歌詞（只送標題與歌手，依吻合程度排序，`exact` 為標題、歌手相同且長度差 2 秒內）；`{"id"}` 套用使用者選的（取代現有歌詞），加上 `"auto": true` 則只在沒有歌詞時套用 |
 | `GET /history?limit&before&before_id`、`GET /history/top?days` | 播放記錄（略過不到 10 秒的跳過；游標為上一頁最後一筆的時間與 `play_id`）；最常播放 |
 | `GET`／`PATCH`／`DELETE /tracks/{id}` | 歌曲資訊（含別名、收錄於哪些專輯）；編輯（`title`、`artist`、`version`、`kind`、`aliases`）；永久刪除（音檔移到 Drive 垃圾桶） |
 | `POST /tracks/{id}/restore`、`POST /albums/{id}/restore` | 恢復原標籤 |
@@ -329,6 +332,21 @@ DIR/
   - 延遲的首個回報不會變成最近播放；seq 2 先到時開始時間會修正；時鐘快 5 分鐘的裝置不會跑到未來，也不會蓋過其他裝置較新的回報。
   - 真 FFmpeg：同一份 CUE 重複；修正切點後第 1、2 首重新入庫、第 3 首重複；修正後的 CUE 再匯入為重複。
   - 部分撤回、撤回再重做之後，撤回較早的修改仍保留更正；連續撤回與重做後可以正常撤回。
+
+### 使用者回饋：passkey、線上歌詞、佇列拖曳、捲動條、版面（2026-10-03）
+
+- Passkey（遷移 21：`passkeys`；新套件 `internal/webauthn`）：
+  - 設定頁「帳號 → Passkey」先輸入目前的密碼，再由裝置建立 passkey（可探索憑證、要求使用者驗證：指紋、臉部或螢幕鎖定）。之後登入頁才會出現「使用 passkey 登入」，密碼仍可使用。
+  - 驗證全部自行實作，沒有新增依賴：CBOR（只接受定長、限制深度與長度、拒絕重複鍵）、authenticator data（rpId 雜湊、使用者在場與驗證旗標）、COSE 公鑰（ES256、EdDSA、RS256 ≥ 2048 位元）、clientData 的 type、challenge、origin 與跨站框架、簽名與計數器（使用中的計數器必須遞增）。
+  - 不檢查 attestation（要求 `none`）。challenge 只能用一次、5 分鐘失效，同一位址最多 8 個待處理。登入失敗與密碼登入共用節流。RP 是公開網址的主機（music.ser1ka.com）。
+  - 測試包含軟體驗證器（`webauthn/webauthntest`）的三種演算法、各種偽造情況、模糊測試，以及 API 的完整流程；Chromium 的虛擬驗證器實測過加入、登出、用 passkey 登入。
+- 線上歌詞（新套件 `internal/lrclib`，歌詞來源多了 `lrclib`）：
+  - 原本的自動關聯維持：音檔內嵌歌詞與同名 .lrc。沒有歌詞時，播放頁的歌詞分頁會向 LRCLIB 查詢這首歌，只送標題與歌手，廣播劇要按一下才查。
+  - 完全吻合（標題、歌手相同，長度差 2 秒內，有歌詞）就自動套用，只在還沒有歌詞時寫入；否則列出候選讓使用者選。
+  - 編輯歌詞的對話框可以「線上尋找」；來自 LRCLIB 的歌詞可以「換一個」。查詢結果在伺服器快取一小時。
+- 播放佇列拖曳：每列有拖曳把手，滑鼠、觸控筆、手指都可以拖到新位置；靠近捲動區邊緣時自動捲動，觸控被取消時放回原處。歌單的拖曳排序改用同一個 `useReorder`。
+- 捲動條：全站改成細的、使用主題顏色的捲動條，平常透明。區域捲動時（約一秒）或滑鼠靠近捲動條時才顯示（`scrollbars.js`）；手機保留系統的浮動捲動條；Safari 用 `::-webkit-scrollbar` 做同樣的效果。
+- 首頁「未聽完的廣播劇」：列表改為固定的格線（封面、標題／專輯／進度、固定寬度的剩餘時間），每列等高、進度條等長、時間對齊；沒有專輯也沒有歌手時顯示「沒有專輯」。原因是 `button.plain` 的 `padding: 0` 蓋掉了 `.row` 的內距，所有按鈕形式的列（播放記錄、加入歌單、整理頁）都受影響，一併修正。
 
 ## 使用方式（開發環境）
 

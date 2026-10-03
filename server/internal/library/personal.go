@@ -334,6 +334,7 @@ const (
 	LyricsEmbedded = "embedded"
 	LyricsLRC      = "lrc"
 	LyricsManual   = "manual"
+	LyricsLRCLIB   = "lrclib" // looked up online
 )
 
 type Lyrics struct {
@@ -389,6 +390,27 @@ func (s *Store) SetLyrics(ctx context.Context, trackID int64, source, text strin
 	if n == 0 && source == LyricsManual {
 		return false, ErrNotFound
 	}
+	return n > 0, nil
+}
+
+// SetFoundLyrics stores lyrics looked up online. Chosen by the user they replace whatever is
+// there; taken without asking (an exact match) they go only where a track has none yet.
+func (s *Store) SetFoundLyrics(ctx context.Context, trackID int64, text string, chosen bool) (bool, error) {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if text == "" || len(text) > maxLyrics {
+		return false, ErrInvalid
+	}
+	conflict := `DO NOTHING`
+	if chosen {
+		conflict = `DO UPDATE SET source = excluded.source, synced = excluded.synced, text = excluded.text, updated_at = excluded.updated_at`
+	}
+	r, err := s.db.ExecContext(ctx, `INSERT INTO lyrics (track_id, source, synced, text, updated_at)
+		SELECT id, ?, ?, ?, ? FROM tracks WHERE id = ? ON CONFLICT (track_id) `+conflict,
+		LyricsLRCLIB, IsSynced(text), text, db.Now(), trackID)
+	if err != nil {
+		return false, err
+	}
+	n, _ := r.RowsAffected()
 	return n > 0, nil
 }
 

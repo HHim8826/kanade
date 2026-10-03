@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
-import { api, get } from '../api.js';
+import { api, get, post } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
   clearUpcoming, current, cycleMode, endScrub, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, scrubTo, seek,
   setVolume, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
+import { DragHandle, useReorder } from './common.js';
 import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 
@@ -151,6 +152,8 @@ export function NowPlaying() {
 // Queue lists what plays, in play order; songs can be moved, moved up next or taken out.
 function Queue({ s }) {
   const last = s.queue.length - 1;
+  const current = s.queue[s.index]?.qid;
+  const { drag, start, order } = useReorder(moveItem); // drag a row by its handle to a new place
   const menu = (e, i) => openMenu(e, [
     i !== s.index && i !== s.index + 1 && { icon: 'playNext', label: '移到下一首播放', onClick: () => playAfterCurrent(i) },
     i > 0 && { icon: 'up', label: '上移', onClick: () => moveItem(i, i - 1) },
@@ -163,9 +166,11 @@ function Queue({ s }) {
       <button class="btn text" disabled=${s.index >= last} onClick=${clearUpcoming}>清除待播</button>
       <button class="btn text" onClick=${() => resetPlayer()}>停止並清空</button>
     </div>
-    <ol class="tracks">${s.queue.map((q, i) => html`<li key=${q.qid || i}>
-      <div class=${'track' + (i === s.index ? ' current' : '')}>
-        <button class="track-main" onClick=${() => playAt(i)} aria-current=${i === s.index ? 'true' : undefined}>
+    <ol class=${'tracks queue-list' + (drag ? ' dragging' : '')}>${order(s.queue).map((q, i) => html`<li key=${q.qid || i}
+      class=${drag && drag.to === i ? 'lifted' : ''}>
+      <div class=${'track' + (q.qid === current ? ' current' : '')}>
+        <${DragHandle} onStart=${(e) => start(e, i)} label=${`拖曳「${q.title}」改變播放順序`} />
+        <button class="track-main" onClick=${() => playAt(i)} aria-current=${q.qid === current ? 'true' : undefined}>
           <span class="num">${i + 1}</span>
           <span class="track-text"><span class="title">${q.title}</span><span class="sub">${q.artist}</span></span>
           <span class="meta">${fmtTime(q.durationMs)}</span>
@@ -181,6 +186,7 @@ function Queue({ s }) {
 
 const lyricsCache = new Map(); // track ID -> lyrics or null; edits clear the entry
 const lyricsRev = createStore({ n: 0 }); // bumped after an edit so open views reload
+const lookFor = new Set(); // spoken tracks the listener asked LRCLIB about
 
 function loadLyrics(trackId) {
   if (lyricsCache.has(trackId)) return Promise.resolve(lyricsCache.get(trackId));
@@ -188,6 +194,66 @@ function loadLyrics(trackId) {
     lyricsCache.set(trackId, l);
     return l;
   });
+}
+
+// ---- lyrics found online (LRCLIB) ----
+// Asked only for a song whose lyrics are being looked at; the answer is kept for this page.
+const foundCache = new Map(); // track ID -> candidates
+
+function findLyrics(trackId) {
+  if (foundCache.has(trackId)) return Promise.resolve(foundCache.get(trackId));
+  return get(`/tracks/${trackId}/lyrics/online`).catch((e) => (e.status === 404 ? [] : Promise.reject(e))).then((list) => {
+    foundCache.set(trackId, list);
+    return list;
+  });
+}
+
+async function applyFound(trackId, id, auto = false) {
+  const r = await post(`/tracks/${trackId}/lyrics/online`, { id, auto });
+  lyricsCache.delete(trackId);
+  lyricsRev.set((v) => ({ n: v.n + 1 }));
+  return r.saved;
+}
+
+const fmtSec = (sec) => fmtTime(Math.round(sec) * 1000);
+
+// FoundLyrics lists what LRCLIB has for a song; choosing one stores it. With auto, an exact match
+// (same title and artist, length within two seconds) is stored right away, where the song has no
+// lyrics yet.
+function FoundLyrics({ item, auto, onChosen }) {
+  const data = useLoad(() => findLyrics(item.trackId), [item.trackId]);
+  const [busy, setBusy] = useState(0);
+  const list = data.data || [];
+  const best = list[0];
+  useEffect(() => {
+    if (auto && best && best.exact && !best.instrumental) {
+      setBusy(best.id);
+      applyFound(item.trackId, best.id, true).catch((e) => { toast(e.message, 'error'); setBusy(0); });
+    }
+  }, [auto, best && best.id]);
+  const choose = async (c) => {
+    setBusy(c.id);
+    try {
+      await applyFound(item.trackId, c.id);
+      toast('已套用 LRCLIB 的歌詞');
+      onChosen && onChosen();
+    } catch (e) {
+      toast(e.message, 'error');
+      setBusy(0);
+    }
+  };
+  if (data.loading || (auto && busy)) return html`<div class="found-wait sub"><${Spinner} />正在 LRCLIB 尋找歌詞…</div>`;
+  if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${() => { foundCache.delete(item.trackId); data.reload(); }} />`;
+  if (!list.length) return html`<p class="sub found-none">LRCLIB 也沒有找到這首歌的歌詞。</p>`;
+  return html`<div class="found">
+    <p class="sub">LRCLIB 找到 ${list.length} 個可能的歌詞，選一個套用：</p>
+    <ul class="found-list">${list.map((c) => html`<li key=${c.id}><button class="found-item" disabled=${busy !== 0} onClick=${() => choose(c)}>
+      <span class="title">${c.title}${c.exact ? html` <span class="pill good">吻合</span>` : ''}</span>
+      <span class="sub">${[c.artist, c.album, c.duration ? fmtSec(c.duration) : '', c.instrumental ? '純音樂' : c.synced ? '逐行同步' : '純文字']
+        .filter(Boolean).join(' · ')}</span>
+      ${c.preview && html`<span class="found-preview">${c.preview}</span>`}
+    </button></li>`)}</ul>
+  </div>`;
 }
 
 // parseLRC reads [mm:ss.xx] lines (several tags on one line repeat it) and [offset:±ms];
@@ -232,9 +298,14 @@ function Lyrics({ item, time }) {
   if (!item.trackId) return html`<${Empty} icon="lyrics">這首歌沒有歌詞。<//>`;
   if (data.loading) return html`<${Spinner} />`;
   if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`;
-  if (!data.data) {
-    return html`<${Empty} icon="lyrics">這首歌沒有歌詞。
-      <div class="actions center"><button class="btn tonal" onClick=${() => editLyrics(item)}>新增歌詞</button></div><//>`;
+  if (!data.data) { // none of its own: LRCLIB is asked (not for drama and radio, rarely there)
+    return html`<div class="lyrics-none">
+      <${Empty} icon="lyrics">這首歌沒有歌詞。<//>
+      ${item.kind === 'spoken' && !lookFor.has(item.trackId)
+        ? html`<div class="actions center"><button class="btn text" onClick=${() => { lookFor.add(item.trackId); lyricsRev.set((v) => ({ n: v.n + 1 })); }}>在 LRCLIB 尋找</button></div>`
+        : html`<${FoundLyrics} item=${item} auto=${item.kind !== 'spoken'} />`}
+      <div class="actions center"><button class="btn tonal" onClick=${() => editLyrics(item)}>自己輸入歌詞</button></div>
+    </div>`;
   }
   const mark = () => { userScrolled.current = Date.now(); };
   return html`<div class="lyrics-wrap">
@@ -244,18 +315,22 @@ function Lyrics({ item, time }) {
             <button onClick=${() => seek(Math.max(l.t, 0) / 1000)}>${l.text || '♪'}</button></li>`)}</ol>`
       : html`<div class="lyrics plain">${data.data.text.replace(/\[[^\]]*\]/g, '')}</div>`}
     <div class="lyrics-foot sub">
-      <span>${{ embedded: '來自音檔標籤', lrc: '來自 LRC 檔', manual: '手動輸入' }[data.data.source] || ''}</span>
-      <button class="btn text" onClick=${() => editLyrics(item)}>編輯</button>
+      <span>${{ embedded: '來自音檔標籤', lrc: '來自 LRC 檔', manual: '手動輸入', lrclib: '來自 LRCLIB' }[data.data.source] || ''}</span>
+      <span>
+        ${data.data.source === 'lrclib' && html`<button class="btn text" onClick=${() => editLyrics(item, true)}>換一個</button>`}
+        <button class="btn text" onClick=${() => editLyrics(item)}>編輯</button>
+      </span>
     </div>
   </div>`;
 }
 
-function editLyrics(item) {
-  showDialog((close) => html`<${LyricsEditor} item=${item} close=${close} />`);
+function editLyrics(item, online = false) {
+  showDialog((close) => html`<${LyricsEditor} item=${item} close=${close} online=${online} />`);
 }
 
-function LyricsEditor({ item, close }) {
+function LyricsEditor({ item, close, online: startOnline }) {
   const data = useLoad(() => loadLyrics(item.trackId), [item.trackId]);
+  const [online, setOnline] = useState(!!startOnline);
   const [text, setText] = useState(null);
   const [busy, setBusy] = useState(false);
   const value = text ?? (data.data ? data.data.text : '');
@@ -273,8 +348,18 @@ function LyricsEditor({ item, close }) {
       setBusy(false);
     }
   };
+  if (online) {
+    return html`<${Dialog} title=${`線上尋找歌詞：${item.title}`} onClose=${close} actions=${html`
+        <button class="btn text" onClick=${() => setOnline(false)}>自己輸入</button>
+        <span class="grow"></span>
+        <button class="btn text" onClick=${close}>取消</button>`}>
+      <p class="hint">只會把這首歌的標題和歌手送到 LRCLIB（lrclib.net）查詢。選擇的歌詞會取代目前的歌詞。</p>
+      <${FoundLyrics} item=${item} onChosen=${close} />
+    <//>`;
+  }
   return html`<${Dialog} title=${`歌詞：${item.title}`} onClose=${close} actions=${html`
       ${data.data && html`<button class="btn text danger-text" disabled=${busy} onClick=${() => save('')}>刪除</button>`}
+      <button class="btn text" onClick=${() => setOnline(true)}>線上尋找</button>
       <span class="grow"></span>
       <button class="btn text" onClick=${close}>取消</button>
       <button class="btn filled" disabled=${busy || !value.trim()} onClick=${() => save(value)}>儲存</button>`}>
