@@ -32,9 +32,9 @@ const (
 	InboxFolder     = "inbox"
 	inboxDuplicates = "重複"
 	inboxProcessed  = "已處理"
-	// inboxSettle is how long a top-level folder must go without new files before it is imported,
-	// so an album still being copied in is not split across batches.
-	inboxSettle = 5 * time.Minute
+	// defaultInboxSettle is how long a top-level folder must go without new files before it is
+	// imported, so an album still being copied in is not split across batches (SetInboxSettle).
+	defaultInboxSettle = 5 * time.Minute
 	// At most this many new files are looked at per scan and queued per batch.
 	inboxScanMax  = 20000
 	inboxBatchMax = 2000
@@ -46,6 +46,24 @@ type driveFiles interface {
 	Move(ctx context.Context, id, to string, from []string) error
 	OpenRange(ctx context.Context, id string, start, end int64) (*http.Response, error)
 	GetFile(ctx context.Context, id, fields string) (gdrive.File, error)
+}
+
+// SetInboxSettle changes how long an inbox folder must go without new files (review #77).
+func (im *Importer) SetInboxSettle(d time.Duration) {
+	if d <= 0 {
+		d = -1 // no wait (0 is "not set")
+	}
+	im.settle.Store(int64(d))
+}
+
+func (im *Importer) inboxSettle() time.Duration {
+	switch d := im.settle.Load(); {
+	case d > 0:
+		return time.Duration(d)
+	case d < 0:
+		return 0
+	}
+	return defaultInboxSettle
 }
 
 func (im *Importer) df() (driveFiles, bool) {
@@ -123,7 +141,7 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 	var fresh []found
 	waiting := 0
 	for _, f := range files {
-		if top, _, _ := strings.Cut(f.rel, "/"); time.Since(newest[top]) < inboxSettle {
+		if top, _, _ := strings.Cut(f.rel, "/"); time.Since(newest[top]) < im.inboxSettle() {
 			waiting++
 		} else if len(fresh) < inboxBatchMax {
 			fresh = append(fresh, f)

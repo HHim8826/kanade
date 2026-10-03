@@ -57,6 +57,13 @@ type Status struct {
 	Stopped      bool  `json:"stopped"`          // downloads and uploads are held, not just the cache trimmed
 }
 
+// SetReserve changes the free space to keep (review #74); the next check applies it.
+func (g *Guard) SetReserve(n int64) {
+	g.mu.Lock()
+	g.Reserve = n
+	g.mu.Unlock()
+}
+
 func (g *Guard) Status() Status {
 	g.mu.Lock()
 	defer g.mu.Unlock()

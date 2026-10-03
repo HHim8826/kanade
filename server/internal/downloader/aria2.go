@@ -11,13 +11,16 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -115,6 +118,24 @@ type Aria2 struct {
 	log                 *slog.Logger
 	RPC                 *RPC
 	ready               atomic.Bool
+
+	mu     sync.Mutex
+	global map[string]string // options set by SetGlobal, over the defaults of writeConfig
+}
+
+// SetGlobal changes global options (speed limits, connections, seeding: review #75): at once
+// when aria2 runs, and in the config it starts with from now on.
+func (a *Aria2) SetGlobal(ctx context.Context, opts map[string]string) error {
+	a.mu.Lock()
+	if a.global == nil {
+		a.global = map[string]string{}
+	}
+	maps.Copy(a.global, opts)
+	a.mu.Unlock()
+	if !a.Ready() {
+		return nil
+	}
+	return a.RPC.Call(ctx, "changeGlobalOption", nil, opts)
 }
 
 // NewAria2 prepares aria2 at bin. With bin "" there is none: Run returns at once and the
@@ -190,6 +211,20 @@ func (a *Aria2) writeConfig(port int) (string, error) {
 		"summary-interval=0",
 		"",
 	}, "\n")
+	a.mu.Lock()
+	if len(a.global) > 0 { // SetGlobal's options replace the defaults
+		var lines []string
+		for _, l := range strings.Split(conf, "\n") {
+			if k, _, _ := strings.Cut(l, "="); a.global[k] == "" {
+				lines = append(lines, l)
+			}
+		}
+		for _, k := range slices.Sorted(maps.Keys(a.global)) {
+			lines = append(lines[:len(lines)-1], k+"="+a.global[k], "")
+		}
+		conf = strings.Join(lines, "\n")
+	}
+	a.mu.Unlock()
 	path := filepath.Join(a.dir, "aria2.conf")
 	return path, os.WriteFile(path, []byte(conf), 0o600)
 }

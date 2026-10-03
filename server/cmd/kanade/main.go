@@ -36,6 +36,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/logfile"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
 	"github.com/HHim8826/kanade/server/internal/rss"
+	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
@@ -120,6 +121,14 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	fs.StringVar(&cfg.Aria2Path, "aria2", cfg.Aria2Path, "path to aria2c")
 	logPath := fs.String("log", "", `log file, rotated at 10 MB with 5 kept (default "<data>/logs/kanade.log"; "-" for stderr)`)
 	fs.Parse(args)
+	// Resources given as flags win for this run over the settings page's (review #74).
+	pinned := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "cache-mib", "staging-mib", "reserve-gib":
+			pinned[strings.ReplaceAll(f.Name, "-", "_")] = true
+		}
+	})
 
 	if err := cfg.Prepare(); err != nil {
 		return err
@@ -148,6 +157,20 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	lib := library.New(d)
 	if err := lib.EnsureSearchIndex(ctx); err != nil {
 		return err
+	}
+	store := &settings.Store{DB: d}
+	res, err := store.Resources(ctx)
+	if err != nil {
+		return err
+	}
+	if !pinned["cache_mib"] {
+		*cacheMiB = res.CacheMiB
+	}
+	if !pinned["staging_mib"] {
+		*stagingMiB = res.StagingMiB
+	}
+	if !pinned["reserve_gib"] {
+		*reserveGiB = res.ReserveGiB
 	}
 	imp := importer.New(d, lib, drive, cfg.Path(config.DirStaging), log)
 	if imp.FFmpeg = ffmpeg.Find(cfg.DataDir); imp.FFmpeg != nil {
@@ -214,9 +237,44 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace, Cache: cache,
 		DL: downloads, UL: ups, Log: log}
 	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget}
+
+	// The settings page's settings (reviews #74, #75, #77): applied now, and again when saved.
+	store.OnResources = func(r settings.Resources) {
+		if !pinned["cache_mib"] {
+			cache.SetBudget(r.CacheMiB << 20)
+		}
+		limit, reserve := budget.Limits()
+		if !pinned["staging_mib"] {
+			limit = r.StagingMiB << 20
+		}
+		if !pinned["reserve_gib"] {
+			reserve = r.ReserveGiB << 30
+		}
+		budget.SetLimits(limit, reserve)
+		guard.SetReserve(reserve)
+		downloads.Poke() // a larger budget may let a waiting round start
+	}
+	dl, err := store.Downloads(ctx)
+	if err != nil {
+		return err
+	}
+	downloads.SetPolicy(ctx, dl)
+	store.OnDownloads = func(p settings.Downloads) { downloads.SetPolicy(context.Background(), p) }
+	dr, err := store.Drive(ctx)
+	if err != nil {
+		return err
+	}
+	applyDrive := func(p settings.Drive) {
+		syncer.Configure(time.Duration(p.CheckMinutes)*time.Minute, p.AutoInbox)
+		imp.SetInboxSettle(time.Duration(p.SettleMinutes) * time.Minute)
+	}
+	applyDrive(dr)
+	store.OnDrive = applyDrive
+
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
-		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer})
+		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
+		Settings: store, Staging: budget, Pinned: pinned})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()

@@ -33,7 +33,7 @@ export function Login({ onLogin }) {
     setBusy(true);
     setError(null);
     try {
-      await post('/login', { username, password, device: 'web: ' + navigator.userAgent.slice(0, 80), cookie: true }, { allow401: true });
+      await post('/login', { username, password, device: 'web: ' + navigator.userAgent.slice(0, 240), cookie: true }, { allow401: true });
       onLogin();
     } catch (err) {
       setError(err.status === 401 ? new Error('帳號或密碼錯誤') : err.status === 429 ? new Error('嘗試次數過多，請 15 分鐘後再試') : err);

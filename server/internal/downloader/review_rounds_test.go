@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/settings"
 )
 
 type rig struct {
@@ -376,5 +378,124 @@ func TestFetchedAgainSurvivesFailedHandOver(t *testing.T) {
 	r.d.QueryRow(`SELECT count(*) FROM sidecars WHERE kind = 'log'`).Scan(&logs)
 	if logs != 1 {
 		t.Fatalf("rip logs %d", logs)
+	}
+}
+
+// The download settings (review #75): aria2 gets the speed limits and connections; two downloads
+// fetch at once when allowed; Kanade keeps seeding by the settings, seeding again when aria2 lost
+// the task (as after a restart), and ends it when the settings say not to seed.
+func TestDownloadSettings(t *testing.T) {
+	r := newRig(t, 10<<20)
+	ctx := r.ctx
+	slow := settings.Downloads{DownKiB: 48, Concurrent: 2, MaxPeers: 7, Seed: true}
+	r.svc.SetPolicy(ctx, slow)
+	var g map[string]string
+	if err := r.svc.aria.RPC.Call(ctx, "getGlobalOption", &g); err != nil {
+		t.Fatal(err)
+	}
+	if g["max-overall-download-limit"] != "49152" || g["bt-max-peers"] != "7" || g["max-concurrent-downloads"] != "6" {
+		t.Fatalf("aria2 options %v %v %v", g["max-overall-download-limit"], g["bt-max-peers"], g["max-concurrent-downloads"])
+	}
+	// A second torrent of its own.
+	content := filepath.Join(r.tmp, "web2")
+	var names []string
+	for _, f := range []string{"tone.flac", "tone-hires.flac"} {
+		data, _ := os.ReadFile(filepath.Join("../media/testdata", f))
+		os.MkdirAll(filepath.Join(content, "Box2"), 0o755)
+		os.WriteFile(filepath.Join(content, "Box2", f), data, 0o644)
+		names = append(names, f)
+	}
+	web := httptest.NewServer(http.FileServer(http.Dir(content)))
+	defer web.Close()
+	second := makeTorrent(t, content, "Box2", web.URL+"/", names)
+
+	one := r.add(t, nil)
+	two, err := r.svc.Add(ctx, "", second, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "file list", 20*time.Second, func() bool { v, _ := r.svc.Get(ctx, two); return v.State == StateSelecting })
+	if err := r.svc.Select(ctx, two, []int{1, 2}); err != nil {
+		t.Fatal(err)
+	}
+	state := func(id int64) string { v, _ := r.svc.Get(ctx, id); return v.State }
+	waitFor(t, "both downloading", 20*time.Second, func() bool { return state(one) == StateDownloading && state(two) == StateDownloading })
+
+	fast := slow
+	fast.DownKiB = 0
+	r.svc.SetPolicy(ctx, fast)
+	waitFor(t, "both seeding", 60*time.Second, func() bool { return state(one) == StateSeeding && state(two) == StateSeeding })
+
+	// aria2 loses the task (it keeps no finished task across a restart): seeding goes on.
+	row, _ := r.svc.load(ctx, one)
+	r.svc.aria.RPC.Call(ctx, "forceRemove", nil, row.gid)
+	time.Sleep(500 * time.Millisecond)
+	r.svc.aria.RPC.Call(ctx, "removeDownloadResult", nil, row.gid)
+	waitFor(t, "seeding again", 30*time.Second, func() bool {
+		now, _ := r.svc.load(ctx, one)
+		return now.gid != "" && now.gid != row.gid && now.State == StateSeeding
+	})
+
+	off := fast
+	off.Seed = false
+	r.svc.SetPolicy(ctx, off)
+	go r.imp.Run(ctx)
+	for _, id := range []int64{one, two} {
+		waitFor(t, "seeding ended and files removed", 60*time.Second, func() bool {
+			v, _ := r.svc.Get(ctx, id)
+			return v.State == StateCompleted && v.FilesRemoved
+		})
+	}
+	if v, _ := r.svc.Get(ctx, one); v.Note != "not seeding (settings)" {
+		t.Fatalf("note %q", v.Note)
+	}
+}
+
+func TestSeedingOver(t *testing.T) {
+	s := &Service{}
+	now := db.Now()
+	for _, c := range []struct {
+		p        settings.Downloads
+		up, done int64
+		want     bool
+	}{
+		{settings.Downloads{Seed: true, SeedRatio: 1, SeedHours: 72}, 50, now - 3600_000, false},
+		{settings.Downloads{Seed: true, SeedRatio: 1, SeedHours: 72}, 100, now - 3600_000, true},
+		{settings.Downloads{Seed: true, SeedRatio: 1, SeedHours: 72}, 0, now - 73*3600_000, true},
+		{settings.Downloads{Seed: true}, 1000, now - 1000*3600_000, false},
+		{settings.Downloads{Seed: false, SeedRatio: 5}, 0, now, true},
+	} {
+		s.policy = c.p
+		r := &row{View: View{TotalBytes: 100, UploadedBytes: c.up, CompletedAt: c.done}}
+		if got := s.seedingOver(r) != ""; got != c.want {
+			t.Fatalf("%+v up %d: %v", c.p, c.up, got)
+		}
+	}
+}
+
+// aria2 started again (a crash, a restart) starts with the settings: they replace the defaults in
+// its config (review #75).
+func TestConfigCarriesSettings(t *testing.T) {
+	a, err := NewAria2("", t.TempDir(), t.TempDir(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetGlobal(context.Background(), aria2Options(settings.Downloads{UpKiB: 100, Concurrent: 3, MaxPeers: 12, Seed: true, SeedRatio: 2}))
+	path, err := a.writeConfig(1234)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	got := map[string][]string{}
+	for _, l := range strings.Split(string(raw), "\n") {
+		if k, v, ok := strings.Cut(l, "="); ok {
+			got[k] = append(got[k], v)
+		}
+	}
+	for k, want := range map[string]string{"bt-max-peers": "12", "seed-ratio": "2.00", "seed-time": "5256000",
+		"max-overall-upload-limit": "100K", "max-concurrent-downloads": "7", "rpc-listen-port": "1234"} {
+		if len(got[k]) != 1 || got[k][0] != want {
+			t.Fatalf("%s = %v, want %s", k, got[k], want)
+		}
 	}
 }

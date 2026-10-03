@@ -319,3 +319,50 @@ func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
 		t.Fatalf("new debt lost: %d", n)
 	}
 }
+
+// Configure changes how often Run looks at once, and with the inbox import off the change feed is
+// still followed (review #77).
+func TestConfigureIntervalAndInbox(t *testing.T) {
+	s, fd, _, _ := setup(t)
+	var mu sync.Mutex
+	inboxCalls := 0
+	s.Inbox = func(context.Context) (int, error) {
+		mu.Lock()
+		inboxCalls++
+		mu.Unlock()
+		return 0, nil
+	}
+	s.Delay = 10 * time.Millisecond
+	s.Configure(time.Hour, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go s.Run(ctx)
+	calls := func() (int, int) {
+		fd.mu.Lock()
+		defer fd.mu.Unlock()
+		mu.Lock()
+		defer mu.Unlock()
+		return len(fd.trashed) + fd.lists, inboxCalls
+	}
+	waitUntil := func(what string, cond func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if cond() {
+				return
+			}
+		}
+		t.Fatal(what)
+	}
+	// The first round: the feed is looked at (with its baseline pass), the inbox is not.
+	waitUntil("first round", func() bool { n, _ := calls(); return n > 0 })
+	time.Sleep(50 * time.Millisecond)
+	if _, n := calls(); n != 0 {
+		t.Fatalf("inbox looked at %d times with the import off", n)
+	}
+	// Every 20 ms with the inbox: the next round comes without waiting the hour.
+	s.Configure(20*time.Millisecond, true)
+	waitUntil("inbox rounds", func() bool { _, n := calls(); return n >= 2 })
+	if s.interval() != 20*time.Millisecond || !s.autoInbox() {
+		t.Fatal("settings not kept")
+	}
+}

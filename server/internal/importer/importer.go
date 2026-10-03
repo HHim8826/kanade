@@ -62,6 +62,7 @@ type Importer struct {
 	covers       map[string]int64         // directory -> cover ID, for the current run
 	driveDirs    map[string][]gdrive.File // inbox folder -> its files, for the current batch
 	inboxWaiting atomic.Int64             // new inbox files the last scan left for later
+	settle       atomic.Int64             // SetInboxSettle's wait (ns); 0: the default; -1: none
 	albumArtists map[string]string        // batch|album folder|album -> decided album artist
 
 	// OnBatchDone runs when a batch has no pending items left, is canceled, or has its unsaved files

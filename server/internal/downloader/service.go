@@ -27,6 +27,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/importer"
+	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
@@ -113,12 +114,13 @@ type Service struct {
 	// handed now, and when a failed hand-over is tried again (under mu).
 	handing  map[int64]bool
 	handWait map[int64]time.Time
+	policy   settings.Downloads // how many at a time, and seeding (review #75; under mu)
 }
 
 // NewService makes the service with a budget of its own; ShareBudget puts it on the shared one.
 func NewService(d *sql.DB, aria *Aria2, imp *importer.Importer, root string, budget, reserve int64, log *slog.Logger) *Service {
 	s := &Service{db: d, aria: aria, imp: imp, root: root, log: log, kick: make(chan struct{}, 1), importWait: map[int64]time.Time{},
-		handing: map[int64]bool{}, handWait: map[int64]time.Time{}}
+		handing: map[int64]bool{}, handWait: map[int64]time.Time{}, policy: settings.DefaultDownloads()}
 	s.ShareBudget(&staging.Budget{Limit: budget, Reserve: reserve, Dir: root, Free: freeSpace})
 	return s
 }
@@ -141,6 +143,9 @@ func (s *Service) reclaim(ctx context.Context) (bool, error) {
 	defer s.mu.Unlock()
 	return s.stopOldestSeed(ctx)
 }
+
+// Poke has the service look at its downloads now (a setting changed).
+func (s *Service) Poke() { s.poke() }
 
 func (s *Service) poke() {
 	select {
@@ -486,18 +491,19 @@ type row struct {
 	metaGID, gid, dir                 string
 	files                             []FileView
 	roundBytes, roundWork, doneBefore int64
+	uploadedBefore                    int64 // by earlier aria2 tasks of it
 }
 
 const rowCols = `id, source, name, info_hash, meta_gid, gid, state, dir, files, total_bytes, done_bytes, uploaded_bytes,
 	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select,
-	round, round_bytes, round_work, done_before, note`
+	round, round_bytes, round_work, done_before, note, uploaded_before`
 
 func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	var r row
 	var files string
 	err := sc.Scan(&r.ID, &r.Source, &r.Name, &r.InfoHash, &r.metaGID, &r.gid, &r.State, &r.dir, &files, &r.TotalBytes,
 		&r.DoneBytes, &r.UploadedBytes, &r.DownSpeed, &r.UpSpeed, &r.Peers, &r.Error, &r.ImportBatchID, &r.FilesRemoved,
-		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note)
+		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note, &r.uploadedBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -544,7 +550,7 @@ func (s *Service) Get(ctx context.Context, id int64) (*View, error) {
 	}
 	v := r.View
 	v.Files = r.files
-	v.Budget = s.budget.Limit
+	v.Budget, _ = s.budget.Limits()
 	if v.Files == nil {
 		v.Files = []FileView{}
 	}
@@ -756,9 +762,9 @@ func (s *Service) selectLocked(ctx context.Context, id int64, indexes []int) err
 		return errors.New("choose at least one file, using indexes from the file list")
 	}
 	note := ""
-	if selected > s.budget.Limit {
+	if limit, _ := s.budget.Limits(); selected > limit {
 		note = fmt.Sprintf("%d MB selected, more than the %d MB staging budget: it downloads in rounds, each imported and cleared before the next",
-			selected>>20, s.budget.Limit>>20)
+			selected>>20, limit>>20)
 	}
 	files, _ := json.Marshal(r.files)
 	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET files = ?, total_bytes = ?, done_bytes = 0, done_before = 0, round = 0,
@@ -1115,4 +1121,123 @@ func (s *Service) cleanup(ctx context.Context, r *row) {
 		return
 	}
 	s.db.ExecContext(ctx, `UPDATE downloads SET files_removed = 1, updated_at = ? WHERE id = ?`, db.Now(), r.ID)
+}
+
+// SetPolicy applies the download settings (review #75): speed limits and connections at once, to
+// the downloads running too; how many download at a time and how long they seed from the next poll,
+// to every download.
+func (s *Service) SetPolicy(ctx context.Context, p settings.Downloads) {
+	s.mu.Lock()
+	s.policy = p
+	var gids []string
+	if rows, err := s.db.QueryContext(ctx, `SELECT gid FROM downloads WHERE gid != '' AND state IN (?, ?, ?)`,
+		StateDownloading, StatePaused, StateSeeding); err == nil {
+		for rows.Next() {
+			var g string
+			if rows.Scan(&g) == nil {
+				gids = append(gids, g)
+			}
+		}
+		rows.Close()
+	}
+	s.mu.Unlock()
+	if s.aria == nil {
+		return
+	}
+	if err := s.aria.SetGlobal(ctx, aria2Options(p)); err != nil {
+		s.log.Warn("download settings", "err", err)
+	}
+	if s.aria.Ready() {
+		for _, g := range gids { // only connections change without restarting a running task
+			s.aria.RPC.Call(ctx, "changeOption", nil, g, map[string]string{"bt-max-peers": strconv.Itoa(p.MaxPeers)})
+		}
+	}
+	s.poke()
+}
+
+// aria2Options are the settings as aria2's global options. Kanade ends seeding itself
+// (seedingOver); aria2's own limits only back it up for tasks added from now on.
+func aria2Options(p settings.Downloads) map[string]string {
+	kib := func(n int64) string { return strconv.FormatInt(n, 10) + "K" }
+	ratio, minutes := "0.0", "5256000" // no limit: ten years
+	if p.SeedRatio > 0 {
+		ratio = strconv.FormatFloat(p.SeedRatio, 'f', 2, 64)
+	}
+	if p.SeedHours > 0 {
+		minutes = strconv.Itoa(p.SeedHours * 60)
+	}
+	if !p.Seed {
+		minutes = "0" // no seeding at all
+	}
+	return map[string]string{
+		"max-overall-download-limit": kib(p.DownKiB),
+		"max-overall-upload-limit":   kib(p.UpKiB),
+		"bt-max-peers":               strconv.Itoa(p.MaxPeers),
+		// Slots for seeding tasks and metadata fetches beside the downloads.
+		"max-concurrent-downloads": strconv.Itoa(p.Concurrent + 4),
+		"seed-ratio":               ratio,
+		"seed-time":                minutes,
+	}
+}
+
+// seedingOver says why a seeding download should stop by the settings, or "" to go on seeding:
+// not seeding at all, the share ratio (of what it uploaded over what it downloaded) or the time
+// since it completed.
+func (s *Service) seedingOver(r *row) string {
+	p := s.policy
+	switch {
+	case !p.Seed:
+		return "not seeding (settings)"
+	case p.SeedRatio > 0 && r.TotalBytes > 0 && float64(r.UploadedBytes)/float64(r.TotalBytes) >= p.SeedRatio:
+		return fmt.Sprintf("seeded to a share ratio of %.2g", p.SeedRatio)
+	case p.SeedHours > 0 && r.CompletedAt > 0 && db.Now()-r.CompletedAt >= int64(p.SeedHours)*3600_000:
+		return fmt.Sprintf("seeded for %d hours", p.SeedHours)
+	}
+	return ""
+}
+
+// stopSeeding ends a download's seeding; its files go once its imports have them (cleanup).
+func (s *Service) stopSeeding(ctx context.Context, r *row, why string) {
+	if r.gid != "" {
+		s.aria.RPC.Call(ctx, "forceRemove", nil, r.gid)
+		s.aria.RPC.Call(ctx, "removeDownloadResult", nil, r.gid)
+	}
+	r.State = StateCompleted
+	s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, note = ?, up_speed = 0, peers = 0, updated_at = ? WHERE id = ?`,
+		StateCompleted, why, db.Now(), r.ID)
+	s.log.Info("seeding ended", "download", r.ID, "why", why)
+}
+
+// reseed seeds again a download whose aria2 task was lost (aria2 keeps no finished task across a
+// restart): added again from its torrent, checking the last round's files on disk.
+func (s *Service) reseed(ctx context.Context, r *row) error {
+	torrent, err := s.torrentFor(ctx, r)
+	if err != nil {
+		return err
+	}
+	var pick []string
+	for _, f := range r.files {
+		if f.Selected && f.Round == r.Round {
+			pick = append(pick, strconv.Itoa(f.Index))
+		}
+	}
+	if len(pick) == 0 {
+		return errors.New("no file to seed")
+	}
+	gid, err := s.addTorrent(ctx, torrent, r.dir, true)
+	if err != nil {
+		return err
+	}
+	if err := s.aria.RPC.Call(ctx, "changeOption", nil, gid, map[string]string{"select-file": strings.Join(pick, ",")}); err == nil {
+		err = s.aria.RPC.Call(ctx, "unpause", nil, gid)
+	}
+	if err != nil {
+		s.aria.RPC.Call(ctx, "forceRemove", nil, gid)
+		return err
+	}
+	r.gid, r.uploadedBefore = gid, r.UploadedBytes
+	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET gid = ?, uploaded_before = uploaded_bytes, updated_at = ? WHERE id = ?`,
+		gid, db.Now(), r.ID)
+	s.log.Info("seeding again after aria2 lost the task", "download", r.ID)
+	return err
 }

@@ -272,3 +272,18 @@ func movedTo(dd *inboxDrive, id, want string) string {
 	}
 	return dd.parentOf(id)
 }
+
+// The inbox wait is a setting; no wait at all is one too (review #77).
+func TestInboxSettleSetting(t *testing.T) {
+	im, _, _ := setup(t)
+	for _, c := range []struct{ set, want time.Duration }{{-2, 0}, {0, 0}, {7 * time.Minute, 7 * time.Minute}} {
+		im.SetInboxSettle(c.set)
+		if got := im.inboxSettle(); got != c.want {
+			t.Fatalf("set %v: %v", c.set, got)
+		}
+	}
+	fresh, _, _ := setup(t)
+	if fresh.inboxSettle() != defaultInboxSettle {
+		t.Fatal("default")
+	}
+}

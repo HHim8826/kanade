@@ -30,6 +30,8 @@ import (
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
 	"github.com/HHim8826/kanade/server/internal/rss"
+	"github.com/HHim8826/kanade/server/internal/settings"
+	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/uploads"
 	"github.com/HHim8826/kanade/server/internal/web"
@@ -55,7 +57,10 @@ type Deps struct {
 	RSS       *rss.Service
 	Disk      *diskguard.Guard
 	Sync      *drivesync.Syncer
-	StreamKey []byte // HMAC key for signed stream URLs
+	Settings  *settings.Store // the service settings the settings page changes
+	Staging   *staging.Budget // shared by downloads, uploads and the importer
+	Pinned    map[string]bool // resources given as serve flags: they win until the next start
+	StreamKey []byte          // HMAC key for signed stream URLs
 	Log       *slog.Logger
 	Version   string
 }
@@ -70,6 +75,9 @@ type Server struct {
 	cache     *stream.Cache
 	downloads *downloader.Service
 	aria2     *downloader.Aria2
+	settings  *settings.Store
+	staging   *staging.Budget
+	pinned    map[string]bool
 	uploads   *uploads.Store
 	mb        *identify.MusicBrainz
 	lrclib    *lrclib.Client
@@ -84,7 +92,8 @@ type Server struct {
 
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now()}
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
+		settings: d.Settings, staging: d.Staging, pinned: d.Pinned}
 }
 
 type ctxKey int
@@ -110,6 +119,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PATCH /api/v1/passkeys/{id}", s.authed(s.renamePasskey))
 	mux.Handle("DELETE /api/v1/passkeys/{id}", s.authed(s.deletePasskey))
 	mux.Handle("POST /api/v1/logout", s.authed(s.logout))
+	mux.Handle("POST /api/v1/account/password", s.authed(s.changePassword))
+	mux.Handle("GET /api/v1/sessions", s.authed(s.sessions))
+	mux.Handle("DELETE /api/v1/sessions/{id}", s.authed(s.endSession))
+	mux.Handle("POST /api/v1/sessions/end-others", s.authed(s.endOtherSessions))
+	mux.Handle("GET /api/v1/settings", s.authed(s.serviceSettings))
+	mux.Handle("PUT /api/v1/settings/resources", s.authed(s.setResources))
+	mux.Handle("PUT /api/v1/settings/downloads", s.authed(s.setDownloads))
+	mux.Handle("PUT /api/v1/settings/drive", s.authed(s.setDriveSync))
+	mux.Handle("POST /api/v1/cache/trim", s.authed(s.trimCache))
 	mux.Handle("GET /api/v1/status", s.authed(s.status))
 	mux.Handle("GET /api/v1/drive", s.authed(s.driveInfo))
 	mux.Handle("POST /api/v1/drive/client", s.authed(s.driveSetClient))
@@ -469,9 +487,13 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
+	s.clearCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) clearCookie(w http.ResponseWriter) {
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: "", Path: "/", MaxAge: -1, HttpOnly: true,
 		Secure: strings.HasPrefix(s.cfg.PublicURL, "https://"), SameSite: http.SameSiteStrictMode})
-	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {

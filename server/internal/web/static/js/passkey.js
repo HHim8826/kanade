@@ -35,7 +35,7 @@ export async function loginWithPasskey() {
   return post('/passkeys/login', {
     id: b64(cred.rawId), clientDataJSON: b64(r.clientDataJSON), authenticatorData: b64(r.authenticatorData),
     signature: b64(r.signature), userHandle: r.userHandle ? b64(r.userHandle) : '',
-    device: 'web: ' + navigator.userAgent.slice(0, 70) + ' (passkey)', cookie: true,
+    device: 'web: ' + navigator.userAgent.slice(0, 240) + ' (passkey)', cookie: true,
   }, { allow401: true });
 }
 

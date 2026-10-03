@@ -248,6 +248,22 @@ func (c *Cache) Forget(id string) {
 	c.retired[cf] = true
 }
 
+// Budget is the most the cache keeps.
+func (c *Cache) Budget() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.budget
+}
+
+// SetBudget changes the most the cache keeps; files nobody is using go until the cache fits it
+// (review #74).
+func (c *Cache) SetBudget(n int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.budget = n
+	c.evictLocked(0, false)
+}
+
 // SetLean keeps the cache to the files being played while the disk is low; prefetching stops.
 func (c *Cache) SetLean(on bool) { c.lean.Store(on) }
 

@@ -23,6 +23,7 @@ var (
 	ErrThrottled      = errors.New("too many failed logins; try again later")
 	ErrNoSession      = errors.New("not logged in")
 	ErrUsersExist     = errors.New("an account already exists")
+	ErrShortPassword  = errors.New("password must be at least 10 characters")
 )
 
 const (
@@ -66,7 +67,7 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, onl
 		return errors.New("username is empty")
 	}
 	if len(password) < minPasswordLen {
-		return errors.New("password must be at least 10 characters")
+		return ErrShortPassword
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -94,8 +95,22 @@ func (s *Service) CreateUser(ctx context.Context, username, password string, onl
 }
 
 func (s *Service) SetPassword(ctx context.Context, username, password string) error {
+	var id int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM users WHERE username = ?`, username).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("no such user")
+	}
+	if err != nil {
+		return err
+	}
+	return s.setPassword(ctx, id, "", password)
+}
+
+// setPassword sets an account's password; with was, only if its password hash is still that one
+// (no other change came in between).
+func (s *Service) setPassword(ctx context.Context, id int64, was, password string) error {
 	if len(password) < minPasswordLen {
-		return errors.New("password must be at least 10 characters")
+		return ErrShortPassword
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -108,18 +123,109 @@ func (s *Service) SetPassword(ctx context.Context, username, password string) er
 		return err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE username = ?`, string(hash), username)
+	res, err := tx.ExecContext(ctx, `UPDATE users SET password_hash = ? WHERE id = ? AND (? = '' OR password_hash = ?)`,
+		string(hash), id, was, was)
 	if err != nil {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		if was != "" {
+			return ErrBadCredentials // changed in between
+		}
 		return errors.New("no such user")
 	}
 	// A new password ends every existing login.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = (SELECT id FROM users WHERE username = ?)`, username); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// ErrSamePassword is a new password that is the current one.
+var ErrSamePassword = errors.New("the new password is the current one")
+
+// ChangePassword is an account changing its own password, which it confirms with the current one
+// (throttled like a login, review #76). As with SetPassword, every login of the account ends,
+// this one too; passkeys stay.
+func (s *Service) ChangePassword(ctx context.Context, userID int64, current, password, clientIP string) (err error) {
+	done, err := s.attempt(clientIP)
+	if err != nil {
+		return err
+	}
+	defer func() { done(err) }()
+	var hash string
+	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
+		return err
+	}
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(current)) != nil {
+		return ErrBadCredentials
+	}
+	if password == current {
+		return ErrSamePassword
+	}
+	return s.setPassword(ctx, userID, hash, password)
+}
+
+// Session is a login of an account, as its owner sees it: never its token.
+type Session struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"` // what the client said it is when logging in
+	CreatedAt  int64  `json:"created_at"`
+	LastUsedAt int64  `json:"last_used_at"` // kept to the hour
+	Current    bool   `json:"current"`      // the login asking
+}
+
+var (
+	ErrNoSuchSession  = errors.New("no such login")
+	ErrCurrentSession = errors.New("this is the login in use: log out instead")
+)
+
+// Sessions lists an account's logins, the one with token marked, most recently used first.
+func (s *Service) Sessions(ctx context.Context, userID int64, token string) ([]Session, error) {
+	sum := sha256.Sum256([]byte(token))
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, created_at, last_used_at, token_hash = ? FROM sessions
+		WHERE user_id = ? AND created_at > ? ORDER BY last_used_at DESC, id DESC`, sum[:], userID, db.Now()-SessionLifetime.Milliseconds())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Session{}
+	for rows.Next() {
+		var v Session
+		if err := rows.Scan(&v.ID, &v.Name, &v.CreatedAt, &v.LastUsedAt, &v.Current); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// EndSession ends one of an account's logins other than the one with token (that one logs out).
+func (s *Service) EndSession(ctx context.Context, userID, id int64, token string) error {
+	sum := sha256.Sum256([]byte(token))
+	var current bool
+	err := s.db.QueryRowContext(ctx, `SELECT token_hash = ? FROM sessions WHERE id = ? AND user_id = ?`, sum[:], id, userID).Scan(&current)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrNoSuchSession
+	case err != nil:
+		return err
+	case current:
+		return ErrCurrentSession
+	}
+	_, err = s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ? AND user_id = ?`, id, userID)
+	return err
+}
+
+// EndOtherSessions ends every login of the account but the one with token, and says how many.
+func (s *Service) EndOtherSessions(ctx context.Context, userID int64, token string) (int, error) {
+	sum := sha256.Sum256([]byte(token))
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ? AND token_hash != ?`, userID, sum[:])
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }
 
 // attempt lets a client check a password or passkey, unless its recent failures and the checks it

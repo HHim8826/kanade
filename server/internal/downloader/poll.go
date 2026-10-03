@@ -58,15 +58,12 @@ func (s *Service) tick(ctx context.Context) {
 	}
 	rows.Close()
 
-	active := false
+	active := 0
 	for _, r := range list {
 		switch r.State {
 		case StateMetadata:
 			s.pollMetadata(ctx, r)
-		case StateDownloading:
-			s.pollTransfer(ctx, r)
-			active = active || r.State == StateDownloading
-		case StateSeeding:
+		case StateDownloading, StateSeeding:
 			s.pollTransfer(ctx, r)
 		case StateImporting:
 			s.afterRound(ctx, r)
@@ -74,18 +71,20 @@ func (s *Service) tick(ctx context.Context) {
 			s.cleanup(ctx, r)
 		}
 		if r.State == StateDownloading {
-			active = true
+			active++
 		}
 		s.handBack(ctx, r) // a hand-over that failed, or was cut short by a restart
 	}
-	if !active && !s.lowDisk.Load() { // one download at a time (plan §6); start the oldest queued one that fits
+	// As many at a time as the settings say (plan §6: one by default); the oldest queued that fit.
+	if !s.lowDisk.Load() && active < s.policy.Concurrent {
 		for _, r := range list {
-			if r.State != StateQueued {
+			if r.State != StateQueued || active >= s.policy.Concurrent {
 				continue
 			}
 			err := s.startRound(ctx, r)
 			if err == nil {
-				break
+				active++
+				continue
 			}
 			if errors.Is(err, staging.ErrOverBudget) || errors.Is(err, staging.ErrReserve) {
 				s.setNote(ctx, r, notePrefixSpace+err.Error())
@@ -116,7 +115,8 @@ func (s *Service) startRound(ctx context.Context, r *row) error {
 		s.setState(ctx, r.ID, StateDownloading, "")
 		return nil
 	}
-	avail := s.budget.Limit - s.budget.Used(ctx)
+	limit, _ := s.budget.Limits()
+	avail := limit - s.budget.Used(ctx)
 	pick, need, work, alone := planRound(r.files, max(avail, 0))
 	if len(pick) == 0 {
 		return errors.New("no file left to download")
@@ -146,6 +146,7 @@ func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need, work
 		if gid, err = s.addTorrent(ctx, torrent, r.dir, true); err != nil {
 			return err
 		}
+		r.uploadedBefore = r.UploadedBytes // a new task counts from zero
 	}
 	if err := s.aria.RPC.Call(ctx, "changeOption", nil, gid, map[string]string{"select-file": strings.Join(list, ",")}); err != nil {
 		return err
@@ -165,7 +166,8 @@ func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need, work
 	files, _ := json.Marshal(r.files)
 	r.gid, r.Round, r.roundBytes, r.roundWork, r.State = gid, round, need, work, StateDownloading
 	_, err := s.db.ExecContext(ctx, `UPDATE downloads SET gid = ?, files = ?, round = ?, round_bytes = ?, round_work = ?, state = ?,
-		note = ?, error = '', updated_at = ? WHERE id = ?`, gid, string(files), round, need, work, StateDownloading, note, db.Now(), r.ID)
+		note = ?, error = '', uploaded_before = ?, updated_at = ? WHERE id = ?`, gid, string(files), round, need, work, StateDownloading,
+		note, r.uploadedBefore, db.Now(), r.ID)
 	return err
 }
 
@@ -276,6 +278,12 @@ func (s *Service) pollTransfer(ctx context.Context, r *row) {
 		"uploadLength", "downloadSpeed", "uploadSpeed", "connections", "seeder", "errorMessage"})
 	if IsNotFound(err) {
 		switch {
+		case r.State == StateSeeding && s.seedingOver(r) == "":
+			if err := s.reseed(ctx, r); err != nil { // aria2 keeps no finished task across a restart
+				s.log.Warn("seeding again", "download", r.ID, "err", err)
+				r.State = StateCompleted
+				s.setState(ctx, r.ID, StateCompleted, "")
+			}
 		case r.State == StateSeeding:
 			r.State = StateCompleted
 			s.setState(ctx, r.ID, StateCompleted, "")
@@ -298,8 +306,9 @@ func (s *Service) pollTransfer(ctx context.Context, r *row) {
 		done = min(done, r.TotalBytes)
 	}
 	done += r.doneBefore
+	r.UploadedBytes = r.uploadedBefore + num(st.UploadLength)
 	s.db.ExecContext(ctx, `UPDATE downloads SET done_bytes = ?, uploaded_bytes = ?, down_speed = ?, up_speed = ?,
-		peers = ?, updated_at = ? WHERE id = ?`, done, num(st.UploadLength), num(st.DownloadSpeed),
+		peers = ?, updated_at = ? WHERE id = ?`, done, r.UploadedBytes, num(st.DownloadSpeed),
 		num(st.UploadSpeed), num(st.Connections), db.Now(), r.ID)
 	switch st.Status {
 	case "error":
@@ -323,12 +332,19 @@ func (s *Service) pollTransfer(ctx context.Context, r *row) {
 		if st.Status == "complete" {
 			next = StateCompleted // nothing to seed (for example ratio already met)
 		}
-		r.State = next
+		r.State, r.CompletedAt = next, db.Now()
 		s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, completed_at = ?, down_speed = 0, updated_at = ? WHERE id = ?`,
-			next, db.Now(), db.Now(), r.ID)
+			next, r.CompletedAt, db.Now(), r.ID)
+		if why := s.seedingOver(r); next == StateSeeding && why != "" {
+			s.stopSeeding(ctx, r, why)
+		}
 	case r.State == StateSeeding && st.Status == "complete":
 		r.State = StateCompleted
 		s.setState(ctx, r.ID, StateCompleted, "")
+	case r.State == StateSeeding:
+		if why := s.seedingOver(r); why != "" { // the settings, applied by Kanade (review #75)
+			s.stopSeeding(ctx, r, why)
+		}
 	}
 }
 

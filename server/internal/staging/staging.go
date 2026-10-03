@@ -17,7 +17,7 @@ var (
 )
 
 type Budget struct {
-	Limit   int64              // bytes all users may hold or have promised together
+	Limit   int64              // bytes all users may hold or have promised together (set before use; then SetLimits)
 	Reserve int64              // free space to keep on the filesystem
 	Dir     string             // where the staging data lives (for free space)
 	Free    func(string) int64 // free bytes on Dir's filesystem, -1 when unknown; nil: not checked
@@ -56,6 +56,21 @@ func (b *Budget) usageLocked(ctx context.Context) (used, unwritten int64) {
 		unwritten += n.Pending
 	}
 	return used, unwritten
+}
+
+// Limits are the budget and the free-space reserve now.
+func (b *Budget) Limits() (limit, reserve int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Limit, b.Reserve
+}
+
+// SetLimits changes the budget and the reserve (review #74). What is held or promised stays; new
+// requests are measured against the new values, and wait when what is held is already more.
+func (b *Budget) SetLimits(limit, reserve int64) {
+	b.mu.Lock()
+	b.Limit, b.Reserve = limit, reserve
+	b.mu.Unlock()
 }
 
 // Used is everything held or promised now.

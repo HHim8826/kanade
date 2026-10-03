@@ -12,6 +12,7 @@
 package drivesync
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -49,11 +50,16 @@ type Syncer struct {
 	// Forget drops what the stream cache holds of a file that is gone or changed; nil to skip.
 	Forget func(driveID string)
 	Every  time.Duration
+	Delay  time.Duration // before the first round; a minute when 0
 
 	mu     sync.Mutex
 	status Status
-	full   sync.Mutex // one full pass at a time
-	turn   sync.Mutex // the feed and full passes apply what they saw one at a time
+	// Set by Configure (review #77): how often to look, and whether the inbox is left to the user.
+	every   time.Duration
+	noInbox bool
+	kick    chan struct{}
+	full    sync.Mutex // one full pass at a time
+	turn    sync.Mutex // the feed and full passes apply what they saw one at a time
 }
 
 // Result counts what a pass changed.
@@ -108,20 +114,64 @@ func (s *Syncer) set(f func(st *Status)) {
 	s.mu.Unlock()
 }
 
-// Run checks the change feed and the inbox every ten minutes, starting a minute after start-up.
-func (s *Syncer) Run(ctx context.Context) {
-	every := s.Every
-	if every <= 0 {
-		every = 10 * time.Minute
+// Configure sets how often Run looks (a change takes effect at once) and whether it imports the
+// inbox's new files by itself. Without the inbox, the change feed and the trash are still looked
+// after: only the import waits for the user (review #77).
+func (s *Syncer) Configure(every time.Duration, autoInbox bool) {
+	s.mu.Lock()
+	s.every, s.noInbox = every, !autoInbox
+	s.mu.Unlock()
+	select {
+	case s.wake() <- struct{}{}:
+	default:
 	}
-	wait := time.Minute
+}
+
+func (s *Syncer) wake() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.kick == nil {
+		s.kick = make(chan struct{}, 1)
+	}
+	return s.kick
+}
+
+// interval is how often Run looks: Configure's, else Every, else ten minutes.
+func (s *Syncer) interval() time.Duration {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return cmp.Or(s.every, s.Every, 10*time.Minute)
+}
+
+func (s *Syncer) autoInbox() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.noInbox
+}
+
+// Run checks the change feed and the inbox every interval, starting a minute after start-up.
+func (s *Syncer) Run(ctx context.Context) {
+	first := cmp.Or(s.Delay, time.Minute)
+	wait, last, ran := first, time.Now(), false
+	kick := s.wake()
 	for {
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
-		case <-time.After(wait):
+		case <-kick: // another interval: what is left of it since the last round (the first waits as before)
+			t.Stop()
+			if ran {
+				wait = max(s.interval()-time.Since(last), 0)
+			} else {
+				wait = max(first-time.Since(last), 0)
+			}
+			continue
+		case <-t.C:
 		}
-		wait = every
+		last, ran = time.Now(), true
+		wait = s.interval()
 		s.RetryTrash(ctx)
 		if _, err := s.Changes(ctx); err != nil && ctx.Err() == nil {
 			s.Log.Warn("drive changes", "err", err)
@@ -131,7 +181,7 @@ func (s *Syncer) Run(ctx context.Context) {
 				s.Log.Warn("drive baseline reconcile", "err", err)
 			}
 		}
-		if s.Inbox != nil {
+		if s.Inbox != nil && s.autoInbox() {
 			n, err := s.Inbox(ctx)
 			s.set(func(st *Status) { st.LastInbox = db.Now() })
 			if err != nil && ctx.Err() == nil {
