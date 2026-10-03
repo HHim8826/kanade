@@ -34,7 +34,8 @@ Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=htt
 | `server/internal/web/static/` | Browser client (Preact + htm, no build step), served at `/app/` |
 | `server/scripts/upload-folder.py` | Command-line uploader, and the reference for how clients upload |
 | `scripts/kanade.sh` | Install and manage script |
-| `.github/workflows/release.yml` | Builds and publishes a release for each version tag |
+| `.github/workflows/ci.yml` | CI for pushes to main and pull requests: gofmt, vet, tests with the race detector (with aria2 and FFmpeg), the web client check (`server/scripts/check-web.mjs`), shellcheck and actionlint |
+| `.github/workflows/release.yml` | Runs CI, then builds and publishes a release for each version tag |
 | `docs/` | Plan, decisions (D1–D10, these override the plan), backend design, P0 validation results, library survey |
 
 ## Build and run
@@ -59,7 +60,7 @@ Settings live in the data directory's `config.json` (`kanade config` shows them)
 
 ## Releases
 
-Push a version tag and GitHub Actions tests, builds and publishes the release the install script downloads (`kanade-linux-amd64.tar.gz`, `kanade-linux-arm64.tar.gz`, `SHA256SUMS`, `VERSION`, `kanade.sh`):
+Push a version tag and GitHub Actions runs CI, then builds and publishes the release the install script downloads (`kanade-linux-amd64.tar.gz`, `kanade-linux-arm64.tar.gz`, `SHA256SUMS`, `VERSION`, `kanade.sh`):
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0

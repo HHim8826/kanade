@@ -1,5 +1,6 @@
-# Builds Kanade for Linux and publishes a release when a version tag (v1.2.3) is pushed. Run by
-# hand (workflow_dispatch), it builds the same files as an artifact without releasing them.
+# Builds Kanade for Linux and publishes a release when a version tag (v1.2.3) is pushed, once CI
+# (ci.yml) passes. Run by hand (workflow_dispatch), it builds the same files as an artifact without
+# releasing them.
 #
 # Release files, which scripts/kanade.sh downloads:
 #   kanade-linux-amd64.tar.gz, kanade-linux-arm64.tar.gz   the program
@@ -18,7 +19,11 @@ permissions:
   contents: write
 
 jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+
   release:
+    needs: ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -27,17 +32,6 @@ jobs:
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
-
-      - name: Tools for the tests
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq aria2 ffmpeg
-
-      - name: Test
-        working-directory: server
-        env:
-          KANADE_ARIA2: /usr/bin/aria2c
-        run: |
-          go vet ./...
-          go test -count=1 ./...
 
       - name: Build
         working-directory: server

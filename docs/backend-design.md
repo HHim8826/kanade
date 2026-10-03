@@ -386,7 +386,8 @@ DIR/
 
 - 設定改放資料目錄的 `config.json`（`listen`、`public_url`、`aria2`），由 `kanade config set` 寫入並檢查格式；`serve` 依「內建預設 → config.json → 參數」決定。內建的公開網址改為 `http://localhost:8080`，不再寫死 music.ser1ka.com。正式環境的設定已寫進 `var/config.json`。首頁與隱私權頁以設定的網址顯示站名（`{{SITE}}`）。
 - 新指令：`kanade version`（版本在編譯時以 `-X main.version` 帶入，`/status` 也回報）、`kanade backup FILE`（`VACUUM INTO`，服務執行中也一致，0600）、`kanade config`。
-- 發佈（`.github/workflows/release.yml`）：推送 `v*` 標籤時，安裝 aria2 與 FFmpeg 跑完 vet 與測試，以 `CGO_ENABLED=0 -trimpath` 編譯 linux/amd64、arm64，發佈 `kanade-linux-<arch>.tar.gz`、`SHA256SUMS`、`VERSION`、`kanade.sh`；含連字號的標籤為 pre-release。手動執行只產生 artifact。
+- CI（`.github/workflows/ci.yml`）：推送到 main 與 pull request 時執行三組檢查：Go（gofmt、vet、裝好 aria2 與 FFmpeg 後以 race detector 跑全部測試，下載與轉檔的測試不會被略過）、網頁端（`server/scripts/check-web.mjs`：每個模組能解析、具名 import 都存在且有用到；網頁端沒有建置步驟，這是唯一的把關）、腳本與 workflow（shellcheck、actionlint）。同一分支有新的推送時取消舊的執行。
+- 發佈（`.github/workflows/release.yml`）：推送 `v*` 標籤時先跑 CI（workflow_call），通過後以 `CGO_ENABLED=0 -trimpath` 編譯 linux/amd64、arm64，發佈 `kanade-linux-<arch>.tar.gz`、`SHA256SUMS`、`VERSION`、`kanade.sh`；含連字號的標籤為 pre-release。手動執行只產生 artifact。
 - 安裝與管理腳本（`scripts/kanade.sh`，安裝後為 `kanade-manager`），仿 OpenList 的一鍵腳本：
   - 需要 root、curl、tar、sha256sum；支援 amd64、arm64；服務用 systemd（`kanade` 系統帳號、`ProtectSystem=full`、資料目錄可寫、`KillMode=mixed` 讓 Kanade 自己停 aria2）或 OpenRC，兩者都沒有時在背景執行（以 `exec` 脫離腳本，不占住終端或管線），有 crontab 時可加 @reboot。
   - 安裝：詢問安裝位置、連線方式（網域＋反向代理，只聽 127.0.0.1；或直接用 IP，聽 0.0.0.0，但 Google 授權與 passkey 需要 https 網域）、連接埠、管理員帳號、GitHub 代理；以套件管理員安裝 aria2 與 FFmpeg（可略過）；下載後核對 SHA-256；程式屬於 root，只有資料目錄屬於服務帳號（0700）；隨機產生管理員密碼並只顯示一次；在保留資料的位置重裝時沿用原有帳號。

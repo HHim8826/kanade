@@ -1,0 +1,83 @@
+# Checks every push to main and every pull request; a release runs it first (workflow_call).
+#   go:      gofmt, go vet, and the tests with the race detector, with aria2 and FFmpeg installed
+#            so the download and conversion tests run instead of skipping
+#   web:     the web client (no build step): modules parse, imports exist and are used
+#   scripts: the install script (shellcheck) and the workflows (actionlint)
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
+
+# A newer push to the same branch replaces a run still going. Called from a release, the group
+# is the release's (github.workflow is the caller's name), apart from these.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: aria2 and FFmpeg for the tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq aria2 ffmpeg
+
+      - name: gofmt
+        working-directory: server
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-ed: $unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: server
+        run: go vet ./...
+
+      - name: Tests (race detector)
+        working-directory: server
+        env:
+          KANADE_ARIA2: /usr/bin/aria2c
+        run: go test -race -count=1 ./...
+
+  web:
+    name: Web client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - run: node server/scripts/check-web.mjs
+
+  scripts:
+    name: Scripts and workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: shellcheck
+        run: shellcheck -S warning scripts/kanade.sh
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: server/go.mod
+          cache: false
+
+      - name: actionlint
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
