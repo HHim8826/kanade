@@ -44,7 +44,7 @@ var fields = map[string]map[string]string{
 	"track": {"title": "title", "artist": "artist", "version": "version", "kind": "kind", "mb_recording": "mb_recording",
 		"aliases": ""},
 	"album": {"title": "title", "album_artist": "album_artist", "date": "date", "catalog": "catalog", "edition": "edition",
-		"cover_id": "cover_id", "merged_into": "merged_into", "mb_release": "mb_release", "aliases": ""},
+		"cover_id": "cover_id", "merged_into": "merged_into", "mb_release": "mb_release", "aliases": "", "sections": ""},
 	"entry":  {"album_id": "album_id", "disc_no": "disc_no", "track_no": "track_no", "row": ""},
 	"artist": {"aliases": ""},
 }
@@ -154,12 +154,16 @@ func (e *editor) current(target string, id int64, field string) (v *string, ok b
 		}
 		b, _ := json.Marshal(r)
 		return Str(string(b)), true, nil
-	case "aliases":
+	case "aliases", "sections":
 		var one int
 		if err := e.tx.QueryRowContext(e.ctx, `SELECT 1 FROM `+table+` WHERE id = ?`, id).Scan(&one); errors.Is(err, sql.ErrNoRows) {
 			return nil, false, nil
 		} else if err != nil {
 			return nil, false, err
+		}
+		if field == "sections" {
+			names, err := sectionNames(e.ctx, e.tx, id)
+			return Str(encodeSections(names)), true, err
 		}
 		names, err := aliasNames(e.ctx, e.tx, target, id)
 		return Str(strings.Join(names, "\n")), true, err
@@ -209,6 +213,12 @@ func (e *editor) check(c Change) (*string, error) {
 	switch c.Field {
 	case "aliases":
 		return Str(strings.Join(cleanAliases(strings.Split(v, "\n")), "\n")), nil
+	case "sections":
+		names, err := decodeSections(v)
+		if err != nil {
+			return nil, err
+		}
+		return Str(encodeSections(names)), nil
 	case "title":
 		if v == "" {
 			return nil, invalid("title cannot be empty")
@@ -303,6 +313,20 @@ func (e *editor) write(target string, id int64, field string, v *string) error {
 			}
 		}
 		e.markIndex(target, id)
+		return nil
+	case "sections":
+		names, err := decodeSections(deref(v))
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM album_sections WHERE album_id = ?`, id); err != nil {
+			return err
+		}
+		for disc, name := range names {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO album_sections (album_id, disc_no, name) VALUES (?, ?, ?)`, id, disc, name); err != nil {
+				return err
+			}
+		}
 		return nil
 	case "row":
 		if v == nil {

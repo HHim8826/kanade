@@ -5,6 +5,8 @@ import { enqueue, fromTrack, playNext, playQueue, shuffled } from '../player.js'
 import { go, href } from '../router.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
+import { AlbumActions, SongActions } from './batch.js';
+import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { useLibRev } from './organize.js';
 
 // Playlists, favorites and play history (P2-1).
@@ -52,17 +54,24 @@ export function PlaylistsTab({ lists }) {
 
 export function FavoritesTab({ data }) {
   const items = data.tracks.map(fromTrack);
+  const albums = useSelection('favorite-albums');
+  const songs = useSelection('favorite-songs');
   if (!items.length && !data.albums.length) {
     return html`<${Empty} icon="favoriteOff">還沒有收藏。在歌曲的「更多」選單或專輯頁按愛心收藏。<//>`;
   }
   return html`
-    ${data.albums.length > 0 && html`<h2 class="section-title">專輯</h2><${AlbumGrid} albums=${data.albums} />`}
+    ${data.albums.length > 0 && html`<div class="section-head"><h2 class="section-title">專輯</h2>
+      <div class="actions tight"><${SelectToggle} sel=${albums} /></div></div>
+      <${AlbumGrid} albums=${data.albums} sel=${albums} />`}
     ${items.length > 0 && html`<div class="section-head"><h2 class="section-title">歌曲 <span class="sub">${items.length} 首</span></h2>
       <div class="actions tight">
         <button class="btn tonal" onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放</button>
         <${IconButton} icon="shuffle" label="隨機播放" onClick=${() => playQueue(shuffled(items), 0)} />
+        <${SelectToggle} sel=${songs} />
       </div></div>
-      <${TrackList} items=${items} showAlbum />`}`;
+      <${TrackList} items=${items} showAlbum sel=${songs} />`}
+    <${SelectBar} sel=${albums} noun="張" loaded=${data.albums.map((a) => a.id)}><${AlbumActions} sel=${albums} albums=${data.albums} /><//>
+    <${SelectBar} sel=${songs} noun="首" loaded=${items.map((it) => it.trackId)}><${SongActions} sel=${songs} items=${items} /><//>`;
 }
 
 export function Playlist({ id }) {

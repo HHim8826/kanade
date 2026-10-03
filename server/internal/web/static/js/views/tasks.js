@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { href } from '../router.js';
-import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, toast } from '../ui.js';
-import { confirmDialog } from './organize.js';
+import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast } from '../ui.js';
+import { Field, confirmDialog, done } from './organize.js';
+import { go } from '../router.js';
 
 const downloadStates = {
   metadata: '取得檔案清單', selecting: '等待選擇檔案', queued: '排隊中', downloading: '下載中', paused: '已暫停',
@@ -159,9 +160,12 @@ function DownloadCard({ d, onSelect, onChange }) {
         ${!['completed', 'canceled'].includes(d.state) && (d.state !== 'failed' || !d.files_removed) && html`<${IconButton} icon="close"
           label=${d.state === 'seeding' ? '停止做種' : d.state === 'failed' ? '放棄並清除' : '取消'}
           onClick=${() => confirm(cancelPrompt(d)) && act('cancel')} />`}
+        ${d.import_batch_id > 0 && html`<${IconButton} icon="album" label="整理成合集…"
+          onClick=${() => showDialog((close) => html`<${MakeCollection} d=${d} close=${close} />`)} />`}
         ${d.clearable && html`<${IconButton} icon="delete" label="移除記錄" onClick=${() => act('clear')} />`}
       </div>
     </div>
+    ${d.grouping && d.grouping.mode === 'collection' && html`<div class="sub">合集：「${d.grouping.title}」，之後的批次也歸入這張專輯</div>`}
     ${(d.state === 'downloading' || d.state === 'paused' || d.state === 'queued' || d.state === 'importing') && html`<${Progress} value=${progress} />`}
     ${(d.rounds > 1 || d.left > 0) && !['selecting', 'metadata'].includes(d.state) && html`<div class="sub">
       分批下載：${d.state === 'importing' ? `第 ${d.round} 批已下載，匯入並清掉後再下載下一批` : d.round > 0 ? `第 ${d.round} 批` : '尚未開始'}${d.left > 0 && d.state !== 'importing' ? `，還有 ${d.left} 個檔案等下一批` : ''}</div>`}
@@ -208,15 +212,57 @@ function AddDownload({ onClose, onAdded }) {
   <//>`;
 }
 
+// audio is what the importer takes as songs (for the collection's preview).
+const audioExt = /\.(flac|mp3|m4a|aac|ogg|oga|opus|wav|aif|aiff|ape|tak|wv|tta|alac)$/i;
+
+// sectionsOf previews a collection's sections, as the server lays them out (CollectionLayout): the
+// folders right below the folder all chosen files share, songs loose at that level first.
+function sectionsOf(paths) {
+  const audio = paths.filter((p) => audioExt.test(p));
+  const first = audio.length && audio[0].includes('/') ? audio[0].split('/')[0] + '/' : '';
+  const top = first && audio.every((p) => p.startsWith(first)) ? first : '';
+  const count = new Map();
+  for (const p of audio) {
+    const rest = p.slice(top.length);
+    const s = rest.includes('/') ? rest.split('/')[0] : '';
+    count.set(s, (count.get(s) || 0) + 1);
+  }
+  return [...count.entries()].sort((a, b) => (a[0] === '' ? -1 : b[0] === '' ? 1 : a[0].localeCompare(b[0], undefined, { numeric: true })));
+}
+
+// Grouping chooses how a download's songs go into albums (review #82).
+function Grouping({ value, onChange, paths }) {
+  const sections = value.mode === 'collection' ? sectionsOf(paths) : [];
+  const opts = [
+    ['tags', '依標籤（預設）', '每首歌依自己的專輯標籤分組；合集裡的原始專輯會各自成為一張。'],
+    ['folders', '每個資料夾一張專輯', '每個放音檔的資料夾成為一張專輯，不論標籤寫什麼。'],
+    ['collection', '整份合集一張專輯', '整份下載成為一張專輯，裡面的資料夾（例如 Episode 1、Episode 2）成為分區，保留各首歌的歌手與順序。'],
+  ];
+  return html`<div class="grouping">
+    <div class="sub">專輯分組</div>
+    <div class="choice-list" role="radiogroup" aria-label="專輯分組">${opts.map(([k, label, sub]) => html`<label key=${k} class=${value.mode === k ? 'on' : ''}>
+      <input type="radio" checked=${value.mode === k} onChange=${() => onChange({ ...value, mode: k })} />
+      <span><b>${label}</b><span class="sub">${sub}</span></span></label>`)}</div>
+    ${value.mode === 'collection' && html`<div class="form-grid">
+      <${Field} label="合集名稱" value=${value.title} onInput=${(v) => onChange({ ...value, title: v })} />
+      <${Field} label="專輯歌手" value=${value.artist} onInput=${(v) => onChange({ ...value, artist: v })} placeholder="Various Artists" />
+    </div>
+    <p class="hint">${sections.length ? `分區：${sections.map(([n, c]) => `${n || '（最上層）'} ${c} 首`).join('、')}` : '選取的檔案中沒有音檔。'}
+      分批下載時，每一批都會加入同一張合集的對應分區。</p>`}
+  </div>`;
+}
+
 function SelectFiles({ id, onClose, onDone }) {
   const [d, setD] = useState(null);
   const [chosen, setChosen] = useState(new Set());
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [grouping, setGrouping] = useState({ mode: 'tags', title: '', artist: '' });
   useEffect(() => {
     get('/downloads/' + id).then((v) => {
       setD(v);
       setChosen(new Set(v.files.filter((f) => f.suggested).map((f) => f.index)));
+      setGrouping((g) => ({ ...g, title: v.name }));
     }, setError);
   }, [id]);
   const toggle = (i) => setChosen((s) => {
@@ -229,7 +275,7 @@ function SelectFiles({ id, onClose, onDone }) {
     setBusy(true);
     setError(null);
     try {
-      await post(`/downloads/${id}/select`, { files: [...chosen] });
+      await post(`/downloads/${id}/select`, { files: [...chosen], grouping: grouping.mode === 'tags' ? undefined : grouping });
       toast('開始下載');
       onDone();
     } catch (e) {
@@ -241,10 +287,11 @@ function SelectFiles({ id, onClose, onDone }) {
   return html`<${Dialog} title="選擇要下載的檔案" wide onClose=${onClose} actions=${html`
     <span class="grow sub">已選 ${chosen.size} 個，${fmtBytes(total)}${rounds ? `，超過暫存空間 ${fmtBytes(d.budget)}，會分批下載` : ''}</span>
     <button class="btn text" onClick=${onClose}>取消</button>
-    <button class="btn filled" disabled=${busy || !chosen.size} onClick=${submit}>${busy ? '處理中…' : '下載'}</button>`}>
+    <button class="btn filled" disabled=${busy || !chosen.size || (grouping.mode === 'collection' && !grouping.title.trim())} onClick=${submit}>${busy ? '處理中…' : '下載'}</button>`}>
     ${!d && !error && html`<${Spinner} />`}
     ${d && html`<div class="sub">${d.name}</div>
       ${rounds && html`<p class="hint">選取的總量超過伺服器的暫存空間，會自動分批：每批下載、匯入曲庫、清掉後再下載下一批，同一個資料夾的 CUE、LOG、封面會跟著它的音檔。不用減少選取。</p>`}
+      <${Grouping} value=${grouping} onChange=${setGrouping} paths=${d.files.filter((f) => chosen.has(f.index)).map((f) => f.path)} />
       <div class="file-tools">
         <button class="btn text" onClick=${() => setChosen(new Set(d.files.filter((f) => f.suggested).map((f) => f.index)))}>建議項目</button>
         <button class="btn text" onClick=${() => setChosen(new Set(d.files.map((f) => f.index)))}>全選</button>
@@ -322,4 +369,66 @@ function ImportCard({ b, onChange }) {
       </li>`)}
     </ul>`}
   </article>`;
+}
+
+// MakeCollection arranges the songs a download already imported into one collection (review #82):
+// what moves where is shown first; then it is one edit, which can be undone, and the download's
+// later batches join the collection.
+function MakeCollection({ d, close }) {
+  const [title, setTitle] = useState((d.grouping && d.grouping.title) || d.name);
+  const [artist, setArtist] = useState((d.grouping && d.grouping.artist) || 'Various Artists');
+  const [term, setTerm] = useState({ title, artist });
+  const [plan, setPlan] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setTerm({ title, artist }), 300);
+    return () => clearTimeout(t);
+  }, [title, artist]);
+  useEffect(() => {
+    if (!term.title.trim()) return;
+    setPlan(null);
+    setError(null);
+    get(`/downloads/${d.id}/collection?title=${encodeURIComponent(term.title)}&artist=${encodeURIComponent(term.artist)}`).then(setPlan, setError);
+  }, [term.title, term.artist]);
+  const submit = async () => {
+    setBusy(true);
+    try {
+      const res = await post(`/downloads/${d.id}/collection`, { title, artist });
+      if (done(res, `已整理成合集「${title}」`)) {
+        close();
+        go('album/' + res.album_id);
+      }
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setBusy(false);
+  };
+  const p = plan;
+  const songs = p ? [...p.moves.filter((m) => !m.duplicate), ...(p.adds || [])] : [];
+  const discs = p ? [...new Set(songs.map((m) => m.disc))].sort((a, b) => a - b) : [];
+  const dups = p ? p.moves.filter((m) => m.duplicate).length : 0;
+  const [open, setOpen] = useState(0);
+  return html`<${Dialog} title="整理成合集" wide onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${busy || !p || !songs.length} onClick=${submit}>${busy ? '整理中…' : '整理'}</button>`}>
+    <p class="hint">把「${d.name}」已存進曲庫的歌整理成一張專輯，裡面的資料夾成為分區（例如 Episode 1、Episode 2），各首歌保留自己的歌手；音檔不會重新下載或上傳。之後的批次也會歸入這張合集。</p>
+    <div class="form-grid">
+      <${Field} label="合集名稱" value=${title} onInput=${setTitle} />
+      <${Field} label="專輯歌手" value=${artist} onInput=${setArtist} />
+    </div>
+    <${ErrorBox} error=${error} />
+    ${!p && !error && html`<${Spinner} />`}
+    ${p && html`<p>${p.target.id ? `加入已有的合集「${p.target.title}」` : `新增專輯「${p.target.title}」`}：<b>${songs.length} 首</b>，${discs.length} 個分區。
+      ${p.emptied.length ? `${p.emptied.length} 張原本的專輯會清空，之後用它們的標籤匯入的檔案也會歸到合集。` : ''}
+      ${dups ? `${dups} 首已有同一個音檔，不重複加入。` : ''}${(p.adds || []).length ? `${p.adds.length} 首曲庫原本就有（其他來源匯入），會一併加入合集，原處不變。` : ''}
+      ${p.sidecars ? `${p.sidecars} 個 CUE／LOG 附屬檔案跟著過去。` : ''}可在修改紀錄撤回。</p>
+      <ul class="list sections-preview">${discs.map((n) => {
+        const list = songs.filter((m) => m.disc === n).sort((a, b) => a.track - b.track);
+        return html`<li key=${n}><button class="row plain wide" aria-expanded=${open === n} onClick=${() => setOpen(open === n ? 0 : n)}>
+            <span class="grow"><b>${p.sections[n] || `Disc ${n}`}</b></span><span class="sub">${list.length} 首</span></button>
+          ${open === n && html`<ol class="plain-list">${list.map((m) => html`<li key=${m.entry_id || 't' + m.track_id}>${m.track}. ${m.title}
+            <span class="sub">${m.artist}${m.from && m.from.title && m.from.id !== p.target.id ? ` · 原本在「${m.from.title}」` : ''}</span></li>`)}</ol>`}</li>`;
+      })}</ul>`}
+  <//>`;
 }

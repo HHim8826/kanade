@@ -6,6 +6,8 @@ import { go, href } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
 import { FavoritesTab, PlaylistsTab } from './collections.js';
+import { AlbumActions, SongActions, editSections } from './batch.js';
+import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
   restoreAlbum, splitAlbum, useLibRev, vgmdbAlbum } from './organize.js';
@@ -174,11 +176,17 @@ export function Library({ tab = 'albums', filter = '' }) {
       setMore((m) => ({ ...m, busy: false }));
     }
   }, [key, list && list.length, own.busy, done]);
+  // Albums and songs can be selected to act on them at once (review #83); another tab or filter
+  // starts over.
+  const sel = useSelection(tab + '?' + filter);
+  const selectable = list && (tab === 'albums' || tab === 'tracks');
+  const keys = selectable ? list.map((x) => x.id) : [];
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">曲庫</h1>
       <div class="actions">
         <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
+        ${selectable && list.length > 0 && html`<${SelectToggle} sel=${sel} />`}
         <a class="btn text" href=${href('edits')}><${Icon} name="history" />修改紀錄</a>
       </div>
     </div>
@@ -189,17 +197,20 @@ export function Library({ tab = 'albums', filter = '' }) {
       class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/tracks' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
     ${tab === 'tracks' && filter === 'no_album' && html`<${FolderCard} rev=${rev} />`}
     ${data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
-    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} />`}
+    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} />`}
     ${list && tab === 'artists' && html`<ul class="list">
       ${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
         <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
     </ul>`}
     ${list && tab === 'tracks' && (list.length
-      ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum />`
+      ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum sel=${sel} />`
       : html`<${Empty}>${filter === 'no_album' ? '每首歌都有專輯了。' : filter === 'no_artist' ? '每首歌都有歌手了。' : '還沒有歌曲。'}<//>`)}
     ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
     ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
+    ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}>
+      ${tab === 'albums' ? html`<${AlbumActions} sel=${sel} albums=${list} />` : html`<${SongActions} sel=${sel} items=${list.map(fromTrack)} />`}
+    <//>`}
   </section>`;
 }
 
@@ -220,12 +231,14 @@ function FolderCard({ rev }) {
 export function Album({ id }) {
   const rev = useLibRev();
   const album = useLoad(() => get('/albums/' + id), [id], rev);
+  const sel = useSelection(id); // songs of this album, selected to act on at once (review #83)
   if (album.loading && !album.data) return html`<${Spinner} />`;
   if (album.error) return html`<${ErrorBox} error=${album.error} onRetry=${album.reload} />`;
   const a = album.data;
   if (!a.entries.length) return html`<${EmptyAlbum} album=${a} />`;
   const items = a.entries.map((e) => ({ ...fromEntry(e, a), number: e.track_no || '', key: 'e' + e.entry_id, disc: e.disc_no, entryId: e.entry_id }));
   const discs = [...new Set(items.map((i) => i.disc))];
+  const named = Object.keys(a.sections || {}).length > 0;
   const menu = (e) => openMenu(e, [
     { icon: 'playNext', label: '下一首播放', onClick: () => playNext(items) },
     { icon: 'queue', label: '加入佇列', onClick: () => enqueue(items) },
@@ -236,6 +249,7 @@ export function Album({ id }) {
     { icon: 'image', label: '更換封面…', onClick: () => changeCover(a) },
     { icon: 'merge', label: '合併到其他專輯…', onClick: () => mergeAlbum(a) },
     a.entries.length > 1 && { icon: 'split', label: '拆分…', onClick: () => splitAlbum(a) },
+    { icon: 'order', label: '區段名稱…', onClick: () => editSections(a) },
     a.original && { icon: 'restore', label: '恢復原標籤…', onClick: () => restoreAlbum(a) },
     { icon: 'delete', label: '移除專輯…', onClick: () => removeAlbum(a) },
   ]);
@@ -255,11 +269,15 @@ export function Album({ id }) {
         </div>
       </div>
     </header>
+    <div class="section-head album-tools"><span class="grow"></span><${SelectToggle} sel=${sel} /></div>
     ${discs.map((d) => html`<div key=${d}>
-      ${discs.length > 1 && html`<h2 class="section-title">Disc ${d}</h2>`}
-      <${TrackList} items=${items.filter((i) => i.disc === d)} queue=${items} showNumber
+      ${(discs.length > 1 || named) && html`<h2 class="section-title">${(a.sections && a.sections[d]) || `Disc ${d}`}</h2>`}
+      <${TrackList} items=${items.filter((i) => i.disc === d)} queue=${items} showNumber sel=${sel} selKey=${(it) => it.entryId}
         menuExtra=${(it) => [{ icon: 'delete', label: '從專輯移除', onClick: () => removeFromAlbum(a, it) }]} />
     </div>`)}
+    <${SelectBar} sel=${sel} noun="首" loaded=${items.map((i) => i.entryId)}>
+      <${SongActions} sel=${sel} items=${items} album=${a} />
+    <//>
     ${a.sidecars.length > 0 && html`<h2 class="section-title">附屬檔案</h2>
       <ul class="items">${a.sidecars.map((c) => html`<li key=${c.id}>
         <span class="grow path">${c.name}</span>

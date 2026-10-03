@@ -618,3 +618,37 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .facts dd { margin: 0; min-width: 0; }
 .facts dd.break { overflow-wrap: anywhere; }
 .card > .hint.tight { margin-bottom: 12px; }
+
+/* ---- selecting several albums or songs (review #83) ---- */
+.select-bar { position: sticky; bottom: 0; z-index: 15; margin: 16px -8px 0; padding: 8px 12px 12px; border-radius: var(--radius-m);
+  background: var(--surface-container); box-shadow: 0 -2px 12px rgb(0 0 0 / .12); }
+.select-info { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.select-info .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.select-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.select-actions .btn { height: 36px; padding: 0 14px; font-size: 14px; }
+.select-hint { margin: 4px 0 2px 48px; }
+.grid.selecting .album-card { position: relative; cursor: pointer; user-select: none; }
+.album-card .check { position: absolute; top: 14px; left: 14px; width: 26px; height: 26px; border-radius: 50%; display: grid; place-items: center;
+  border: 2px solid #fff; background: rgb(0 0 0 / .35); color: #fff; box-shadow: 0 1px 4px rgb(0 0 0 / .3); }
+.album-card.selected { background: color-mix(in srgb, var(--primary) 14%, transparent); }
+.album-card.selected .check { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.tracks.selecting .track-main { user-select: none; }
+.track.selected { background: color-mix(in srgb, var(--primary) 12%, transparent); border-radius: var(--radius-s); }
+.row-check { width: 20px; height: 20px; margin: 0 4px 0 8px; accent-color: var(--primary); flex: none; cursor: pointer; }
+.album-tools { margin: 8px 0 0; }
+.batch-field { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.batch-field .check { display: flex; align-items: center; gap: 8px; width: 120px; flex: none; font-size: 14px; }
+.batch-field .check input { width: 18px; height: 18px; accent-color: var(--primary); }
+.batch-field > input { flex: 1; min-width: 0; font: inherit; color: var(--on-surface); padding: 10px 12px; border-radius: var(--radius-s);
+  border: 1px solid var(--outline); background: var(--surface); }
+.batch-field > input:disabled { opacity: .45; }
+.merge-plan { margin-top: 8px; }
+.sections-list { max-height: 220px; overflow: auto; }
+.sections-preview .plain-list .sub { margin-left: 8px; }
+@media (max-width: 600px) { /* one scrolling row of actions: the bar stays small on a phone */
+  .select-actions { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; margin: 8px -12px 0; padding: 0 12px; }
+  .select-actions .btn { flex: none; }
+  .select-info .btn { padding: 0 8px; }
+}
+.grouping { margin: 8px 0 12px; }
+.grouping > .sub { margin-bottom: 6px; }

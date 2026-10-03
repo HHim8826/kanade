@@ -90,11 +90,18 @@ func (s *Server) selectFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Files []int `json:"files"` // indexes from the file list; omit to take the suggested set
+		Files    []int              `json:"files"`    // indexes from the file list; omit to take the suggested set
+		Grouping *importer.Grouping `json:"grouping"` // how the songs go into albums (review #82); omit for their tags
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	if req.Grouping != nil {
+		if err := s.downloads.SetGrouping(r.Context(), id, req.Grouping); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 	}
 	if len(req.Files) == 0 {
 		v, err := s.downloads.Get(r.Context(), id)

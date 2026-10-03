@@ -419,8 +419,16 @@ func (s *Service) startImport(ctx context.Context, r *row) error {
 		}
 		return files
 	}
-	// No preview: the files were already chosen; the album can be tidied afterwards (P2-3).
-	batch, n, err := s.imp.CreateBatchLinked(ctx, "download", r.Name, r.dir, r.roundPaths(), false, func(tx *sql.Tx, batch int64) error {
+	// No preview: the files were already chosen; the album can be tidied afterwards (P2-3), or the
+	// download says how its songs go into albums (review #82).
+	paths := r.roundPaths()
+	batch, n, err := s.imp.CreateBatchLinked(ctx, "download", r.Name, r.dir, paths, false, func(tx *sql.Tx, batch int64) error {
+		if g := r.batchGrouping(paths); g != nil {
+			opts, _ := json.Marshal(map[string]any{"grouping": g})
+			if _, err := tx.ExecContext(ctx, `UPDATE import_batches SET options = ? WHERE id = ?`, string(opts), batch); err != nil {
+				return err
+			}
+		}
 		files, _ := json.Marshal(mark(batch))
 		_, err := tx.ExecContext(ctx, `UPDATE downloads SET import_batch_id = ?, files = ?, error = '', updated_at = ? WHERE id = ?`,
 			batch, string(files), db.Now(), r.ID)

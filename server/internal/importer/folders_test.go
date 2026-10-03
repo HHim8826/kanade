@@ -93,7 +93,7 @@ func TestFolderGroups(t *testing.T) {
 
 func TestNaturalCompare(t *testing.T) {
 	for _, c := range [][2]string{{"due9", "due10"}, {"DUE01", "due2"}, {"a", "b"}, {"track 2", "track 10"}, {"x1", "x1a"}} {
-		if naturalCompare(c[0], c[1]) >= 0 || naturalCompare(c[1], c[0]) <= 0 {
+		if NaturalCompare(c[0], c[1]) >= 0 || NaturalCompare(c[1], c[0]) <= 0 {
 			t.Errorf("%q should come before %q", c[0], c[1])
 		}
 	}

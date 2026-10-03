@@ -93,6 +93,8 @@ type AlbumDetail struct {
 	Aliases    []string  `json:"aliases"`
 	Sidecars   []Sidecar `json:"sidecars"` // CUE sheets and rip logs kept with the album
 	Entries    []Entry   `json:"entries"`
+	// Sections are the names of its discs that have one (review #82).
+	Sections map[int]string `json:"sections"`
 }
 
 func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
@@ -111,6 +113,9 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		return nil, err
 	}
 	if d.Sidecars, err = s.albumSidecars(ctx, id); err != nil {
+		return nil, err
+	}
+	if d.Sections, err = sectionNames(ctx, s.db, id); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.version, t.kind, `+briefCols+`

@@ -223,7 +223,7 @@ func (im *Importer) FolderGroups(ctx context.Context) ([]FolderGroup, error) {
 
 func sortFolderTracks(tracks []FolderTrack) {
 	slices.SortFunc(tracks, func(a, b FolderTrack) int {
-		return cmp.Or(cmp.Compare(a.Disc, b.Disc), cmp.Compare(a.Track, b.Track), naturalCompare(a.File, b.File))
+		return cmp.Or(cmp.Compare(a.Disc, b.Disc), cmp.Compare(a.Track, b.Track), NaturalCompare(a.File, b.File))
 	})
 }
 
@@ -269,8 +269,8 @@ func (im *Importer) MakeFolderAlbums(ctx context.Context, choices []FolderChoice
 	return im.lib.MakeAlbums(ctx, albums)
 }
 
-// naturalCompare orders names with their numbers by value: "due9" before "due10".
-func naturalCompare(a, b string) int {
+// NaturalCompare orders names with their numbers by value: "due9" before "due10".
+func NaturalCompare(a, b string) int {
 	for a != "" && b != "" {
 		da, db := digitsPrefix(a), digitsPrefix(b)
 		if da != "" && db != "" {

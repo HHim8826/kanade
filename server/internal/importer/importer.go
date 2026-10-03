@@ -884,6 +884,14 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		return out, err
 	}
 	im.rememberSourceAlbum(ctx, it, res.EntryID)
+	if it.plan != nil && it.plan.Section != "" && res.EntryID != 0 { // a collection's section (review #82)
+		var album int64
+		if im.db.QueryRowContext(ctx, `SELECT album_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&album) == nil {
+			if err := im.lib.NameSectionIfNone(ctx, album, it.plan.Disc, it.plan.Section); err != nil {
+				im.log.Warn("name the section", "item", it.id, "err", err)
+			}
+		}
+	}
 	out.trackID, out.entry = res.TrackID, res.EntryID
 	im.sourceOf(ctx, it, asset.ID)
 	switch {

@@ -27,6 +27,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/importer"
+	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
 )
@@ -96,6 +97,8 @@ type View struct {
 	Clearable     bool       `json:"clearable,omitempty"` // finished, holding no files: its record can leave the task center
 	Budget        int64      `json:"budget,omitempty"`    // the staging budget rounds fit (with the file list)
 	Files         []FileView `json:"files,omitempty"`
+	// Grouping is how its songs go into albums, when chosen (review #82): mode, title, artist.
+	Grouping *importer.Grouping `json:"grouping,omitempty"`
 }
 
 type Service struct {
@@ -496,18 +499,24 @@ type row struct {
 
 const rowCols = `id, source, name, info_hash, meta_gid, gid, state, dir, files, total_bytes, done_bytes, uploaded_bytes,
 	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select,
-	round, round_bytes, round_work, done_before, note, uploaded_before`
+	round, round_bytes, round_work, done_before, note, uploaded_before, grouping`
 
 func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	var r row
-	var files string
+	var files, grouping string
 	err := sc.Scan(&r.ID, &r.Source, &r.Name, &r.InfoHash, &r.metaGID, &r.gid, &r.State, &r.dir, &files, &r.TotalBytes,
 		&r.DoneBytes, &r.UploadedBytes, &r.DownSpeed, &r.UpSpeed, &r.Peers, &r.Error, &r.ImportBatchID, &r.FilesRemoved,
-		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note, &r.uploadedBefore)
+		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note, &r.uploadedBefore, &grouping)
 	if err != nil {
 		return nil, err
 	}
 	json.Unmarshal([]byte(files), &r.files)
+	if grouping != "" {
+		r.Grouping = &importer.Grouping{}
+		if json.Unmarshal([]byte(grouping), r.Grouping) != nil {
+			r.Grouping = nil
+		}
+	}
 	r.Rounds = r.Round
 	switch r.State { // rounds left only matter while it is under way (downloads from before rounds have none)
 	case StateQueued, StateDownloading, StatePaused, StateImporting:
@@ -1240,4 +1249,175 @@ func (s *Service) reseed(ctx context.Context, r *row) error {
 		gid, db.Now(), r.ID)
 	s.log.Info("seeding again after aria2 lost the task", "download", r.ID)
 	return err
+}
+
+// SetGrouping chooses how a download's songs go into albums (review #82): by their tags (nil),
+// every album folder an album, or the whole download one collection, its folders the sections.
+// Rounds handed over from now on follow it; songs already imported are arranged with Arrange.
+func (s *Service) SetGrouping(ctx context.Context, id int64, g *importer.Grouping) error {
+	raw := ""
+	if g != nil {
+		switch g.Mode {
+		case importer.GroupFolders:
+			g = &importer.Grouping{Mode: g.Mode}
+		case importer.GroupCollection:
+			g = &importer.Grouping{Mode: g.Mode, Title: strings.TrimSpace(g.Title), Artist: strings.TrimSpace(g.Artist)}
+			if g.Title == "" {
+				return errors.New("a collection needs a title")
+			}
+		case "", "tags":
+			g = nil
+		default:
+			return fmt.Errorf("unknown grouping %q", g.Mode)
+		}
+	}
+	if g != nil {
+		b, _ := json.Marshal(g)
+		raw = string(b)
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET grouping = ?, updated_at = ? WHERE id = ?`, raw, db.Now(), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("no such download")
+	}
+	return nil
+}
+
+// batchGrouping is what a round's import batch is told of the download's grouping: for a
+// collection, its sections and the places of the round's files, from the whole selection.
+func (r *row) batchGrouping(paths []string) *importer.Grouping {
+	g := r.Grouping
+	if g == nil || g.Mode != importer.GroupCollection {
+		return g
+	}
+	var all []string
+	for _, f := range r.files {
+		if f.Selected {
+			all = append(all, f.Path)
+		}
+	}
+	sections, slots := importer.CollectionLayout(all)
+	out := &importer.Grouping{Mode: g.Mode, Title: g.Title, Artist: g.Artist, Sections: sections, Slots: map[string][2]int{}}
+	for _, p := range paths {
+		if rel, err := filepath.Rel(r.dir, p); err == nil {
+			if s, ok := slots[filepath.ToSlash(rel)]; ok {
+				out.Slots[filepath.ToSlash(rel)] = s
+			}
+		}
+	}
+	return out
+}
+
+// CollectionPlan works out how the songs a download has already imported become one collection
+// (review #82): the album its rounds made as a collection, or a new one; each song in the section
+// and place CollectionLayout gives it, its own artist kept. Songs the library had from another
+// import join with their file; the albums it empties point at the collection afterwards.
+func (s *Service) CollectionPlan(ctx context.Context, id int64, title, artist string) (*library.Plan, error) {
+	r, err := s.load(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if r == nil {
+		return nil, errors.New("no such download")
+	}
+	title, artist = strings.TrimSpace(title), strings.TrimSpace(artist)
+	if title == "" {
+		return nil, errors.New("a collection needs a title")
+	}
+	if artist == "" {
+		artist = "Various Artists"
+	}
+	var all []string
+	for _, f := range r.files {
+		if f.Selected {
+			all = append(all, f.Path)
+		}
+	}
+	sections, slots := importer.CollectionLayout(all)
+	p := &library.Plan{Target: library.AlbumBrief{Title: title, AlbumArtist: artist}, Moves: []library.Move{}, Sections: map[int]string{},
+		Emptied: []library.AlbumBrief{}}
+	for i, name := range sections {
+		if name != "" {
+			p.Sections[i+1] = name
+		}
+	}
+	if p.Target.ID, err = s.imp.ScopeAlbum(ctx, importer.CollectionScope(r.dir, title)); err != nil {
+		return nil, err
+	}
+	batches := r.batches()
+	if len(batches) == 0 {
+		return nil, errors.New("nothing of this download is in the library yet")
+	}
+	args := make([]any, len(batches))
+	for i, b := range batches {
+		args[i] = b
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT i.rel_path, i.state, e.id, e.track_id, e.album_id, e.disc_no, e.track_no, t.title, t.artist,
+		al.title, al.album_artist FROM import_items i JOIN album_entries e ON e.id = i.entry_id JOIN tracks t ON t.id = e.track_id
+		JOIN albums al ON al.id = e.album_id
+		WHERE i.batch_id IN (?`+strings.Repeat(", ?", len(args)-1)+`) AND i.role = 'audio' AND i.state IN ('published', 'duplicate')
+		ORDER BY i.id`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := map[int64]bool{}
+	emptied := map[int64]library.AlbumBrief{}
+	for rows.Next() {
+		var rel, state string
+		var m library.Move
+		if err := rows.Scan(&rel, &state, &m.EntryID, &m.TrackID, &m.From.ID, &m.Disc, &m.Track, &m.Title, &m.Artist,
+			&m.From.Title, &m.From.AlbumArtist); err != nil {
+			return nil, err
+		}
+		if seen[m.EntryID] {
+			continue
+		}
+		seen[m.EntryID] = true
+		if slot, ok := slots[filepath.ToSlash(rel)]; ok {
+			m.Disc, m.Track = slot[0], slot[1]
+		} else { // made here (cut from an image): the section its folder is, its own number
+			for j, name := range sections {
+				if name != "" && slices.Contains(strings.Split(filepath.ToSlash(filepath.Dir(rel)), "/"), name) {
+					m.Disc = j + 1
+				}
+			}
+		}
+		if state == "duplicate" { // the library had it from another import: it joins, and stays there too
+			p.Adds = append(p.Adds, library.Add{TrackID: m.TrackID, Title: m.Title, Artist: m.Artist, Disc: m.Disc, Track: m.Track})
+			continue
+		}
+		p.Moves = append(p.Moves, m)
+		if m.From.ID != p.Target.ID {
+			emptied[m.From.ID] = m.From
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	moving := map[int64]int{}
+	for _, m := range p.Moves {
+		moving[m.From.ID]++
+	}
+	for id, b := range emptied { // only albums with nothing else on them are left empty
+		var n int
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM album_entries WHERE album_id = ?`, id).Scan(&n); err != nil {
+			return nil, err
+		}
+		if n <= moving[id] {
+			p.Emptied = append(p.Emptied, b)
+		}
+	}
+	slices.SortFunc(p.Emptied, func(a, b library.AlbumBrief) int { return int(a.ID - b.ID) })
+	slices.SortStableFunc(p.Moves, func(a, b library.Move) int { return a.Disc*1000 + a.Track - b.Disc*1000 - b.Track })
+	return p, nil
+}
+
+// Dir is a download's folder ("" when there is no such download).
+func (s *Service) Dir(ctx context.Context, id int64) string {
+	var dir string
+	s.db.QueryRowContext(ctx, `SELECT dir FROM downloads WHERE id = ?`, id).Scan(&dir)
+	return dir
 }

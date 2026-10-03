@@ -8,16 +8,23 @@ import { Cover, Empty, Icon, IconButton, fmtQuality, fmtTime, html } from '../ui
 
 // Lists shared by the library, playlist, favorites and history pages.
 
-export function AlbumGrid({ albums, empty = '還沒有專輯。到「任務」上傳音樂或加入下載。' }) {
+// AlbumGrid shows albums as cards; with sel (useSelection), they can be selected (review #83).
+export function AlbumGrid({ albums, empty = '還沒有專輯。到「任務」上傳音樂或加入下載。', sel }) {
   if (!albums.length) return html`<${Empty} icon="album">${empty}<//>`;
-  return html`<div class="grid">
-    ${albums.map((a) => html`<a key=${a.id} class="card album-card" href=${href('album/' + a.id)}>
-      <${Cover} id=${a.cover_id} alt="" />
-      <div class="card-text">
-        <div class="title" title=${a.title}>${a.title}</div>
-        <div class="sub" title=${a.album_artist || ''}>${a.album_artist || '未知歌手'}</div>
-      </div>
-    </a>`)}
+  const keys = albums.map((a) => a.id);
+  return html`<div class=${'grid' + (sel && sel.on ? ' selecting' : '')}>
+    ${albums.map((a, i) => {
+      const on = sel && sel.has(a.id);
+      return html`<a key=${a.id} class=${'card album-card' + (on ? ' selected' : '')} href=${href('album/' + a.id)}
+        onClick=${sel && ((e) => sel.click(e, keys, i))} role=${sel && sel.on ? 'checkbox' : undefined} aria-checked=${sel && sel.on ? !!on : undefined}>
+        <${Cover} id=${a.cover_id} alt="" />
+        ${sel && sel.on && html`<span class="check" aria-hidden="true">${on ? html`<${Icon} name="check" size=${18} />` : ''}</span>`}
+        <div class="card-text">
+          <div class="title" title=${a.title}>${a.title}</div>
+          <div class="sub" title=${a.album_artist || ''}>${a.album_artist || '未知歌手'}</div>
+        </div>
+      </a>`;
+    })}
   </div>`;
 }
 
@@ -157,17 +164,27 @@ export const DragHandle = ({ onStart, label = '拖曳排序' }) => html`<span cl
 // TrackList plays the whole list starting from the row that was tapped; with queue (the whole
 // album when this list is one disc of it) that list plays instead, from the tapped song. menuExtra(item,
 // i) adds entries to a row's menu; onReorder(from, to) turns on drag handles.
-export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onReorder, meta }) {
+// With sel (useSelection), rows can be selected by selKey(item) (the song's ID unless given; the
+// entry's on an album page), and a click checks a row instead of playing it (review #83).
+export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onReorder, meta, sel, selKey = (it) => it.trackId }) {
   const playingId = useStore(player, (s) => s.queue[s.index]?.assetId);
   const favTracks = useStore(favs, (s) => s.tracks);
   const key = (it, i) => it.key || it.assetId + '-' + i;
   const { drag, start, press, lift } = useReorder(items.map(key), onReorder);
+  const keys = sel ? items.map(selKey) : [];
+  const play = (e, it, i) => {
+    if (sel && sel.click(e, keys, i)) return;
+    queue ? playQueue(queue, Math.max(queue.indexOf(it), 0)) : playQueue(items, i);
+  };
 
-  return html`<ol class=${'tracks' + (drag ? ' dragging' : '')}>
+  return html`<ol class=${'tracks' + (drag ? ' dragging' : '') + (sel && sel.on ? ' selecting' : '')}>
     ${items.map((it, i) => html`<li key=${key(it, i)} ...${lift(i)}>
-      <div class=${'track' + (it.assetId === playingId ? ' current' : '')}>
-        ${onReorder && html`<${DragHandle} onStart=${(e) => start(e, i)} />`}
-        <button class="track-main" onPointerDown=${onReorder && ((e) => press(e, i))} onClick=${() => (queue ? playQueue(queue, Math.max(queue.indexOf(it), 0)) : playQueue(items, i))}>
+      <div class=${'track' + (it.assetId === playingId ? ' current' : '') + (sel && sel.has(keys[i]) ? ' selected' : '')}>
+        ${sel && sel.on && html`<input type="checkbox" class="row-check" checked=${sel.has(keys[i])} aria-label=${`選取「${it.title}」`}
+          onClick=${(e) => sel.click(e, keys, i)} />`}
+        ${onReorder && !(sel && sel.on) && html`<${DragHandle} onStart=${(e) => start(e, i)} />`}
+        <button class="track-main" onPointerDown=${onReorder && ((e) => press(e, i))} onClick=${(e) => play(e, it, i)}
+          aria-pressed=${sel && sel.on ? sel.has(keys[i]) : undefined}>
           ${showNumber ? html`<span class="num">${it.number || ''}</span>` : html`<${Cover} id=${it.coverId} size=${96} className="thumb" />`}
           <span class="track-text">
             <span class="title">${it.title}</span>

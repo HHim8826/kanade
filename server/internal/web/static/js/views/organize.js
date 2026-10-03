@@ -11,10 +11,10 @@ import { hasKana, parseVGMdb } from '../vgmdb.js';
 // Bumped after every change, so pages that show library data load it again.
 export const libRev = createStore({ n: 0 });
 export const useLibRev = () => useStore(libRev, (s) => s.n);
-const changed = () => libRev.set((s) => ({ n: s.n + 1 }));
+export const changed = () => libRev.set((s) => ({ n: s.n + 1 }));
 
 // done reports a change; the toast offers to undo it right away.
-function done(res, message) {
+export function done(res, message) {
   if (!res || !res.group) {
     toast('沒有任何變更');
     return false;
@@ -39,7 +39,7 @@ export async function undo(group) {
 const fieldNames = {
   artist: '歌手', version: '版本說明', kind: '類型', aliases: '別名', mb_recording: 'MusicBrainz 錄音', album_artist: '專輯歌手',
   date: '日期', catalog: '型號', edition: '版本', cover_id: '封面', merged_into: '合併到', mb_release: 'MusicBrainz 發行',
-  album_id: '所屬專輯', disc_no: '碟號', track_no: '曲序', row: '收錄',
+  album_id: '所屬專輯', disc_no: '碟號', track_no: '曲序', row: '收錄', sections: '區段名稱',
 };
 const fieldName = (target, field) => (field === 'title' ? (target === 'album' ? '專輯名稱' : '曲名') : fieldNames[field] || field);
 
@@ -50,6 +50,12 @@ function shown(v, field, label) {
   if (field === 'kind') return v === 'spoken' ? '廣播劇／談話' : '音樂';
   if (field === 'aliases') return v.split('\n').join('、');
   if (field === 'cover_id') return '另一張封面';
+  if (field === 'sections') { // {"1": "Episode 1", …}
+    try {
+      const names = Object.entries(JSON.parse(v));
+      return names.length ? names.map(([d, n]) => `${d}：${n}`).join('、') : '（無）';
+    } catch { return v; }
+  }
   return v;
 }
 
@@ -70,7 +76,7 @@ function showConflicts(list, none) {
 
 // ---- small form pieces ----
 
-function Field({ label, value, onInput, multiline, rows = 3, placeholder, autofocus, wide }) {
+export function Field({ label, value, onInput, multiline, rows = 3, placeholder, autofocus, wide }) {
   return html`<label class=${'field' + (wide ? ' span' : '')}>${label}
     ${multiline
       ? html`<textarea rows=${rows} value=${value} placeholder=${placeholder} onInput=${(e) => onInput(e.target.value)}></textarea>`
@@ -78,7 +84,7 @@ function Field({ label, value, onInput, multiline, rows = 3, placeholder, autofo
   </label>`;
 }
 
-function KindPicker({ value, onChange, allowKeep }) {
+export function KindPicker({ value, onChange, allowKeep }) {
   const opts = [...(allowKeep ? [['', '不變']] : []), ['music', '音樂'], ['spoken', '廣播劇／談話']];
   return html`<div class="field span">類型
     <div class="seg" role="radiogroup" aria-label="類型">${opts.map(([v, label]) => html`<label key=${v} class=${value === v ? 'on' : ''}>
@@ -90,7 +96,7 @@ function KindPicker({ value, onChange, allowKeep }) {
 const lines = (s) => s.split('\n').map((x) => x.trim()).filter(Boolean);
 
 // run wraps a dialog action: busy flag, error toast.
-function useRunner() {
+export function useRunner() {
   const [busy, setBusy] = useState(false);
   const run = async (f) => {
     setBusy(true);

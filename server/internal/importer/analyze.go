@@ -64,6 +64,8 @@ type Plan struct {
 	// DerivedArtist: no file of the group names its album artist; AlbumArtist was worked out from
 	// the songs' artists (or is empty), and may change as more songs of the album come (review #81).
 	DerivedArtist bool `json:"derived_artist,omitempty"`
+	// Section names the disc in a collection (review #82): "Episode 1".
+	Section string `json:"section,omitempty"`
 
 	// Tagged is what the file's own tags (and folder and file name) said, kept through preview edits:
 	// later imports of the same file are matched by it.
@@ -342,9 +344,10 @@ func unplayable(info *media.Info) string {
 		info.Format, info.Codec)
 }
 
-// batchOptions are the per-batch choices made in the preview.
+// batchOptions are the per-batch choices made in the preview, or for the download it came from.
 type batchOptions struct {
-	Encoding string `json:"encoding,omitempty"` // re-decode legacy tag bytes with this encoding (D2 §4)
+	Encoding string    `json:"encoding,omitempty"` // re-decode legacy tag bytes with this encoding (D2 §4)
+	Grouping *Grouping `json:"grouping,omitempty"` // how its songs go into albums (review #82)
 }
 
 func (im *Importer) options(ctx context.Context, batchID int64) batchOptions {
@@ -439,6 +442,9 @@ func (im *Importer) planNew(ctx context.Context, batchID int64) error {
 		}
 	}
 	settle(plans)
+	if err := im.group(ctx, batchID, plans); err != nil {
+		return err
+	}
 	return im.savePlans(ctx, plans)
 }
 
