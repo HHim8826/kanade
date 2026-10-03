@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,34 @@ const (
 var tokenEndpoint = "https://oauth2.googleapis.com/token"
 
 var ErrBadState = errors.New("unknown or expired authorization state; start again")
+
+// CallbackPath is where Google sends the administrator's browser back to the service.
+const CallbackPath = "/oauth/google/callback"
+
+// LocalhostRedirect is the redirect for a service Google will not send the browser back to:
+// Google takes only https redirects to a domain, or http to localhost. It leads nowhere; the
+// administrator pastes the address the browser ends on (CompletePasted).
+const LocalhostRedirect = "http://localhost" + CallbackPath
+
+// RedirectFor is the OAuth redirect for a service reached at publicURL: its own callback when
+// that has https and a domain name (or is on this computer), LocalhostRedirect otherwise (plain
+// http, or an IP address).
+func RedirectFor(publicURL string) string {
+	base := strings.TrimRight(publicURL, "/")
+	u, err := url.Parse(base)
+	if err != nil {
+		return LocalhostRedirect
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	switch {
+	case host == "localhost" || ip != nil && ip.IsLoopback():
+		return base + CallbackPath
+	case u.Scheme == "https" && ip == nil && strings.Contains(host, "."):
+		return base + CallbackPath
+	}
+	return LocalhostRedirect
+}
 
 // exchange calls the token endpoint; it also returns the response's fields so callers
 // can see whether refresh_token_expires_in was present. c.mu must be held or cfg stable.

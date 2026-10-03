@@ -584,6 +584,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .folder-group .form-grid { padding-left: 28px; }
 .steps { margin: 8px 0 16px; padding-left: 1.5em; line-height: 1.7; }
 .steps .link { color: var(--primary); }
+.sub.break { overflow-wrap: anywhere; }
 .paste-box { font-family: inherit; resize: vertical; }
 .field .value { font-size: 15px; color: var(--on-surface); padding: 4px 0; overflow-wrap: anywhere; }
 .field select { width: 100%; min-width: 0; text-overflow: ellipsis; }

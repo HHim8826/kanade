@@ -144,7 +144,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	defer d.Close()
 	authSvc := auth.New(d)
-	drive := gdrive.New(d, strings.TrimRight(cfg.PublicURL, "/")+"/oauth/google/callback")
+	drive := gdrive.New(d, gdrive.RedirectFor(cfg.PublicURL))
 	lib := library.New(d)
 	if err := lib.EnsureSearchIndex(ctx); err != nil {
 		return err

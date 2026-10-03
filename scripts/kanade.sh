@@ -656,9 +656,9 @@ do_install() {
   echo
   info "Kanade 怎麼被連到？"
   echo "  1) 透過網域：Cloudflare Tunnel、Nginx、Caddy 等反向代理（建議）"
-  echo "     只在本機監聽，由代理提供 https。連 Google Drive 和使用 passkey 都需要 https 網域。"
+  echo "     只在本機監聽，由代理提供 https。passkey 需要 https 網域。"
   echo "  2) 直接用 IP 和連接埠"
-  echo "     可以先試用；但 Google 不接受以 IP 為網址的授權，之後仍要設好網域才能連 Drive。"
+  echo "     連 Google Drive 時要多一步（授權後把瀏覽器的網址貼回）；密碼以未加密的 http 傳送，也不能用 passkey。"
   mode=$(ask "請選擇" "1")
   port=$(ask "連接埠" "8080")
   case "$port" in
@@ -746,15 +746,14 @@ do_install() {
   echo "  資料：$DATA_DIR"
   line
   echo "下一步："
-  echo "  1. 用上面的帳號登入，到「設定」連線 Google Drive（音樂存在你自己的 Drive）。"
+  echo "  1. 用上面的帳號登入，到「設定」照著說明在 Google Cloud 建立 OAuth 用戶端，再連線 Google Drive"
+  echo "     （音樂存在你自己的 Drive）。"
   if [ "$mode" = "2" ]; then
-    echo "     Google 只接受 https 網域：先設好網域與反向代理（或 Cloudflare Tunnel），"
-    echo "     用 kanade-manager config 把公開網址改成那個網域，再到 Google Cloud 建立 OAuth 用戶端。"
+    echo "     用 IP 時，授權後瀏覽器會停在打不開的 localhost 頁面，把那個網址貼回 Kanade 就完成了。"
+    echo "  2. 設好 https 網域（kanade-manager config 修改公開網址）後，可以在「設定 → 帳號」改用 passkey。"
   else
-    echo "     需要先在 Google Cloud 建立 OAuth 用戶端（網頁應用程式），授權重新導向 URI 填："
-    echo "     $public/oauth/google/callback"
+    echo "  2. 登入後可以在「設定 → 帳號」改用 passkey。"
   fi
-  echo "  2. 登入後可以在「設定 → 帳號」改用 passkey。"
   [ -n "$password" ] && echo "  這組密碼只顯示這一次；忘了可以用 kanade-manager password 重設。"
   echo "  之後輸入 kanade-manager 開啟管理選單。"
   [ "$mode" = "2" ] && warn "防火牆或雲端安全群組要開放連接埠 $port。"
@@ -992,7 +991,7 @@ do_config() {
   esac
   kanade config set "$key" "$value" >/dev/null || return 1
   info "已修改。"
-  [ "$key" = "public_url" ] && echo "Google Cloud 的 OAuth 重新導向 URI 也要改成：$value/oauth/google/callback"
+  [ "$key" = "public_url" ] && echo "已連線 Google Drive 的話：重新導向 URI 可能也變了，重新啟動後到「設定 → 更換用戶端」查看，加到 Google Cloud 的 OAuth 用戶端。"
   confirm "現在重新啟動套用嗎？" y && do_restart
   return 0
 }

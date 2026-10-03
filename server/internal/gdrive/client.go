@@ -135,8 +135,19 @@ func (c *Client) SetClientConfig(ctx context.Context, raw []byte) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := c.loadLocked(ctx); err != nil {
+		return err
+	}
 	if err := c.writeCredential(ctx, credClient, cfg); err != nil {
 		return err
+	}
+	// A token can only be refreshed by the client it was granted to: another client means
+	// connecting again.
+	if c.cfg != nil && c.cfg.ClientID != cfg.ClientID {
+		if _, err := c.db.ExecContext(ctx, `DELETE FROM credentials WHERE name = ?`, credToken); err != nil {
+			return err
+		}
+		c.tok = nil
 	}
 	c.cfg = &cfg
 	return nil
@@ -158,15 +169,23 @@ func (c *Client) ImportToken(ctx context.Context, tok Token) error {
 
 type Status struct {
 	HasClient   bool   `json:"has_client"`
+	ClientID    string `json:"client_id,omitempty"`
 	Connected   bool   `json:"connected"`
 	TestingMode bool   `json:"testing_mode"` // refresh token expires after 7 days
 	Account     string `json:"account,omitempty"`
+	// RedirectURI is the one to register with the OAuth client. Paste: it is LocalhostRedirect,
+	// so the authorization ends with pasting the address the browser shows.
+	RedirectURI string `json:"redirect_uri"`
+	Paste       bool   `json:"paste"`
 }
 
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	c.mu.Lock()
 	err := c.loadLocked(ctx)
-	st := Status{HasClient: c.cfg != nil, Connected: c.tok != nil}
+	st := Status{HasClient: c.cfg != nil, Connected: c.tok != nil, RedirectURI: c.redirectURI, Paste: c.redirectURI == LocalhostRedirect}
+	if c.cfg != nil {
+		st.ClientID = c.cfg.ClientID
+	}
 	if c.tok != nil {
 		st.TestingMode = c.tok.RefreshTokenExpiresIn > 0
 	}

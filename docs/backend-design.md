@@ -407,6 +407,23 @@ DIR/
 - 新指令 `kanade-manager tools`（選單 14）：安裝時略過或當時沒裝成功的，之後補裝，再詢問是否重新啟動；同時把 kanade-manager 換成執行的這份腳本，讓舊版裝好的機器也知道這些檔案。狀態頁顯示實際使用的路徑。
 - 驗證：本機以背景模式實測安裝時改用靜態版（套件管理員那題答否）、Kanade 記錄 `aria2 ready`／`ffmpeg ready` 指向 tools、`tools` 在兩者都有時與缺 aria2 時的行為與重新啟動、kanade-manager 由 v0.1.0 換成新版、解除安裝後 tools 與安裝位置都已刪除。xz 的路徑（`tar -xJ`）與 arm64 未實測。
 
+### 網頁端設定 OAuth 用戶端（2026-10-03）
+
+- 回報：新安裝的機器在設定頁按「連線 Google Drive」只得到 `no OAuth client configured`，沒有任何指引。後端早有 `POST /drive/client`，但網頁端沒有入口，只能用指令列。
+- 設定頁的 Drive 區塊依狀態顯示：
+  - 沒有用戶端：說明為什麼需要，按鈕開啟「設定 OAuth 用戶端」。對話框列出 Google Cloud 的步驟並附上連結：建立專案、啟用 Drive API、Google Auth Platform、目標對象改正式版、建立「網頁應用程式」用戶端。顯示這台應登記的重新導向 URI，可以複製；http 下沒有剪貼簿 API，改用 `execCommand`。可以選擇 Google 下載的 JSON 自動填入，也可以手動貼上 ID 和密鑰；ID 結尾不是 `.apps.googleusercontent.com` 時先擋下。
+  - 有用戶端：顯示用戶端 ID，提供連線與「更換用戶端」，並先說明「Google 尚未驗證這個應用程式」要怎麼繼續。
+- 沒有 https 網域時也能連 Drive：Google 只把瀏覽器導回 https 網域或 localhost。`gdrive.RedirectFor` 依公開網址決定：
+  - https 加網域名稱，或本機：用自己的 `/oauth/google/callback`，維持原本的流程。
+  - 其他情況（http 或 IP）：用 `http://localhost/oauth/google/callback`。連線改在對話框完成：在新分頁開 Google 授權頁，授權後把瀏覽器停住的 localhost 網址貼回（`/drive/auth/paste`）。這和 P0 驗證過的做法相同。
+  - `/drive` 的狀態加上 `redirect_uri`、`paste`、`client_id`。
+- 換成另一個用戶端時刪除舊的 token：token 只能由取得它的用戶端刷新，留著只會讓背景刷新一直失敗；改為顯示「尚未連線」，請使用者重新連線。存回同一個用戶端不受影響。
+- 安裝腳本與 README 的說明隨之修改：IP 模式不再說「要設好網域才能連 Drive」，改為說明要貼回網址，以及密碼以 http 傳送、不能用 passkey。修改公開網址後提示到設定頁查看新的重新導向 URI。
+- 驗證：
+  - gdrive 測試：各種公開網址的重新導向、狀態欄位、換用戶端後要重連（重新開啟後也是）。
+  - 用 headless Chromium 在公開網址為 IP 的測試實例走完整流程（桌面與手機寬度）：錯誤的 ID 被擋、選 JSON 自動填入、授權連結帶 localhost 的 redirect_uri 與用戶端 ID、貼上偽造的網址顯示中文錯誤。
+  - 沒有用真的 Google 用戶端走完授權：`http://localhost/...`（不帶連接埠）的登記沒有實測；P0 實測過的是 `http://localhost:8080/...`。
+
 ## 使用方式（開發環境）
 
 ```bash

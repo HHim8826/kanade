@@ -25,7 +25,7 @@ The script installs the release for the machine into `/opt/kanade` (data in `/op
 
 Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=https://music.example.com bash kanade.sh install`; the header of `scripts/kanade.sh` lists the other settings.
 
-**Google Drive and passkeys need an HTTPS domain.** Google accepts an OAuth redirect only to https (or localhost), so put Kanade behind Cloudflare Tunnel, Caddy or Nginx with a domain, set it as the public address, and in Google Cloud create an OAuth client ("Web application") whose redirect URI is `https://<your domain>/oauth/google/callback`. Then connect Drive from the web client's settings page.
+**Connecting Google Drive.** Kanade reaches Drive with your own OAuth client from Google Cloud; the settings page walks through creating it and shows the redirect URI to register. Google sends the browser back only to https domains (or localhost): behind a domain with https (Cloudflare Tunnel, Caddy, Nginx) it returns to Kanade by itself; reached by an IP address, Kanade registers `http://localhost/oauth/google/callback` and you paste the address the browser ends on. Passkeys need https in any case, and over plain http the password is sent unencrypted.
 
 ## Layout
 

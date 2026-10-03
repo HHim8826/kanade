@@ -181,6 +181,168 @@ function AddPasskey({ close, onAdded }) {
   <//>`;
 }
 
+// copyText: the clipboard API needs https; reached over plain http (an IP address), the old way.
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const t = document.createElement('textarea');
+    t.value = text;
+    document.body.append(t);
+    t.select();
+    const ok = document.execCommand('copy');
+    t.remove();
+    if (!ok) throw new Error('無法複製，請自己選取後複製。');
+  }
+}
+
+const outLink = (url, text) => html`<a class="link" href=${url} target="_blank" rel="noopener noreferrer">${text}</a>`;
+const cloud = (path, text) => outLink('https://console.cloud.google.com/' + path, text);
+const unverified = '出現「Google 尚未驗證這個應用程式」時，這是你自己建立的用戶端，按「進階」→「前往…」繼續';
+
+// Drive: Kanade reaches Drive with the administrator's own OAuth client from Google Cloud, so first
+// that client, then the connection.
+function Drive({ drive }) {
+  const d = drive.data;
+  const st = d && d.status;
+  const setup = () => showDialog((close) => html`<${ClientSetup} status=${st} close=${close} onSaved=${drive.reload} />`);
+  const connect = async () => {
+    if (st.paste) {
+      showDialog((close) => html`<${PasteConnect} close=${close} onDone=${drive.reload} />`);
+      return;
+    }
+    try {
+      const { url } = await post('/drive/auth', {});
+      location.href = url; // Google returns to /oauth/google/callback on this server
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  return html`<div class="card pad">
+    <${ErrorBox} error=${drive.error} onRetry=${drive.reload} />
+    ${st && !st.has_client && html`<div class="title">尚未設定</div>
+      <div class="sub">Kanade 透過你自己在 Google Cloud 建立的 OAuth 用戶端存取 Google Drive，音樂存在你的 Drive。先建立用戶端（約 10 分鐘，設定頁會帶著做），再連線。</div>
+      <div class="actions"><button class="btn filled" onClick=${setup}>設定 OAuth 用戶端</button></div>`}
+    ${st && st.has_client && html`${st.connected
+        ? html`<div class="title">${d.account.email}</div>
+          <div class="sub">已使用 ${fmtBytes(d.account.usage_bytes)}${d.account.limit_bytes ? ` / ${fmtBytes(d.account.limit_bytes)}` : ''}</div>
+          ${st.testing_mode && html`<div class="task-error">OAuth 應用程式仍在「測試中」，授權 7 天後失效。</div>`}`
+        : html`<div class="title">尚未連線</div>
+          <div class="sub">連線時選擇要存放音樂的 Google 帳號，並允許存取 Google Drive。${unverified}。</div>`}
+      <div class="sub break">OAuth 用戶端：${st.client_id}</div>
+      <div class="actions"><button class="btn tonal" onClick=${connect}><${Icon} name="refresh" />${st.connected ? '重新連線' : '連線 Google Drive'}</button>
+        <button class="btn text" onClick=${setup}>更換用戶端</button></div>`}
+  </div>`;
+}
+
+// ClientSetup: creating the OAuth client in Google Cloud step by step, with this server's redirect
+// URI to register; then its ID and secret, typed or read from the JSON Google offers to download.
+function ClientSetup({ status, close, onSaved }) {
+  const [id, setId] = useState('');
+  const [secret, setSecret] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const pick = async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const j = JSON.parse(await f.text());
+      const c = j.web || j.installed || j;
+      if (!c.client_id || !c.client_secret) throw new Error();
+      setId(c.client_id);
+      setSecret(c.client_secret);
+      setError(null);
+    } catch {
+      setError(new Error('這不是 Google 的 OAuth 用戶端 JSON 檔。'));
+    }
+  };
+  const save = async (e) => {
+    e.preventDefault();
+    if (!id.trim().endsWith('.apps.googleusercontent.com')) {
+      setError(new Error('用戶端 ID 應該以 .apps.googleusercontent.com 結尾。'));
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      await post('/drive/client', { client_id: id.trim(), client_secret: secret.trim() });
+      toast('已儲存 OAuth 用戶端，接著按「連線 Google Drive」');
+      onSaved();
+      close();
+    } catch (err) {
+      setError(err);
+      setBusy(false);
+    }
+  };
+  const copy = () => copyText(status.redirect_uri).then(() => toast('已複製重新導向 URI'), (e) => toast(e.message, 'error'));
+  return html`<${Dialog} title="設定 OAuth 用戶端" wide onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button type="submit" form="client-form" class="btn filled" disabled=${busy || !id.trim() || !secret.trim()}>${busy ? '儲存中…' : '儲存'}</button>`}>
+    <p class="hint">Kanade 用你自己在 Google Cloud 建立的 OAuth 用戶端存取 Drive，不經過其他服務。請用要存放音樂的 Google 帳號操作：</p>
+    <ol class="steps">
+      <li>${cloud('projectcreate', '建立 Google Cloud 專案')}（或選一個現有的），然後${cloud('apis/library/drive.googleapis.com', '啟用 Google Drive API')}。</li>
+      <li>到 ${cloud('auth/overview', 'Google Auth Platform')} 按「開始」：應用程式名稱填 Kanade，填支援與聯絡信箱，目標對象選「外部」。</li>
+      <li>到${cloud('auth/audience', '「目標對象」')}按「發布應用程式」改為正式版。若停在「測試中」，要把自己的帳號加為測試使用者，而且授權每 7 天就失效。</li>
+      <li>到${cloud('auth/clients/create', '「用戶端」建立用戶端')}：應用程式類型選「網頁應用程式」，在「已授權的重新導向 URI」新增下面這個網址。</li>
+      <li>按「建立」後，用戶端密鑰只會顯示這一次：按「下載 JSON」，在下面選擇這個檔案；或複製用戶端 ID 與密鑰貼上。</li>
+    </ol>
+    <div class="field"><span>重新導向 URI</span>
+      <div class="inline-form"><input readonly value=${status.redirect_uri} onFocus=${(e) => e.target.select()} />
+        <button type="button" class="btn tonal" onClick=${copy}><${Icon} name="copy" />複製</button></div></div>
+    ${status.paste && html`<p class="hint">這台的公開網址不是 https 網域，Google 不會把瀏覽器導回這裡，所以用 localhost：連線時，授權後瀏覽器會停在一個打不開的頁面，把那個網址貼回 Kanade 就完成了。之後設好 https 網域、改了公開網址（kanade-manager config），要在用戶端加上新的重新導向 URI。</p>`}
+    <form id="client-form" onSubmit=${save}>
+      <label class="field"><span>下載的 JSON 檔</span><input type="file" accept=".json,application/json" onChange=${pick} /></label>
+      <label class="field"><span>用戶端 ID</span><input value=${id} autocomplete="off" spellcheck="false" placeholder="….apps.googleusercontent.com"
+        onInput=${(e) => setId(e.target.value)} /></label>
+      <label class="field"><span>用戶端密鑰</span><input type="password" value=${secret} autocomplete="off" onInput=${(e) => setSecret(e.target.value)} /></label>
+      ${status.connected && html`<p class="hint">換成另一個用戶端後，要重新連線 Google Drive。</p>`}
+      <${ErrorBox} error=${error} />
+    </form>
+  <//>`;
+}
+
+// PasteConnect: connecting where Google cannot send the browser back to Kanade (no https domain):
+// Google's page in another tab, then the address the browser ends on, pasted here.
+function PasteConnect({ close, onDone }) {
+  const [authURL, setAuthURL] = useState(null);
+  const [pasted, setPasted] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    post('/drive/auth', {}).then((r) => setAuthURL(r.url), setError);
+  }, []);
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await post('/drive/auth/paste', { url: pasted.trim() });
+      toast('已連線 Google Drive');
+      onDone();
+      close();
+    } catch (err) {
+      setError(/state/.test(err.message) ? new Error('這不是這次授權的網址，或已超過一小時。請重新開啟 Google 授權頁再試一次。')
+        : /not granted/.test(err.message) ? new Error('Google 沒有授權（在授權頁按了取消）。') : err);
+      setBusy(false);
+    }
+  };
+  return html`<${Dialog} title="連線 Google Drive" onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button type="submit" form="paste-form" class="btn filled" disabled=${busy || !/[?&]state=/.test(pasted)}>${busy ? '連線中…' : '完成連線'}</button>`}>
+    <ol class="steps">
+      <li>${authURL ? outLink(authURL, '開啟 Google 授權頁') : '準備授權頁…'}（新分頁），選擇要存放音樂的帳號，允許存取 Google Drive。${unverified}。</li>
+      <li>允許後，瀏覽器會打開一個無法連線的 localhost 頁面，這是正常的：複製網址列裡的整個網址。</li>
+      <li>貼在下面，按「完成連線」。</li>
+    </ol>
+    <form id="paste-form" onSubmit=${submit}>
+      <label class="field"><span>授權後的網址</span>
+        <textarea class="paste-box" rows="3" value=${pasted} placeholder="http://localhost/oauth/google/callback?state=…&code=…"
+          onInput=${(e) => setPasted(e.target.value)}></textarea></label>
+      <${ErrorBox} error=${error} />
+    </form>
+  <//>`;
+}
+
 // Settings shows once its first reads are done (each waits at most ten seconds), all at once and in
 // a fixed order: the Drive connection decides whether the sync and inbox sections are there, so no
 // section appears above one already shown. A read that failed shows its error in its section.
@@ -197,14 +359,6 @@ export function Settings({ onLogout }) {
 function SettingsPage({ first, onLogout }) {
   const status = useSection('/status', first.status);
   const drive = useSection('/drive', first.drive);
-  const connect = async () => {
-    try {
-      const { url } = await post('/drive/auth', {});
-      location.href = url; // Google returns to /oauth/google/callback on this server
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  };
   const logout = async () => {
     resetPlayer(); // stop and report the playback while the login still works (review #14)
     await post('/logout').catch(() => {});
@@ -215,15 +369,7 @@ function SettingsPage({ first, onLogout }) {
   return html`<section>
     <h1 class="page-title">設定</h1>
     <h2 class="section-title">Google Drive</h2>
-    <div class="card pad">
-      <${ErrorBox} error=${drive.error} onRetry=${drive.reload} />
-      ${d && (d.status.connected
-        ? html`<div class="title">${d.account.email}</div>
-            <div class="sub">已使用 ${fmtBytes(d.account.usage_bytes)}${d.account.limit_bytes ? ` / ${fmtBytes(d.account.limit_bytes)}` : ''}</div>
-            ${d.status.testing_mode && html`<div class="task-error">OAuth 應用程式仍在「測試中」，授權 7 天後失效。</div>`}`
-        : html`<div class="title">尚未連線</div>`)}
-      ${d && html`<div class="actions"><button class="btn tonal" onClick=${connect}><${Icon} name="refresh" />${d && d.status.connected ? '重新連線' : '連線 Google Drive'}</button></div>`}
-    </div>
+    <${Drive} drive=${drive} />
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} />`}
     <${Appearance} />
     <h2 class="section-title">服務</h2>

@@ -125,3 +125,88 @@ func TestQuoteEscapesDriveQuery(t *testing.T) {
 		t.Fatalf("quote = %s", got)
 	}
 }
+
+func TestRedirectFor(t *testing.T) {
+	for _, c := range []struct{ public, want string }{
+		{"https://music.example.com", "https://music.example.com/oauth/google/callback"},
+		{"https://music.example.com/kanade/", "https://music.example.com/kanade/oauth/google/callback"},
+		{"http://localhost:8080", "http://localhost:8080/oauth/google/callback"},
+		{"http://127.0.0.1:8097", "http://127.0.0.1:8097/oauth/google/callback"},
+		// Google takes neither plain http to another host nor an IP address: paste instead.
+		{"http://203.0.113.7:8080", LocalhostRedirect},
+		{"https://203.0.113.7", LocalhostRedirect},
+		{"http://music.example.com", LocalhostRedirect},
+		{"https://nas", LocalhostRedirect},
+	} {
+		if got := RedirectFor(c.public); got != c.want {
+			t.Errorf("RedirectFor(%q) = %q, want %q", c.public, got, c.want)
+		}
+	}
+}
+
+func TestStatusTellsTheRedirect(t *testing.T) {
+	ctx := context.Background()
+	d, err := db.Open(ctx, filepath.Join(t.TempDir(), "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	c := New(d, RedirectFor("http://203.0.113.7:8080"))
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.HasClient || st.ClientID != "" || !st.Paste || st.RedirectURI != LocalhostRedirect {
+		t.Fatalf("before a client: %+v", st)
+	}
+	if err := c.SetClientConfig(ctx, []byte(`{"client_id":"123.apps.googleusercontent.com","client_secret":"s"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ = c.Status(ctx); !st.HasClient || st.ClientID != "123.apps.googleusercontent.com" {
+		t.Fatalf("after a client: %+v", st)
+	}
+	u, err := c.AuthURL(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustParse(t, u).Query().Get("redirect_uri"); got != LocalhostRedirect {
+		t.Fatalf("redirect_uri = %q", got)
+	}
+}
+
+func mustParse(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+func TestAnotherClientMeansConnectingAgain(t *testing.T) {
+	ctx := context.Background()
+	fakeTokenServer(t, DriveScope, false)
+	c := newClient(t)
+	u, _ := c.AuthURL(ctx, "")
+	if _, err := c.CompletePasted(ctx, "https://music.example/oauth/google/callback?state="+stateOf(t, u)+"&code=good-code"); err != nil {
+		t.Fatal(err)
+	}
+	// The same client again (saved twice): still connected.
+	if err := c.SetClientConfig(ctx, []byte(`{"client_id":"id","client_secret":"secret"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := c.Status(ctx); !st.Connected {
+		t.Fatal("saving the same client disconnected Drive")
+	}
+	if err := c.SetClientConfig(ctx, []byte(`{"client_id":"other","client_secret":"s2"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := c.Status(ctx); st.Connected || st.ClientID != "other" {
+		t.Fatalf("after another client: %+v", st)
+	}
+	// Also after a restart (read from the database).
+	again := New(c.db, c.redirectURI)
+	if st, _ := again.Status(ctx); st.Connected {
+		t.Fatal("the old token is still stored")
+	}
+}
