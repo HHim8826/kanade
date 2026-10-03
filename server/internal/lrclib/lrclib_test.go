@@ -2,10 +2,12 @@ package lrclib
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestFindRanksAndGets(t *testing.T) {
@@ -107,6 +109,47 @@ func TestBadAnswersAreNotCached(t *testing.T) {
 		c.Get(ctx, 7)
 		if calls.Load() != before+2 {
 			t.Fatalf("%q: good answers not cached", bad)
+		}
+		srv.Close()
+	}
+}
+
+// LRCLIB answers about one uncached search in four with 503 "ServerOverloaded" and Retry-After: 1:
+// such a busy answer is asked again after the wait, a few times; a long wait or another error is not.
+func TestBusyIsAskedAgain(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name       string
+		status     int
+		retryAfter string
+		busy       int32 // busy answers before a good one
+		ok         bool
+		calls      int32
+	}{
+		{"busy twice", http.StatusServiceUnavailable, "1", 2, true, 3},
+		{"429 without a wait", http.StatusTooManyRequests, "", 1, true, 2},
+		{"busy throughout", http.StatusServiceUnavailable, "1", 100, false, 1 + busyTries},
+		{"a long wait", http.StatusServiceUnavailable, "120", 1, false, 1},
+		{"a server error", http.StatusInternalServerError, "", 1, false, 1},
+	} {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if calls.Add(1) <= c.busy {
+				if c.retryAfter != "" {
+					w.Header().Set("Retry-After", c.retryAfter)
+				}
+				w.WriteHeader(c.status)
+				w.Write([]byte(`{"message":"The server is busy, please retry in a moment","name":"ServerOverloaded","statusCode":503}`))
+				return
+			}
+			w.Write([]byte(`[{"id": 1, "trackName": "Undine", "plainLyrics": "a"}]`))
+		}))
+		cl := New("https://music.example/")
+		cl.Base = srv.URL + "/api"
+		cl.second = time.Millisecond
+		list, err := cl.Find(ctx, Song{Title: "Undine"})
+		if c.ok && (err != nil || len(list) != 1) || !c.ok && !errors.Is(err, ErrUnavailable) || calls.Load() != c.calls {
+			t.Errorf("%s: %v %v after %d calls", c.name, list, err, calls.Load())
 		}
 		srv.Close()
 	}

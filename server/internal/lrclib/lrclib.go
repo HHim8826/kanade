@@ -22,9 +22,10 @@ import (
 )
 
 type Client struct {
-	Base string // https://lrclib.net/api
-	ua   string
-	http *http.Client
+	Base   string // https://lrclib.net/api
+	ua     string
+	http   *http.Client
+	second time.Duration // a second of Retry-After (shorter in tests)
 
 	mu    sync.Mutex
 	cache map[string]cached
@@ -40,8 +41,16 @@ const cacheTTL = time.Hour
 // New makes a client; contact goes in the User-Agent, as LRCLIB asks.
 func New(contact string) *Client {
 	return &Client{Base: "https://lrclib.net/api", ua: fmt.Sprintf("Kanade/0.2 ( %s )", contact),
-		http: &http.Client{Timeout: 20 * time.Second}, cache: map[string]cached{}}
+		http: &http.Client{Timeout: 20 * time.Second}, second: time.Second, cache: map[string]cached{}}
 }
+
+const (
+	// busyTries is how many times a request LRCLIB was too busy for is sent again: it answers about
+	// one uncached search in four with 503 "ServerOverloaded" and Retry-After: 1.
+	busyTries = 3
+	// longestWait is the longest Retry-After (seconds) waited for; a longer one fails at once.
+	longestWait = 5
+)
 
 var (
 	ErrUnavailable = errors.New("LRCLIB did not answer; try again later")
@@ -97,34 +106,71 @@ func (c *Client) get(ctx context.Context, path string, q url.Values, decode func
 	return nil
 }
 
+// fetch asks LRCLIB, and again after the wait it asks for when it is busy.
 func (c *Client) fetch(ctx context.Context, u string) ([]byte, error) {
+	for try := 0; ; try++ {
+		body, wait, err := c.fetchOnce(ctx, u)
+		if wait == 0 || try == busyTries {
+			return body, err
+		}
+		t := time.NewTimer(time.Duration(wait) * c.second)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return nil, fmt.Errorf("%w (%v)", ErrUnavailable, ctx.Err())
+		case <-t.C:
+		}
+	}
+}
+
+// fetchOnce sends one request; wait > 0 is how many seconds to wait before asking again.
+func (c *Client) fetchOnce(ctx context.Context, u string) (body []byte, wait int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("User-Agent", c.ua)
 	req.Header.Set("Accept", "application/json")
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w (%v)", ErrUnavailable, err)
+		return nil, 0, fmt.Errorf("%w (%v)", ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return nil, ErrNotFound
+		return nil, 0, ErrNotFound
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-		return nil, ErrUnavailable
+		return nil, busyWait(resp), ErrUnavailable
 	case resp.StatusCode != http.StatusOK:
-		return nil, fmt.Errorf("LRCLIB: HTTP %d", resp.StatusCode)
+		return nil, 0, fmt.Errorf("LRCLIB: HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20+1))
+	body, err = io.ReadAll(io.LimitReader(resp.Body, 4<<20+1))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(body) > 4<<20 {
-		return nil, errors.New("LRCLIB answer too large")
+		return nil, 0, errors.New("LRCLIB answer too large")
 	}
-	return body, nil
+	return body, 0, nil
+}
+
+// busyWait is the wait before asking again after a busy answer (429, 502–504): its Retry-After
+// when that is short, a second without one; 0 (not again) for another error or a long wait.
+func busyWait(resp *http.Response) int {
+	switch resp.StatusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	default:
+		return 0
+	}
+	v := strings.TrimSpace(resp.Header.Get("Retry-After"))
+	if v == "" {
+		return 1
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n > longestWait {
+		return 0
+	}
+	return max(n, 1)
 }
 
 // Get fetches one record by its ID.
