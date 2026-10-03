@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -276,6 +277,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, apiError{Error: err.Error()})
+}
+
+// upstreamError says a service Kanade asked (Drive, LRCLIB, MusicBrainz, a feed) failed. Never as
+// 502 or 504: Cloudflare puts its own "Bad gateway" page in place of an origin's, which reads as
+// Kanade being down and loses the message. retry > 0 asks the client to wait that many seconds.
+func upstreamError(w http.ResponseWriter, err error, retry int) {
+	if retry > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(retry))
+	}
+	writeError(w, http.StatusServiceUnavailable, err)
 }
 
 func readJSON(r *http.Request, v any) error {

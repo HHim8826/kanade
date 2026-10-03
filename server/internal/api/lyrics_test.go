@@ -73,3 +73,39 @@ func TestFindAndUseOnlineLyrics(t *testing.T) {
 		t.Fatalf("without login: %d", rec.Code)
 	}
 }
+
+// LRCLIB failing is not said with 502, which Cloudflare replaces with its own page (reading as
+// Kanade being down): 503 with the message, and a wait to ask again when LRCLIB did not answer.
+func TestOnlineLyricsWhenLRCLIBFails(t *testing.T) {
+	ctx := context.Background()
+	s, h := newTestServer(t)
+	token := loginToken(t, s, h)
+	answer := http.StatusInternalServerError
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if answer == http.StatusOK {
+			w.Write([]byte(`{"not": "a list"}`))
+			return
+		}
+		w.WriteHeader(answer)
+	}))
+	defer fake.Close()
+	s.lrclib = lrclib.New("https://music.example/")
+	s.lrclib.Base = fake.URL + "/api"
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "ly", Size: 1, Format: "flac", Codec: "flac", DurationMS: 200_000})
+	s.lib.MarkVerified(ctx, a.ID, "drive-ly")
+	r, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "Song", Artist: "Singer", Album: "Album", AlbumArtist: "Singer"})
+	path := fmt.Sprintf("/api/v1/tracks/%d/lyrics/online", r.TrackID)
+
+	for _, c := range []struct {
+		answer int
+		retry  string
+	}{{http.StatusInternalServerError, "30"}, {http.StatusTooManyRequests, "30"}, {http.StatusOK, ""}} {
+		answer = c.answer
+		rec := do(t, h, "GET", path, token, nil)
+		var body struct{ Error string }
+		if rec.Code != http.StatusServiceUnavailable || json.Unmarshal(rec.Body.Bytes(), &body) != nil || body.Error == "" ||
+			rec.Header().Get("Retry-After") != c.retry {
+			t.Fatalf("LRCLIB answering %d: %d %q %s", c.answer, rec.Code, rec.Header().Get("Retry-After"), rec.Body)
+		}
+	}
+}

@@ -232,7 +232,7 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if data, err = s.renderCover(r, c.DriveFileID, size); err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			upstreamError(w, err, 0)
 			return
 		}
 		os.WriteFile(path, data, 0o600)
@@ -450,7 +450,7 @@ func (s *Server) sidecar(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := s.drive.OpenRange(r.Context(), c.DriveFileID, 0, -1)
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		upstreamError(w, err, 0)
 		return
 	}
 	defer resp.Body.Close()

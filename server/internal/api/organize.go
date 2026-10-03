@@ -415,7 +415,7 @@ func (s *Server) identifyError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, err)
 		return
 	}
-	writeError(w, http.StatusBadGateway, err)
+	upstreamError(w, err, 0)
 }
 
 func (s *Server) albumOr404(w http.ResponseWriter, r *http.Request) *library.AlbumDetail {
@@ -496,7 +496,7 @@ func (s *Server) identifyApply(w http.ResponseWriter, r *http.Request) {
 		}
 		cover, err := s.importer.StoreCover(ctx, data)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			upstreamError(w, err, 0)
 			return
 		}
 		changes = append(changes, library.Change{Target: "album", ID: a.ID, Field: "cover_id", Value: library.Str(strconv.FormatInt(cover, 10))})
@@ -584,12 +584,12 @@ func (s *Server) vgmdbApply(w http.ResponseWriter, r *http.Request) {
 	if p.Cover && slices.Contains(req.Keys, identify.CoverKey) && s.mb != nil {
 		data, err := s.mb.VGMdbCover(ctx, &req.Album)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			upstreamError(w, err, 0)
 			return
 		}
 		cover, err := s.importer.StoreCover(ctx, data)
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
+			upstreamError(w, err, 0)
 			return
 		}
 		changes = append(changes, library.Change{Target: "album", ID: a.ID, Field: "cover_id", Value: library.Str(strconv.FormatInt(cover, 10))})

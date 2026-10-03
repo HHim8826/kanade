@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
-import { api, get, post } from '../api.js';
+import { ApiError, api, get, post } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
   clearUpcoming, current, cycleMode, endScrub, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, retryRadio,
@@ -211,7 +211,9 @@ const foundCache = new Map(); // track ID -> candidates
 
 function findLyrics(trackId) {
   if (foundCache.has(trackId)) return Promise.resolve(foundCache.get(trackId));
-  return get(`/tracks/${trackId}/lyrics/online`).catch((e) => (e.status === 404 ? [] : Promise.reject(e))).then((list) => {
+  // 503 with Kanade's own answer: LRCLIB, not this server, failed.
+  const said = (e) => (e.status === 503 && e.body ? new ApiError(503, 'LRCLIB 暫時沒有回應，請稍後再試。', e.body, e.retryAfter) : e);
+  return get(`/tracks/${trackId}/lyrics/online`).catch((e) => (e.status === 404 ? [] : Promise.reject(said(e)))).then((list) => {
     foundCache.set(trackId, list);
     return list;
   });

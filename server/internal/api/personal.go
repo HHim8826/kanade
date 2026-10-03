@@ -346,9 +346,9 @@ func (s *Server) lrclibError(w http.ResponseWriter, r *http.Request, err error) 
 	case errors.Is(err, lrclib.ErrNotFound):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, lrclib.ErrUnavailable):
-		writeError(w, http.StatusBadGateway, err)
+		upstreamError(w, err, 30)
 	default:
 		s.log.Warn("lrclib", "path", r.URL.Path, "err", err)
-		writeError(w, http.StatusBadGateway, err)
+		upstreamError(w, err, 0)
 	}
 }

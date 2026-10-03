@@ -144,7 +144,7 @@ func (s *Server) driveReconcile(w http.ResponseWriter, r *http.Request) {
 func (s *Server) driveInbox(w http.ResponseWriter, r *http.Request) {
 	n, err := s.importer.ScanInbox(r.Context())
 	if err != nil {
-		writeError(w, http.StatusBadGateway, err)
+		upstreamError(w, err, 0)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"files": n, "waiting": s.importer.InboxWaiting()})

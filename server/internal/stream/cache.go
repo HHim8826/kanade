@@ -493,7 +493,7 @@ func (c *Cache) passThrough(w http.ResponseWriter, r *http.Request, id string, s
 		h := w.Header()
 		h.Del("Content-Length")
 		h.Del("Content-Range")
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		http.Error(w, err.Error(), http.StatusServiceUnavailable) // not 502: Cloudflare replaces those
 		return
 	}
 	defer resp.Body.Close()

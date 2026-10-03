@@ -24,7 +24,7 @@ func (s *Server) rssError(w http.ResponseWriter, r *http.Request, err error) {
 	case r.Context().Err() != nil:
 		s.internal(w, r, err)
 	default: // the feed or the torrent link failed: the site's problem, said as it is
-		writeError(w, http.StatusBadGateway, err)
+		upstreamError(w, err, 0)
 	}
 }
 
