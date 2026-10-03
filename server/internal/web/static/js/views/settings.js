@@ -223,14 +223,21 @@ function Drive({ drive }) {
     ${st && !st.has_client && html`<div class="title">尚未設定</div>
       <div class="sub">Kanade 透過你自己在 Google Cloud 建立的 OAuth 用戶端存取 Google Drive，音樂存在你的 Drive。先建立用戶端（約 10 分鐘，設定頁會帶著做），再連線。</div>
       <div class="actions"><button class="btn filled" onClick=${setup}>設定 OAuth 用戶端</button></div>`}
-    ${st && st.has_client && html`${st.connected
+    ${st && st.has_client && html`${!st.connected
+        ? html`<div class="title">尚未連線</div>
+          <div class="sub">連線時選擇要存放音樂的 Google 帳號，並允許存取 Google Drive。${unverified}。</div>`
+        : d.account
         ? html`<div class="title">${d.account.email}</div>
           <div class="sub">已使用 ${fmtBytes(d.account.usage_bytes)}${d.account.limit_bytes ? ` / ${fmtBytes(d.account.limit_bytes)}` : ''}</div>
           ${st.testing_mode && html`<div class="task-error">OAuth 應用程式仍在「測試中」，授權 7 天後失效。</div>`}`
-        : html`<div class="title">尚未連線</div>
-          <div class="sub">連線時選擇要存放音樂的 Google 帳號，並允許存取 Google Drive。${unverified}。</div>`}
+        : html`<div class="title">無法讀取 Google Drive</div>
+          <div class="task-error">${d.account_error}</div>
+          <div class="sub">${d.reconnect
+            ? `Google 不再接受這次的授權：可能已過期${st.testing_mode ? '（應用程式在「測試中」，授權 7 天後失效）' : ''}，或在 Google 帳號移除了 Kanade 的存取權。按「重新連線」重新授權。`
+            : '可能暫時連不上 Google：稍後按「重試」。一直失敗的話，按「重新連線」重新授權。'}</div>`}
       <div class="sub break">OAuth 用戶端：${st.client_id}</div>
-      <div class="actions"><button class="btn tonal" onClick=${connect}><${Icon} name="refresh" />${st.connected ? '重新連線' : '連線 Google Drive'}</button>
+      <div class="actions"><button class=${'btn ' + (d.reconnect ? 'filled' : 'tonal')} onClick=${connect}><${Icon} name="refresh" />${st.connected ? '重新連線' : '連線 Google Drive'}</button>
+        ${d.account_error && !d.reconnect && html`<button class="btn text" disabled=${drive.loading} onClick=${drive.reload}>重試</button>`}
         <button class="btn text" onClick=${setup}>更換用戶端</button></div>`}
   </div>`;
 }

@@ -21,18 +21,20 @@ func (s *Server) driveInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	out := map[string]any{"status": st}
 	if st.Connected {
+		// Reading the account can fail (the authorization expired, Google is unreachable): the
+		// status still comes back, so the page can offer connecting again (review #64).
 		about, err := s.drive.About(r.Context())
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
+		var root string
+		if err == nil {
+			root, err = s.drive.Root(r.Context())
 		}
-		root, err := s.drive.Root(r.Context())
 		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
+			out["account_error"] = err.Error()
+			out["reconnect"] = errors.Is(err, gdrive.ErrAuthExpired)
+		} else {
+			out["account"] = about
+			out["root_folder_id"] = root
 		}
-		out["account"] = about
-		out["root_folder_id"] = root
 	}
 	writeJSON(w, http.StatusOK, out)
 }

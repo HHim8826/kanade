@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -208,5 +209,56 @@ func TestAnotherClientMeansConnectingAgain(t *testing.T) {
 	again := New(c.db, c.redirectURI)
 	if st, _ := again.Status(ctx); st.Connected {
 		t.Fatal("the old token is still stored")
+	}
+}
+
+// Switching clients is one transaction: when dropping the old token fails, the old client and its
+// token stay, in memory and in the database, and saving the new client again works (review #70).
+func TestFailedClientSwitchKeepsTheOldClient(t *testing.T) {
+	ctx := context.Background()
+	c := newClient(t)
+	if err := c.ImportToken(ctx, Token{AccessToken: "at", RefreshToken: "rt", Expiry: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.ExecContext(ctx, `CREATE TRIGGER deny_token_delete BEFORE DELETE ON credentials
+		WHEN OLD.name = 'google_token' BEGIN SELECT RAISE(ABORT, 'simulated storage failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.SetClientConfig(ctx, []byte(`{"client_id":"other","client_secret":"s2"}`)); err == nil {
+		t.Fatal("the switch did not fail")
+	}
+	for name, cl := range map[string]*Client{"in memory": c, "after a restart": New(c.db, c.redirectURI)} {
+		if st, err := cl.Status(ctx); err != nil || !st.Connected || st.ClientID != "id" {
+			t.Fatalf("%s: %+v %v", name, st, err)
+		}
+	}
+	if _, err := c.db.ExecContext(ctx, `DROP TRIGGER deny_token_delete`); err != nil {
+		t.Fatal(err)
+	}
+	again := New(c.db, c.redirectURI)
+	if err := again.SetClientConfig(ctx, []byte(`{"client_id":"other","client_secret":"s2"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := New(c.db, c.redirectURI).Status(ctx); st.Connected || st.ClientID != "other" {
+		t.Fatalf("after saving again: %+v", st)
+	}
+}
+
+// A refresh token Google no longer accepts is told apart from other failures (review #64).
+func TestRevokedGrantMeansConnectingAgain(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant", "error_description": "Token has been expired or revoked."})
+	}))
+	defer srv.Close()
+	old := tokenEndpoint
+	tokenEndpoint = srv.URL
+	defer func() { tokenEndpoint = old }()
+	c := newClient(t)
+	c.ImportToken(ctx, Token{AccessToken: "at", RefreshToken: "rt", Expiry: time.Now().Add(-time.Hour)})
+	_, err := c.About(ctx)
+	if !errors.Is(err, ErrAuthExpired) || !strings.Contains(err.Error(), "Token has been expired or revoked.") {
+		t.Fatalf("err = %v", err)
 	}
 }

@@ -57,6 +57,16 @@ func RedirectFor(publicURL string) string {
 	return LocalhostRedirect
 }
 
+// tokenError is an error answer from the token endpoint, such as invalid_grant.
+type tokenError struct {
+	status      int
+	code, about string
+}
+
+func (e *tokenError) Error() string {
+	return strings.TrimSpace(fmt.Sprintf("token endpoint %d: %s %s", e.status, e.code, e.about))
+}
+
 // exchange calls the token endpoint; it also returns the response's fields so callers
 // can see whether refresh_token_expires_in was present. c.mu must be held or cfg stable.
 func (c *Client) exchange(ctx context.Context, form url.Values) (Token, map[string]any, error) {
@@ -81,7 +91,9 @@ func (c *Client) exchange(ctx context.Context, form url.Values) (Token, map[stri
 		return Token{}, nil, fmt.Errorf("token endpoint %d: unreadable response", resp.StatusCode)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return Token{}, nil, fmt.Errorf("token endpoint %d: %v %v", resp.StatusCode, m["error"], m["error_description"])
+		code, _ := m["error"].(string)
+		about, _ := m["error_description"].(string)
+		return Token{}, nil, &tokenError{resp.StatusCode, code, about}
 	}
 	str := func(k string) string { s, _ := m[k].(string); return s }
 	num := func(k string) int { n, _ := m[k].(float64); return int(n) }

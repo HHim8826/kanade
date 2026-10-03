@@ -30,6 +30,10 @@ const (
 
 var ErrNotConnected = errors.New("google drive is not connected")
 
+// ErrAuthExpired: Google no longer accepts the refresh token (it expired, as it does after 7 days
+// while the OAuth app is in testing, or access was revoked): connecting again is the way back.
+var ErrAuthExpired = errors.New("google authorization expired or was revoked")
+
 // ClientConfig is the OAuth client registered in Google Cloud.
 type ClientConfig struct {
 	ClientID     string `json:"client_id"`
@@ -75,11 +79,17 @@ func (c *Client) readCredential(ctx context.Context, name string, v any) (bool, 
 }
 
 func (c *Client) writeCredential(ctx context.Context, name string, v any) error {
+	return putCredential(ctx, c.db, name, v)
+}
+
+func putCredential(ctx context.Context, ex interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, name string, v any) error {
 	raw, err := json.Marshal(v)
 	if err != nil {
 		return err
 	}
-	_, err = c.db.ExecContext(ctx, `INSERT INTO credentials (name, value, updated_at) VALUES (?, ?, ?)
+	_, err = ex.ExecContext(ctx, `INSERT INTO credentials (name, value, updated_at) VALUES (?, ?, ?)
 		ON CONFLICT (name) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`, name, string(raw), db.Now())
 	return err
 }
@@ -138,15 +148,27 @@ func (c *Client) SetClientConfig(ctx context.Context, raw []byte) error {
 	if err := c.loadLocked(ctx); err != nil {
 		return err
 	}
-	if err := c.writeCredential(ctx, credClient, cfg); err != nil {
+	// A token can only be refreshed by the client it was granted to: another client means
+	// connecting again. Both in one transaction, so a failure keeps the old client and its token
+	// (review #70).
+	other := c.cfg != nil && c.cfg.ClientID != cfg.ClientID
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	// A token can only be refreshed by the client it was granted to: another client means
-	// connecting again.
-	if c.cfg != nil && c.cfg.ClientID != cfg.ClientID {
-		if _, err := c.db.ExecContext(ctx, `DELETE FROM credentials WHERE name = ?`, credToken); err != nil {
+	defer tx.Rollback()
+	if err := putCredential(ctx, tx, credClient, cfg); err != nil {
+		return err
+	}
+	if other {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM credentials WHERE name = ?`, credToken); err != nil {
 			return err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if other {
 		c.tok = nil
 	}
 	c.cfg = &cfg
@@ -209,6 +231,10 @@ func (c *Client) bearer(ctx context.Context, forceRefresh bool) (string, error) 
 			"refresh_token": {c.tok.RefreshToken},
 		})
 		if err != nil {
+			var te *tokenError
+			if errors.As(err, &te) && te.code == "invalid_grant" {
+				return "", fmt.Errorf("refresh access token: %w (%v)", ErrAuthExpired, err)
+			}
 			return "", fmt.Errorf("refresh access token: %w", err)
 		}
 		c.tok.AccessToken, c.tok.Expiry = t.AccessToken, t.Expiry
@@ -358,3 +384,7 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 		return false
 	}
 }
+
+// UseHTTPClient replaces the HTTP client before the client is used, for tests that answer
+// Google's endpoints locally.
+func (c *Client) UseHTTPClient(h *http.Client) { c.http = h }
