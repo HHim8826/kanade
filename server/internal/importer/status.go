@@ -104,62 +104,96 @@ func (im *Importer) Batch(ctx context.Context, id int64) (*BatchView, error) {
 const unfinished = `(b.state NOT IN ('done', 'canceled') OR (b.state = 'done' AND EXISTS (SELECT 1 FROM import_items i
 	WHERE i.batch_id = b.id AND %s)))`
 
+// Page chooses the finished tasks listed with the unfinished ones: the latest History, or, from
+// Since on (an ID), every one since then and any finished again at Changed or later. The page
+// lists the older ones with Older, once (review #68).
+type Page struct {
+	History        int
+	Since, Changed int64
+}
+
 // Batches lists the batches of the task center with per-state counts: every unfinished one, and the
-// latest history finished ones; more says there are older finished ones. Batches whose record was
-// cleared are left out.
-func (im *Importer) Batches(ctx context.Context, history int) ([]BatchView, bool, error) {
+// finished ones p chooses; more says there are older finished ones (with p.History). Batches whose
+// record was cleared are left out.
+func (im *Importer) Batches(ctx context.Context, p Page) ([]BatchView, bool, error) {
 	open := fmt.Sprintf(unfinished, KeepsSource("i"))
-	rows, err := im.db.QueryContext(ctx, `SELECT id, kind, source, state, created_at, finished_at FROM (
-		SELECT b.id, b.kind, b.source, b.state, b.created_at, coalesce(b.finished_at, 0) finished_at, 0 done
-			FROM import_batches b WHERE b.cleared_at IS NULL AND `+open+`
-		UNION ALL
-		SELECT * FROM (SELECT b.id, b.kind, b.source, b.state, b.created_at, coalesce(b.finished_at, 0), 1
-			FROM import_batches b WHERE b.cleared_at IS NULL AND NOT `+open+` ORDER BY b.id DESC LIMIT ?))
-		ORDER BY id DESC`, history+1)
+	finished := `SELECT * FROM (SELECT ` + batchCols + ` FROM import_batches b WHERE b.cleared_at IS NULL AND NOT ` + open +
+		` ORDER BY b.id DESC LIMIT ?)`
+	args := []any{p.History + 1}
+	if p.Since > 0 {
+		finished = `SELECT ` + batchCols + ` FROM import_batches b WHERE b.cleared_at IS NULL AND NOT ` + open +
+			` AND (b.id >= ? OR (? > 0 AND coalesce(b.finished_at, 0) >= ?))`
+		args = []any{p.Since, p.Changed, p.Changed}
+	}
+	out, err := im.batchViews(ctx, `SELECT * FROM (SELECT `+batchCols+` FROM import_batches b WHERE b.cleared_at IS NULL AND `+open+`
+		UNION ALL `+finished+`) ORDER BY id DESC`, args...)
 	if err != nil {
 		return nil, false, err
 	}
-	var out []BatchView
+	more := false
+	if p.Since == 0 {
+		n := 0
+		for i := range out {
+			if out[i].Clearable {
+				if n++; n > p.History { // the one past the page: the oldest finished batch listed
+					out = slices.Delete(out, i, i+1)
+					more = true
+					break
+				}
+			}
+		}
+	}
+	return out, more, nil
+}
+
+// Older lists finished batches older than before (an ID), newest first, and whether there are more.
+func (im *Importer) Older(ctx context.Context, before int64, limit int) ([]BatchView, bool, error) {
+	open := fmt.Sprintf(unfinished, KeepsSource("i"))
+	out, err := im.batchViews(ctx, `SELECT `+batchCols+` FROM import_batches b WHERE b.cleared_at IS NULL AND NOT `+open+`
+		AND b.id < ? ORDER BY b.id DESC LIMIT ?`, before, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
+}
+
+const batchCols = `b.id, b.kind, b.source, b.state, b.created_at, coalesce(b.finished_at, 0) finished_at`
+
+// batchViews reads the batches a query lists, with their counts.
+func (im *Importer) batchViews(ctx context.Context, query string, args ...any) ([]BatchView, error) {
+	rows, err := im.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	out := []BatchView{}
 	for rows.Next() {
 		var b BatchView
 		if err := rows.Scan(&b.ID, &b.Kind, &b.Source, &b.State, &b.CreatedAt, &b.FinishedAt); err != nil {
 			rows.Close()
-			return nil, false, err
+			return nil, err
 		}
 		out = append(out, b)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return nil, false, err
+		return nil, err
 	}
-	finished := 0
 	for i := range out {
 		var err error
 		if out[i].Counts, err = im.counts(ctx, out[i].ID); err != nil {
-			return nil, false, err
+			return nil, err
 		}
 		if out[i].State == BatchDone {
 			if out[i].Unsaved, err = im.Unsaved(ctx, out[i].ID); err != nil {
-				return nil, false, err
+				return nil, err
 			}
 		}
-		if out[i].Clearable = (out[i].State == BatchDone || out[i].State == BatchCanceled) && out[i].Unsaved == 0; out[i].Clearable {
-			finished++
-		}
+		out[i].Clearable = (out[i].State == BatchDone || out[i].State == BatchCanceled) && out[i].Unsaved == 0
 	}
-	more := finished > history
-	if more { // the one past the page: the oldest finished batch listed
-		for i := len(out) - 1; i >= 0; i-- {
-			if out[i].Clearable {
-				out = slices.Delete(out, i, i+1)
-				break
-			}
-		}
-	}
-	if out == nil {
-		out = []BatchView{}
-	}
-	return out, more, nil
+	return out, nil
 }
 
 // ErrNotClearable is a batch that is not finished, or has files not in the library yet.

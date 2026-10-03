@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/downloader"
 	"github.com/HHim8826/kanade/server/internal/importer"
 )
@@ -131,27 +132,59 @@ func (s *Server) downloadAction(action func(*downloader.Service, *http.Request, 
 
 // tasks is the task center (plan §2): downloads and import batches in one response. Every task
 // still under way or waiting for the user is in it; of the finished ones, the latest ?history (50
-// unless asked for more), and more_* says whether there are older ones.
+// unless asked for more, up to 200), and more_* says whether there are older ones. Once the page has
+// listed older ones (tasksOlder), it asks with ?since_downloads and ?since_imports (the oldest ID it
+// keeps up to date) and ?changed (the "now" of its first answer) instead: every finished task from
+// that ID on, and the older ones that changed since (review #68).
 func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
-	history, _ := strconv.Atoi(r.URL.Query().Get("history"))
-	if history <= 0 || history > 1000 {
+	q := r.URL.Query()
+	num := func(k string) int64 { n, _ := strconv.ParseInt(q.Get(k), 10, 64); return max(n, 0) }
+	history := int(num("history"))
+	if history <= 0 || history > 200 {
 		history = 50
 	}
-	downloads, moreDownloads, err := s.downloads.Tasks(r.Context(), history)
+	now := db.Now()
+	downloads, moreDownloads, err := s.downloads.Tasks(r.Context(), downloader.Page{History: history, Since: num("since_downloads"), Changed: num("changed")})
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	imports, moreImports, err := s.importer.Batches(r.Context(), history)
+	imports, moreImports, err := s.importer.Batches(r.Context(), importer.Page{History: history, Since: num("since_imports"), Changed: num("changed")})
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	out := map[string]any{"downloads": downloads, "imports": imports, "more_downloads": moreDownloads, "more_imports": moreImports}
+	out := map[string]any{"downloads": downloads, "imports": imports, "more_downloads": moreDownloads, "more_imports": moreImports, "now": now}
 	if s.disk != nil {
 		out["disk"] = s.disk.Status() // low disk: the task page says what is held back
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// tasksOlder lists ?kind (downloads or imports) of finished tasks older than ?before (an ID), 50 at
+// a time.
+func (s *Server) tasksOlder(w http.ResponseWriter, r *http.Request) {
+	before, err := strconv.ParseInt(r.URL.Query().Get("before"), 10, 64)
+	if err != nil || before <= 0 {
+		writeError(w, http.StatusBadRequest, errors.New("expected ?before, an ID"))
+		return
+	}
+	var list any
+	var more bool
+	switch r.URL.Query().Get("kind") {
+	case "downloads":
+		list, more, err = s.downloads.Older(r.Context(), before, 50)
+	case "imports":
+		list, more, err = s.importer.Older(r.Context(), before, 50)
+	default:
+		writeError(w, http.StatusBadRequest, errors.New("expected ?kind=downloads or imports"))
+		return
+	}
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": list, "more": more})
 }
 
 // clearDownload, clearImport and clearTasks remove finished tasks' records from the task center;

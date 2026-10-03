@@ -297,7 +297,7 @@ func (s *Server) createImport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) imports(w http.ResponseWriter, r *http.Request) {
-	list, _, err := s.importer.Batches(r.Context(), 50)
+	list, _, err := s.importer.Batches(r.Context(), importer.Page{History: 50})
 	if err != nil {
 		s.internal(w, r, err)
 		return

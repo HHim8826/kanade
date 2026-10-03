@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from '../../vendor/hooks.module.js';
+import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { href } from '../router.js';
 import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, toast } from '../ui.js';
@@ -33,25 +33,78 @@ function Progress({ value }) {
     <div style=${{ width: `${Math.min(value, 1) * 100}%` }}></div></div>`;
 }
 
+const finished = {
+  downloads: (d) => d.state === 'completed' || d.state === 'canceled',
+  imports: (b) => b.clearable,
+};
+
 // The task center lists every task under way or waiting for the user, and the finished ones a page
-// at a time; a finished task's record can be removed (the songs, albums and files stay).
+// at a time; a finished task's record can be removed (the songs, albums and files stay). The latest
+// finished ones are kept up to date; older pages are read once, by ID, so every record can be
+// reached (review #68). Once older ones are listed, the update covers every finished task from the
+// first page's oldest on, and the older ones that changed since the page opened.
 export function Tasks() {
-  const [history, setHistory] = useState(50);
-  const tasks = usePoll(() => get('/tasks?history=' + history), 2000, [history]);
+  const [older, setOlder] = useState({ downloads: null, imports: null }); // { items, more, since }
+  const changed = useRef(0);
+  const query = () => {
+    const p = new URLSearchParams();
+    for (const k of ['downloads', 'imports']) if (older[k]) p.set('since_' + k, older[k].since);
+    if (older.downloads || older.imports) p.set('changed', changed.current);
+    return p.toString();
+  };
+  const tasks = usePoll(() => get('/tasks?' + query()).then((t) => {
+    changed.current ||= t.now;
+    return t;
+  }), 2000, [older]);
   const [adding, setAdding] = useState(false);
   const [selecting, setSelecting] = useState(null);
+  const [loadingMore, setLoadingMore] = useState('');
   const t = tasks.data;
-  const clearable = t && (t.downloads.some((d) => d.clearable) || t.imports.some((b) => b.clearable) || t.more_downloads || t.more_imports);
+  // What a kind shows: the kept-up-to-date tasks, then the older pages without the ones that came
+  // back with the update (fetched again, finished again).
+  const list = (k) => {
+    if (!t) return [];
+    const o = older[k];
+    if (!o) return t[k];
+    const fresh = new Set(t[k].map((x) => x.id));
+    return [...t[k], ...o.items.filter((x) => !fresh.has(x.id))].sort((a, b) => b.id - a.id);
+  };
+  const hasMore = (k) => (older[k] ? older[k].more : t && t['more_' + k]);
+  const loadMore = async (k) => {
+    setLoadingMore(k);
+    try {
+      const o = older[k];
+      const since = o ? o.since : Math.min(...t[k].filter(finished[k]).map((x) => x.id));
+      const before = o && o.items.length ? o.items[o.items.length - 1].id : since;
+      const r = await get(`/tasks/older?kind=${k}&before=${before}`);
+      setOlder((v) => ({ ...v, [k]: { since, items: [...(v[k] ? v[k].items : []), ...r.items], more: r.more } }));
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+    setLoadingMore('');
+  };
+  // An older task acted on (its record removed) leaves its page; when it is still there, it comes
+  // back with the update.
+  const changedOlder = (k, id) => () => {
+    setOlder((v) => (v[k] ? { ...v, [k]: { ...v[k], items: v[k].items.filter((x) => x.id !== id) } } : v));
+    tasks.reload();
+  };
+  const isOlder = (k, id) => older[k] && t && !t[k].some((x) => x.id === id);
+  const downloads = list('downloads');
+  const imports = list('imports');
+  const clearable = t && (downloads.some((d) => d.clearable) || imports.some((b) => b.clearable) || hasMore('downloads') || hasMore('imports'));
   const clearAll = () => confirmDialog({
     title: '清除已結束的記錄', action: '清除',
     children: html`<p>從任務清單移除所有已結束的下載與匯入記錄。已入庫的歌曲、專輯和 Drive 上的檔案都不受影響；還在進行、做種，或還有檔案沒存進曲庫的任務會留著。</p>`,
     onConfirm: async () => {
       const r = await post('/tasks/clear');
       toast(`已移除 ${r.downloads} 個下載和 ${r.imports} 個匯入的記錄`);
+      setOlder({ downloads: null, imports: null });
       tasks.reload();
     },
   });
-  const more = html`<button class="btn text more-tasks" onClick=${() => setHistory((h) => h + 50)}>顯示更早的記錄</button>`;
+  const more = (k) => hasMore(k) && html`<button class="btn text more-tasks" disabled=${loadingMore === k} onClick=${() => loadMore(k)}>
+    ${loadingMore === k ? '載入中…' : '顯示更早的記錄'}</button>`;
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">任務</h1>
@@ -68,13 +121,15 @@ export function Tasks() {
     ${t && html`
       ${clearable && html`<div class="task-tools"><button class="btn text" onClick=${clearAll}><${Icon} name="delete" />清除已結束的記錄</button></div>`}
       <h2 class="section-title">下載</h2>
-      ${t.downloads.length ? t.downloads.map((d) => html`<${DownloadCard} key=${d.id} d=${d} onSelect=${() => setSelecting(d.id)} onChange=${tasks.reload} />`)
+      ${downloads.length ? downloads.map((d) => html`<${DownloadCard} key=${d.id} d=${d} onSelect=${() => setSelecting(d.id)}
+          onChange=${isOlder('downloads', d.id) ? changedOlder('downloads', d.id) : tasks.reload} />`)
         : html`<${Empty} icon="download">沒有下載任務<//>`}
-      ${t.more_downloads && more}
+      ${more('downloads')}
       <h2 class="section-title">匯入</h2>
-      ${t.imports.length ? t.imports.map((b) => html`<${ImportCard} key=${b.id} b=${b} onChange=${tasks.reload} />`)
+      ${imports.length ? imports.map((b) => html`<${ImportCard} key=${b.id} b=${b}
+          onChange=${isOlder('imports', b.id) ? changedOlder('imports', b.id) : tasks.reload} />`)
         : html`<${Empty} icon="upload">沒有匯入紀錄<//>`}
-      ${t.more_imports && more}
+      ${more('imports')}
     `}
     ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(id) => { setAdding(false); tasks.reload(); toast('已加入，正在取得檔案清單'); }} />`}
     ${selecting && html`<${SelectFiles} id=${selecting} onClose=${() => setSelecting(null)} onDone=${() => { setSelecting(null); tasks.reload(); }} />`}

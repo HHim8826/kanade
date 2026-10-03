@@ -200,6 +200,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/downloads/{id}/cancel", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Cancel(r.Context(), id) })))
 	mux.Handle("POST /api/v1/downloads/{id}/retry", s.authed(s.downloadAction(func(d *downloader.Service, r *http.Request, id int64) error { return d.Retry(r.Context(), id) })))
 	mux.Handle("GET /api/v1/tasks", s.authed(s.tasks))
+	mux.Handle("GET /api/v1/tasks/older", s.authed(s.tasksOlder))
 	mux.Handle("POST /api/v1/tasks/clear", s.authed(s.clearTasks))
 	mux.Handle("POST /api/v1/downloads/{id}/clear", s.authed(s.clearDownload))
 	mux.Handle("POST /api/v1/imports/{id}/clear", s.authed(s.clearImport))

@@ -544,31 +544,71 @@ func (s *Service) Get(ctx context.Context, id int64) (*View, error) {
 	return &v, nil
 }
 
+// Page chooses the finished downloads listed with the others: the latest History, or, from Since
+// on (an ID), every one since then and any that changed at Changed or later (fetched again and
+// finished again). The page lists the older ones with Older, once (review #68).
+type Page struct {
+	History        int
+	Since, Changed int64
+}
+
 // Tasks lists the downloads of the task center: every one not finished, failed ones until their
-// record is cleared, and the latest history of the others; more says there are older ones.
-func (s *Service) Tasks(ctx context.Context, history int) ([]View, bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state NOT IN (?, ?)
-		UNION ALL SELECT * FROM (SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state IN (?, ?) ORDER BY id DESC LIMIT ?)
-		ORDER BY id DESC`, StateCompleted, StateCanceled, StateCompleted, StateCanceled, history+1)
+// record is cleared, and the finished ones p chooses; more says there are older ones (with
+// p.History).
+func (s *Service) Tasks(ctx context.Context, p Page) ([]View, bool, error) {
+	finished := `SELECT * FROM (SELECT ` + rowCols + ` FROM downloads WHERE cleared_at IS NULL AND state IN (?, ?) ORDER BY id DESC LIMIT ?)`
+	args := []any{StateCompleted, StateCanceled, StateCompleted, StateCanceled, p.History + 1}
+	if p.Since > 0 {
+		finished = `SELECT ` + rowCols + ` FROM downloads WHERE cleared_at IS NULL AND state IN (?, ?) AND (id >= ? OR (? > 0 AND updated_at >= ?))`
+		args = []any{StateCompleted, StateCanceled, StateCompleted, StateCanceled, p.Since, p.Changed, p.Changed}
+	}
+	out, err := s.views(ctx, `SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state NOT IN (?, ?)
+		UNION ALL `+finished+` ORDER BY id DESC`, args...)
 	if err != nil {
 		return nil, false, err
 	}
+	if p.Since == 0 {
+		done := 0
+		for i, v := range out {
+			if v.State == StateCompleted || v.State == StateCanceled {
+				if done++; done > p.History { // only says there is more
+					return slices.Delete(out, i, i+1), true, nil
+				}
+			}
+		}
+	}
+	return out, false, nil
+}
+
+// Older lists finished downloads older than before (an ID), newest first, and whether there are
+// more.
+func (s *Service) Older(ctx context.Context, before int64, limit int) ([]View, bool, error) {
+	out, err := s.views(ctx, `SELECT `+rowCols+` FROM downloads WHERE cleared_at IS NULL AND state IN (?, ?) AND id < ?
+		ORDER BY id DESC LIMIT ?`, StateCompleted, StateCanceled, before, limit+1)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
+}
+
+func (s *Service) views(ctx context.Context, query string, args ...any) ([]View, error) {
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 	out := []View{}
-	done := 0
 	for rows.Next() {
 		r, err := scanRow(rows)
 		if err != nil {
-			return nil, false, err
-		}
-		if r.State == StateCompleted || r.State == StateCanceled {
-			if done++; done > history {
-				continue // only says there is more
-			}
+			return nil, err
 		}
 		out = append(out, r.View)
 	}
-	return out, done > history, rows.Err()
+	return out, rows.Err()
 }
 
 // Clear removes a finished download's record from the task center (nothing else changes); with id
