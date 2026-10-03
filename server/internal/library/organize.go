@@ -21,6 +21,7 @@ import (
 const (
 	SourceUser     = "user"
 	SourceIdentify = "identify"
+	SourceVGMdb    = "vgmdb"
 	SourceRestore  = "restore"
 	SourceUndo     = "undo"
 )

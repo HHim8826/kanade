@@ -90,7 +90,7 @@ func TestPreviewEditAndRun(t *testing.T) {
 
 	// Nothing runs while the batch waits for review.
 	time.Sleep(100 * time.Millisecond)
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 0 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 0 {
 		t.Fatal("files imported before the review was confirmed")
 	}
 
@@ -169,7 +169,8 @@ func TestPreviewFoldersExcludeCancel(t *testing.T) {
 	batch, _, _ := im.CreateBatch(ctx, "upload", "group-1", src, true)
 	waitState(t, im, batch, BatchReview)
 	p, _ := im.Preview(ctx, batch)
-	if len(p.Groups) != 1 || len(p.Standalone) != 3 { // "Best" is one album by its tags
+	// "Best" is one album by its tags; each untagged folder is an album named after it.
+	if len(p.Groups) != 3 || len(p.Standalone) != 0 || len(group(t, p, "Radio 01").Items) != 2 {
 		t.Fatalf("before %+v / %+v", p.Groups, p.Standalone)
 	}
 	if err := im.ApplyOp(ctx, batch, PlanOp{Op: "folders"}); err != nil {

@@ -1,6 +1,7 @@
 package importer
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -469,13 +470,54 @@ func defaultPlans(list []probed) []planned {
 		}
 		return "Various Artists"
 	}
+	// Files without an album tag take one from their album folder: when no file there has one, the
+	// folder names the album, its album artist decided from the files' artists the same way; when
+	// the others all share one album, they join it (a set's radio episodes on disc 1 whose disc 2
+	// is tagged); when the folder has several albums, they stay standalone.
+	albumsIn := map[string]map[string]bool{}
+	folderArtists := map[string]map[string]bool{}
+	for _, p := range list {
+		root := albumRoot(path.Dir(p.rel))
+		if albumsIn[root] == nil {
+			albumsIn[root], folderArtists[root] = map[string]bool{}, map[string]bool{}
+		}
+		if p.info.Tags.Album != "" {
+			albumsIn[root][p.info.Tags.Album] = true
+		}
+		if a := cmp.Or(p.info.Tags.AlbumArtist, p.info.Tags.Artist); a != "" {
+			folderArtists[root][a] = true
+		}
+	}
 	groups := map[string]string{}
 	out := make([]planned, 0, len(list))
 	for _, p := range list {
 		in := entryInput(p.rel, &p.info)
 		root := albumRoot(path.Dir(p.rel))
-		if p.info.Tags.AlbumArtist == "" && in.Album != "" {
+		tags := albumsIn[root]
+		switch name := FolderAlbum(root); {
+		case in.Album != "":
+			if p.info.Tags.AlbumArtist == "" {
+				in.AlbumArtist = decide(key{root, in.Album})
+			}
+		case len(tags) == 1:
+			for a := range tags {
+				in.Album = a
+			}
 			in.AlbumArtist = decide(key{root, in.Album})
+		case len(tags) == 0 && name != "":
+			in.Album, in.AlbumArtist = name, ""
+			switch artists := folderArtists[root]; len(artists) {
+			case 0:
+			case 1:
+				for a := range artists {
+					in.AlbumArtist = a
+				}
+			default:
+				in.AlbumArtist = "Various Artists"
+			}
+		}
+		if in.Artist == "" && in.AlbumArtist != "Various Artists" {
+			in.Artist = in.AlbumArtist // as for a file whose only artist tag is the album artist
 		}
 		kind := in.Kind
 		if kind == "" {

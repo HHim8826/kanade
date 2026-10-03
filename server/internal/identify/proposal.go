@@ -41,14 +41,15 @@ func (m *MusicBrainz) Propose(ctx context.Context, album *library.AlbumDetail, r
 	if err != nil {
 		return nil, err
 	}
-	return propose(album, r), nil
+	return propose(album, r, "MusicBrainz"), nil
 }
 
 // lengthSlack is how far a file's duration may be from the release's track length before the
 // pairing is flagged: different masters and gaps differ by a second or two, a wrong track by more.
 const lengthSlack = 5000
 
-func propose(album *library.AlbumDetail, r *mbRelease) *Proposal {
+// propose compares a release with an album; source names where the release comes from.
+func propose(album *library.AlbumDetail, r *mbRelease, source string) *Proposal {
 	p := &Proposal{Release: r.candidate(), Cover: r.CoverArtArchive.Front, Changes: []ProposedChange{}}
 	add := func(target string, id int64, field, label, old, new, warn string) {
 		if new == "" || strings.TrimSpace(old) == strings.TrimSpace(new) { // never blank out what the album has
@@ -80,18 +81,20 @@ func propose(album *library.AlbumDetail, r *mbRelease) *Proposal {
 		}
 		return entries[i].TrackNo < entries[j].TrackNo
 	})
-	// Pair by disc and track number when every entry has one; otherwise, when the counts agree,
-	// in order (files numbered only by name, or not at all).
+	// Pair by disc and track number when every entry has one the release has too; otherwise, when
+	// the counts agree, in order (files numbered only by name, or not at all, or numbered on from
+	// an earlier volume: "DUE14" is track 1 of the second set).
 	numbered := true
 	seen := map[pos]bool{}
 	for _, e := range entries {
 		k := pos{max(e.DiscNo, 1), e.TrackNo}
-		if e.TrackNo <= 0 || seen[k] {
+		if _, ok := tracks[k]; e.TrackNo <= 0 || seen[k] || (!ok && len(entries) == len(order)) {
 			numbered = false
 		}
 		seen[k] = true
 	}
 	byOrder := !numbered && len(entries) == len(order)
+	mismatched := 0
 	for i, e := range entries {
 		var k pos
 		switch {
@@ -112,7 +115,7 @@ func propose(album *library.AlbumDetail, r *mbRelease) *Proposal {
 		label := fmt.Sprintf("%d-%02d %s", max(e.DiscNo, 1), e.TrackNo, e.Title)
 		warn := ""
 		if d := e.Asset.DurationMS - t.Length; t.Length > 0 && e.Asset.DurationMS > 0 && (d > lengthSlack || d < -lengthSlack) {
-			warn = fmt.Sprintf("長度不符：檔案 %s，MusicBrainz %s", clock(e.Asset.DurationMS), clock(t.Length))
+			warn = fmt.Sprintf("長度不符：檔案 %s，%s %s", clock(e.Asset.DurationMS), source, clock(t.Length))
 		}
 		artist := creditString(t.ArtistCredit)
 		add("track", e.TrackID, "title", label, e.Title, t.Title, warn)
@@ -122,6 +125,17 @@ func propose(album *library.AlbumDetail, r *mbRelease) *Proposal {
 			add("entry", e.EntryID, "track_no", label, strconv.Itoa(e.TrackNo), strconv.Itoa(k.track), warn)
 		}
 		add("track", e.TrackID, "mb_recording", label, "", t.Recording.ID, warn)
+		if warn != "" {
+			mismatched++
+		}
+	}
+	// Most lengths off: probably another release; nothing is checked unless the user says so.
+	if p.Matched > 0 && mismatched*2 > p.Matched {
+		for i := range p.Changes {
+			if c := &p.Changes[i]; c.Target == "album" {
+				c.Warn, c.Default = "多數歌曲長度不符，可能不是這張專輯", false
+			}
+		}
 	}
 	return p
 }

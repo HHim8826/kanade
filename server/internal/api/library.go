@@ -73,9 +73,9 @@ func (s *Server) album(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageArgs(r)
-	list, err := s.lib.Tracks(r.Context(), limit, offset)
+	list, err := s.lib.Tracks(r.Context(), limit, offset, r.URL.Query().Get("filter"))
 	if err != nil {
-		s.internal(w, r, err)
+		s.libError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, list)

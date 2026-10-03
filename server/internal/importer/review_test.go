@@ -63,7 +63,7 @@ func TestUnsavedAudioKeepsItsSource(t *testing.T) {
 	if len(calls) != 2 || calls[1] != 0 {
 		t.Fatalf("after discard %v", calls)
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 {
 		t.Fatalf("tracks %+v", tracks)
 	}
 }
@@ -108,7 +108,7 @@ func TestResultWriteFailureKeepsSource(t *testing.T) {
 	go func() { im.Run(wctx); close(done) }()
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) == 1 {
+		if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) == 1 {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -128,7 +128,7 @@ func TestResultWriteFailureKeepsSource(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(src, "a.ogg")); !os.IsNotExist(err) {
 		t.Fatal("source kept after the result was recorded")
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 {
 		t.Fatalf("tracks %+v", tracks)
 	}
 }
@@ -174,7 +174,7 @@ func TestRetryConvertsAfterSpaceFailure(t *testing.T) {
 	if states(b)["W/01.wav"] != StatePublished {
 		t.Fatalf("after retry %v", states(b))
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 || tracks[0].Asset.Format != "flac" {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 || tracks[0].Asset.Format != "flac" {
 		t.Fatalf("tracks %+v", tracks)
 	}
 	if len(unsaved) != 2 || unsaved[0] != 1 || unsaved[1] != 0 { // the upload group is cleared only after the retry
@@ -239,12 +239,12 @@ func TestPartialSourceCanBeCompleted(t *testing.T) {
 	}
 	im.Start(ctx, batch)
 	waitState(t, im, batch, BatchDone)
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 {
 		t.Fatalf("first import: %+v", tracks)
 	}
 	again, _, _ := im.CreateBatch(ctx, "local", "", src, false)
 	waitState(t, im, again, BatchDone)
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 3 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 3 {
 		t.Fatalf("after completing: %+v", tracks)
 	}
 	b, _ := im.Batch(ctx, again)
@@ -401,7 +401,7 @@ func TestPreviewNewAlbumOverridesImportIdentity(t *testing.T) {
 			t.Fatalf("%s has %d entries", a.Title, len(d.Entries))
 		}
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 2 { // the files are shared
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 2 { // the files are shared
 		t.Fatalf("tracks %+v", tracks)
 	}
 }
@@ -438,7 +438,7 @@ func TestConversionWaitsForSpace(t *testing.T) {
 	if states(b)["W/01.wav"] != StatePublished || b.Items[0].Error != "" {
 		t.Fatalf("after the wait %v %q", states(b), b.Items[0].Error)
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 {
 		t.Fatalf("tracks %d", len(tracks))
 	}
 }

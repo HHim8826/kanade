@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -650,8 +651,41 @@ func (im *Importer) importLyrics(ctx context.Context, path string, trackID int64
 var (
 	discDir     = regexp.MustCompile(`(?i)^(?:disc|disk|cd)\s*0*(\d{1,2})$`)
 	leadingNum  = regexp.MustCompile(`^(\d{1,3})(?:[\s._\-]+|$)`)
+	trailingNum = regexp.MustCompile(`^[A-Za-z]{1,12}[\s._\-]*0*(\d{1,3})$`) // "DUE01", "tri14", "Track 05"
 	unsafeChars = strings.NewReplacer("/", "／", "\x00", "")
 )
+
+// Folder names as album names: downloads put the release date in front and format notes behind
+// ("[2024.09.30] Album [FLAC 96kHz／24bit]"); some folders name nothing in particular.
+var (
+	folderDate   = regexp.MustCompile(`^\s*[\[(（【]\s*\d{2,4}[.\-/年]\d{1,2}(?:[.\-/月]\d{1,2}日?)?\s*[\])）】]\s*`)
+	folderFormat = regexp.MustCompile(`(?i)\s*[\[(（【][^\[\]()（）【】]*(?:flac|mp3|aac|m4a|alac|wav|ape|ogg|opus|kbps|\d\s*k\b|khz|\d\s*bit|hi-?res|\bweb\b|vbr|cbr|cd-?rip)[^\[\]()（）【】]*[\])）】]\s*$`)
+	folderVague  = map[string]bool{"music": true, "musics": true, "mp3": true, "flac": true, "audio": true, "songs": true,
+		"download": true, "downloads": true, "new folder": true, "untitled folder": true, "新しいフォルダー": true,
+		"新しいフォルダ": true, "新建文件夹": true, "音楽": true, "音乐": true, "歌曲": true}
+)
+
+// FolderAlbum is the album an album folder (relative to the batch, Disc 1/ already taken off) names
+// for files whose tags name none (plan §4: tags, then folders, then file names): its last part
+// without the release date and format notes. The top of the batch and vague names give "".
+func FolderAlbum(root string) string {
+	if root == "." || root == "" || root == "/" {
+		return ""
+	}
+	name := folderDate.ReplaceAllString(path.Base(filepath.ToSlash(root)), "")
+	for {
+		trimmed := folderFormat.ReplaceAllString(name, "")
+		if trimmed == name {
+			break
+		}
+		name = trimmed
+	}
+	name = strings.TrimSpace(name)
+	if folderVague[strings.ToLower(name)] {
+		return ""
+	}
+	return name
+}
 
 // entryInput applies the evidence order of plan §4: tags first, then the folder structure,
 // then the file name. Nothing is invented: no album tag means a standalone track.
@@ -670,6 +704,8 @@ func entryInput(rel string, info *media.Info) library.EntryInput {
 	}
 	if in.TrackNo == 0 {
 		if m := leadingNum.FindStringSubmatch(base); m != nil {
+			in.TrackNo, _ = strconv.Atoi(m[1])
+		} else if m := trailingNum.FindStringSubmatch(base); m != nil {
 			in.TrackNo, _ = strconv.Atoi(m[1])
 		}
 	}

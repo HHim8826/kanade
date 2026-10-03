@@ -92,7 +92,7 @@ func TestSameTitleDifferentFilesStaySeparate(t *testing.T) {
 	if studio.EntryID != 0 || live.EntryID != 0 {
 		t.Fatal("standalone tracks must not get an invented album")
 	}
-	tracks, _ := s.Tracks(ctx, 10, 0)
+	tracks, _ := s.Tracks(ctx, 10, 0, "")
 	if len(tracks) != 2 {
 		t.Fatalf("tracks = %d, want 2", len(tracks))
 	}
@@ -103,7 +103,7 @@ func TestUnverifiedAssetsAreHidden(t *testing.T) {
 	s := newStore(t)
 	a, _ := s.CreateAsset(ctx, Asset{SHA256: "ee", Size: 1, Format: "mp3", Codec: "mp3"})
 	s.Publish(ctx, a.ID, EntryInput{Title: "pending", Album: "X"})
-	if tracks, _ := s.Tracks(ctx, 10, 0); len(tracks) != 0 {
+	if tracks, _ := s.Tracks(ctx, 10, 0, ""); len(tracks) != 0 {
 		t.Fatal("track with an unverified asset is listed")
 	}
 	if _, err := s.StreamTarget(ctx, a.ID); err == nil {

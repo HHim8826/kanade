@@ -3,6 +3,7 @@ import { api, get, post } from '../api.js';
 import { go, href } from '../router.js';
 import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
+import { hasKana, parseVGMdb } from '../vgmdb.js';
 
 // Organizing the library (P2-2): edit dialogs, merge / split / remove, MusicBrainz identification,
 // and the edit log. Every change is one entry in the log and can be undone.
@@ -422,9 +423,6 @@ function Identify({ album, close }) {
   const [q, setQ] = useState({ title: album.title, artist: searchArtist(album), catalog: album.catalog });
   const [cands, setCands] = useState(null);
   const [prop, setProp] = useState(null);
-  const [picked, setPicked] = useState(() => new Set());
-  const [linkMB, setLinkMB] = useState(true);
-  const [cover, setCover] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const step = async (f) => {
@@ -444,64 +442,15 @@ function Identify({ album, close }) {
       setCands((await get(`/albums/${album.id}/identify?${p}`)).candidates);
     });
   };
-  const choose = (c) => step(async () => {
-    const p = await get(`/albums/${album.id}/identify/${c.id}`);
-    setPicked(new Set(p.changes.filter((x) => x.default && !x.field.startsWith('mb_')).map((x) => x.key)));
-    setCover(p.cover && !album.cover_id);
-    setProp(p);
-  });
-  const apply = () => step(async () => {
-    const keys = [...picked];
-    if (linkMB) keys.push(...prop.changes.filter((x) => x.field.startsWith('mb_')).map((x) => x.key));
-    if (cover) keys.push('cover');
-    done(await post(`/albums/${album.id}/identify/${prop.release.id}`, { keys }), '已套用 MusicBrainz 的資料');
-    close();
-  });
-  const toggle = (key) => setPicked((s) => {
-    const n = new Set(s);
-    if (n.has(key)) n.delete(key);
-    else n.add(key);
-    return n;
-  });
+  const choose = (c) => step(async () => setProp(await get(`/albums/${album.id}/identify/${c.id}`)));
 
   if (prop) {
-    const visible = prop.changes.filter((x) => !x.field.startsWith('mb_'));
-    const groups = [];
-    for (const c of visible) {
-      const g = groups.find((x) => x.label === c.label);
-      if (g) g.items.push(c);
-      else groups.push({ label: c.label, items: [c] });
-    }
     const r = prop.release;
-    return html`<${Dialog} title="套用 MusicBrainz 資料" wide onClose=${close} actions=${html`
-        <button class="btn text" onClick=${() => setProp(null)}>返回</button>
-        <span class="grow"></span>
-        <button class="btn text" onClick=${close}>取消</button>
-        <button class="btn filled" disabled=${busy || (!picked.size && !cover && !linkMB)} onClick=${apply}>套用</button>`}>
-      <div class="mb-head"><b>${r.title}</b><span class="sub">${[r.artist, r.date, r.country, r.label, r.catalog, r.format].filter(Boolean).join(' · ')}</span>
-        <a class="sub link" href=${'https://musicbrainz.org/release/' + r.id} target="_blank" rel="noopener noreferrer">在 MusicBrainz 查看</a></div>
-      <p class="hint">對上 ${prop.matched} 首${prop.unmatched ? `，${prop.unmatched} 首對不上（保持不變）` : ''}。勾選要套用的欄位；長度不符的預設不勾。套用後可在修改紀錄撤回。</p>
-      ${visible.length > 0 && html`<div class="file-tools">
-        <button class="btn text" onClick=${() => setPicked(new Set(visible.map((x) => x.key)))}>全選</button>
-        <button class="btn text" onClick=${() => setPicked(new Set())}>全不選</button></div>`}
-      ${!visible.length && html`<p>這張專輯的資料已和 MusicBrainz 一致。</p>`}
-      ${groups.map((g) => html`<div class="diff-group" key=${g.label}>
-        <div class="diff-label">${g.label || '專輯'}</div>
-        ${g.items.map((c) => html`<label class="diff-row" key=${c.key}>
-          <input type="checkbox" checked=${picked.has(c.key)} onChange=${() => toggle(c.key)} />
-          <span class="diff-field">${fieldName(c.target, c.field)}</span>
-          <span class="diff-values"><span class="old">${shown(c.old, c.field)}</span><span class="arrow">→</span><span class="new">${c.new}</span>
-            ${c.warn && html`<span class="warn-text">${c.warn}</span>`}</span>
-        </label>`)}
-      </div>`)}
-      <div class="diff-group">
-        ${prop.cover && html`<label class="diff-row"><input type="checkbox" checked=${cover} onChange=${() => setCover(!cover)} />
-          <span class="diff-field">封面</span><span class="diff-values">使用 Cover Art Archive 的封面${album.cover_id ? '（取代目前的封面）' : ''}</span></label>`}
-        <label class="diff-row"><input type="checkbox" checked=${linkMB} onChange=${() => setLinkMB(!linkMB)} />
-          <span class="diff-field">連結</span><span class="diff-values">記住對應的 MusicBrainz 發行與錄音 ID</span></label>
-      </div>
-      <${ErrorBox} error=${error} />
-    <//>`;
+    return html`<${ProposalStep} album=${album} prop=${prop} source="MusicBrainz" close=${close} onBack=${() => setProp(null)}
+      head=${html`<b>${r.title}</b><span class="sub">${[r.artist, r.date, r.country, r.label, r.catalog, r.format].filter(Boolean).join(' · ')}</span>
+        <a class="sub link" href=${'https://musicbrainz.org/release/' + r.id} target="_blank" rel="noopener noreferrer">在 MusicBrainz 查看</a>`}
+      coverText="使用 Cover Art Archive 的封面" linkText="記住對應的 MusicBrainz 發行與錄音 ID"
+      apply=${async (keys) => done(await post(`/albums/${album.id}/identify/${r.id}`, { keys }), '已套用 MusicBrainz 的資料')} />`;
   }
 
   return html`<${Dialog} title="從 MusicBrainz 辨識" wide onClose=${close} actions=${html`<button class="btn text" onClick=${close}>關閉</button>`}>
@@ -522,6 +471,233 @@ function Identify({ album, close }) {
           <span class="sub">${[c.format, `${c.tracks} 首`, c.type].filter(Boolean).join(' · ')}${album.tracks !== c.tracks ? `（這張有 ${album.tracks} 首）` : ''}</span></span>
         <span class="chip">${c.score}</span>
       </button></li>`)}</ul>`}
+  <//>`;
+}
+
+// ProposalStep lists what applying looked-up data would change; the user picks the fields. Changes
+// of linked IDs (mb_*) are one switch, the cover another.
+function ProposalStep({ album, prop, source, head, coverText, linkText, onBack, apply, close }) {
+  const ids = prop.changes.filter((x) => x.field.startsWith('mb_'));
+  const visible = prop.changes.filter((x) => !x.field.startsWith('mb_'));
+  const [picked, setPicked] = useState(() => new Set(visible.filter((x) => x.default).map((x) => x.key)));
+  const [link, setLink] = useState(true);
+  const [cover, setCover] = useState(prop.cover && !album.cover_id);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    const keys = [...picked];
+    if (link) keys.push(...ids.map((x) => x.key));
+    if (cover) keys.push('cover');
+    setBusy(true);
+    setError(null);
+    try {
+      await apply(keys);
+      close();
+    } catch (e) {
+      setError(e);
+      setBusy(false);
+    }
+  };
+  const toggle = (key) => setPicked((s) => {
+    const n = new Set(s);
+    if (n.has(key)) n.delete(key);
+    else n.add(key);
+    return n;
+  });
+  const groups = [];
+  for (const c of visible) {
+    const g = groups.find((x) => x.label === c.label);
+    if (g) g.items.push(c);
+    else groups.push({ label: c.label, items: [c] });
+  }
+  return html`<${Dialog} title=${`套用 ${source} 資料`} wide onClose=${close} actions=${html`
+      <button class="btn text" onClick=${onBack}>返回</button>
+      <span class="grow"></span>
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${busy || (!picked.size && !cover && !(link && ids.length))} onClick=${submit}>套用</button>`}>
+    <div class="mb-head">${head}</div>
+    <p class="hint">對上 ${prop.matched} 首${prop.unmatched ? `，${prop.unmatched} 首對不上（保持不變）` : ''}。勾選要套用的欄位；長度不符的預設不勾。套用後可在修改紀錄撤回。</p>
+    ${visible.length > 0 && html`<div class="file-tools">
+      <button class="btn text" onClick=${() => setPicked(new Set(visible.map((x) => x.key)))}>全選</button>
+      <button class="btn text" onClick=${() => setPicked(new Set())}>全不選</button></div>`}
+    ${!visible.length && html`<p>這張專輯的資料已和 ${source} 一致。</p>`}
+    ${groups.map((g) => html`<div class="diff-group" key=${g.label}>
+      <div class="diff-label">${g.label || '專輯'}</div>
+      ${g.items.map((c) => html`<label class="diff-row" key=${c.key}>
+        <input type="checkbox" checked=${picked.has(c.key)} onChange=${() => toggle(c.key)} />
+        <span class="diff-field">${fieldName(c.target, c.field)}</span>
+        <span class="diff-values"><span class="old">${shown(c.old, c.field)}</span><span class="arrow">→</span><span class="new">${c.new}</span>
+          ${c.warn && html`<span class="warn-text">${c.warn}</span>`}</span>
+      </label>`)}
+    </div>`)}
+    ${(prop.cover || ids.length > 0) && html`<div class="diff-group">
+      ${prop.cover && html`<label class="diff-row"><input type="checkbox" checked=${cover} onChange=${() => setCover(!cover)} />
+        <span class="diff-field">封面</span><span class="diff-values">${coverText}${album.cover_id ? '（取代目前的封面）' : ''}</span></label>`}
+      ${ids.length > 0 && html`<label class="diff-row"><input type="checkbox" checked=${link} onChange=${() => setLink(!link)} />
+        <span class="diff-field">連結</span><span class="diff-values">${linkText}</span></label>`}
+    </div>`}
+    <${ErrorBox} error=${error} />
+  <//>`;
+}
+
+// ---- VGMdb ----
+
+export function vgmdbAlbum(album) {
+  showDialog((close) => html`<${VGMdbImport} album=${album} close=${close} />`);
+}
+
+// The credit to use as album artist when the user does not choose: who performs, else who wrote it.
+const artistRoles = [/perform|vocal|cast|voice|artist|singer|出演|歌/i, /compos|作曲/i];
+
+function creditValue(c, other) {
+  const names = c.names.map((n, i) => (other && c.others[i]) || n);
+  return names.join(', ');
+}
+
+function VGMdbImport({ album, close }) {
+  const [found, setFound] = useState(null); // what the pasted page gave
+  const [text, setText] = useState('');
+  const [title, setTitle] = useState('');
+  const [artist, setArtist] = useState('');
+  const [prop, setProp] = useState(null);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const read = (pasted) => {
+    const a = parseVGMdb(pasted);
+    if (!a) {
+      setError(new Error('看不出是 VGMdb 的專輯頁。請在專輯頁全選後複製，再貼上整頁內容。'));
+      return;
+    }
+    setError(null);
+    setFound(a);
+    setTitle(a.titles.find(hasKana) || a.titles[0]);
+    const credit = artistRoles.map((re) => a.credits.find((c) => re.test(c.role))).find(Boolean);
+    setArtist(credit ? creditValue(credit, hasKana(credit.others.join(''))) : '');
+  };
+  const onPaste = (e) => {
+    const html = e.clipboardData.getData('text/html');
+    const plain = e.clipboardData.getData('text/plain');
+    if (!html && !plain) return;
+    e.preventDefault();
+    setText(plain);
+    read({ html, text: plain });
+  };
+  const body = () => ({
+    album: { id: found.id, title, album_artist: artist, date: found.date, catalog: found.catalog, cover: found.cover,
+      discs: found.discs.map((d) => ({ tracks: d.tracks })) },
+  });
+  const compare = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setProp(await post(`/albums/${album.id}/vgmdb`, body()));
+    } catch (e) {
+      setError(e);
+    }
+    setBusy(false);
+  };
+
+  if (prop) {
+    const tracks = found.discs.reduce((n, d) => n + d.tracks.length, 0);
+    return html`<${ProposalStep} album=${album} prop=${prop} source="VGMdb" close=${close} onBack=${() => setProp(null)}
+      head=${html`<b>${title}</b><span class="sub">${[artist, found.date, found.catalog, `${found.discs.length} 張 ${tracks} 首`].filter(Boolean).join(' · ')}</span>
+        ${found.id > 0 && html`<a class="sub link" href=${'https://vgmdb.net/album/' + found.id} target="_blank" rel="noopener noreferrer">在 VGMdb 查看</a>`}`}
+      coverText="使用 VGMdb 的封面（套用時從 media.vgm.io 下載）"
+      apply=${async (keys) => done(await post(`/albums/${album.id}/vgmdb/apply`, { ...body(), keys }), '已套用 VGMdb 的資料')} />`;
+  }
+
+  const search = 'https://vgmdb.net/search?q=' + encodeURIComponent(album.catalog || album.title);
+  if (!found) {
+    return html`<${Dialog} title="從 VGMdb 匯入" wide onClose=${close} actions=${html`
+        <button class="btn text" onClick=${close}>取消</button>
+        <button class="btn filled" disabled=${!text.trim()} onClick=${() => read({ text })}>讀取</button>`}>
+      <p class="hint">VGMdb 沒有開放 API，也會擋下伺服器的連線，所以請在你自己的瀏覽器打開專輯頁，複製後貼到這裡。Kanade 不會連到 vgmdb.net；只有在你選擇套用封面時，才會從 VGMdb 的圖片網址（media.vgm.io）下載封面。</p>
+      <ol class="steps">
+        <li><a class="link" href=${search} target="_blank" rel="noopener noreferrer">在 VGMdb 搜尋「${album.catalog || album.title}」</a>，打開對的專輯頁。</li>
+        <li>想要日文曲名，先把曲目表（Tracklist）切到「Japanese」。</li>
+        <li>在專輯頁全選（Ctrl+A／⌘A）並複製，回到這裡貼在下面。</li>
+      </ol>
+      <label class="field">VGMdb 專輯頁內容
+        <textarea class="paste-box" rows="6" value=${text} placeholder="在這裡貼上" onPaste=${onPaste} onInput=${(e) => setText(e.target.value)}></textarea></label>
+      <${ErrorBox} error=${error} />
+    <//>`;
+  }
+
+  const tracks = found.discs.reduce((n, d) => n + d.tracks.length, 0);
+  const first = found.discs[0].tracks.slice(0, 3).map((t) => t.title).join('、');
+  return html`<${Dialog} title="從 VGMdb 匯入" wide onClose=${close} actions=${html`
+      <button class="btn text" onClick=${() => { setFound(null); setText(''); }}>重新貼上</button>
+      <span class="grow"></span>
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${busy || !title.trim()} onClick=${compare}>比對</button>`}>
+    <p class="hint">讀到 ${found.discs.length} 張 ${tracks} 首${found.language ? `（曲目表：${found.language}）` : ''}：${first}${tracks > 3 ? '…' : ''}。這張專輯有 ${album.entries.length} 首。</p>
+    <div class="form-grid">
+      <label class="field span">專輯名稱
+        <select value=${title} onChange=${(e) => setTitle(e.target.value)}>${found.titles.map((t) => html`<option key=${t} value=${t}>${t}</option>`)}</select></label>
+      <label class="field span">專輯歌手
+        <select value=${artist} onChange=${(e) => setArtist(e.target.value)}>
+          <option value="">不變</option>
+          ${found.credits.flatMap((c) => [creditValue(c, false), creditValue(c, true)].filter((v, i, all) => all.indexOf(v) === i)
+            .map((v) => html`<option key=${c.role + v} value=${v}>${c.role}：${v}</option>`))}
+        </select></label>
+      <div class="field">型號<span class="value">${found.catalog || '（沒有）'}</span></div>
+      <div class="field">發行日期<span class="value">${found.date || '（沒有）'}</span></div>
+    </div>
+    <p class="hint">VGMdb 沒有每首的歌手；選擇的專輯歌手也會填到沒有歌手的歌曲。${found.cover ? '' : '貼上的內容裡沒有封面（用純文字貼上時會這樣）。'}下一步會列出所有差異，由你勾選要套用的欄位。</p>
+    <${ErrorBox} error=${error} />
+  <//>`;
+}
+
+// ---- folders as albums ----
+
+// FolderAlbums offers albums for standalone songs imported from a folder that names the album.
+export function folderAlbums(groups) {
+  showDialog((close) => html`<${FolderAlbumsDialog} groups=${groups} close=${close} />`);
+}
+
+function FolderAlbumsDialog({ groups, close }) {
+  const [rows, setRows] = useState(() => groups.map((g) => ({ folder: g.folder, title: g.title, album_artist: g.album_artist, on: true })));
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const set = (i, patch) => setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const chosen = rows.filter((r) => r.on && r.title.trim());
+  const songs = chosen.reduce((n, r) => n + groups.find((g) => g.folder === r.folder).tracks.length, 0);
+  const submit = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await post('/organize/folders', { folders: chosen.map(({ folder, title, album_artist }) => ({ folder, title, album_artist })) });
+      done(res, `已整理 ${chosen.length} 個資料夾`);
+      close();
+    } catch (e) {
+      setError(e);
+      setBusy(false);
+    }
+  };
+  return html`<${Dialog} title="依資料夾整理專輯" wide onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${busy || !chosen.length} onClick=${submit}>整理 ${chosen.length} 個資料夾（${songs} 首）</button>`}>
+    <p class="hint">這些歌曲的檔案沒有專輯標籤，但資料夾說明了它們屬於哪張專輯：同一資料夾的其他檔案已在某張專輯裡的，就加入那張（例如 Disc1 的廣播加入 Disc2 已有的專輯）；整個資料夾都沒有標籤的，以資料夾名稱建立新專輯。碟號取自 Disc 資料夾，曲序取自檔名（例如 DUE01 是第 1 首）；沒有歌手的歌曲會填上專輯歌手。之後下載到同一資料夾的檔案也會歸到同一張。可在修改紀錄撤回。</p>
+    <div class="file-tools">
+      <button class="btn text" onClick=${() => setRows((rs) => rs.map((r) => ({ ...r, on: true })))}>全選</button>
+      <button class="btn text" onClick=${() => setRows((rs) => rs.map((r) => ({ ...r, on: false })))}>全不選</button></div>
+    ${rows.map((r, i) => {
+      const g = groups[i];
+      const names = g.tracks.map((t) => t.file);
+      return html`<div class="diff-group folder-group" key=${r.folder}>
+        <label class="diff-row"><input type="checkbox" checked=${r.on} onChange=${() => set(i, { on: !r.on })} />
+          <span class="grow track-text"><span class="path">${r.folder}</span>
+            <span class="sub">${g.tracks.length} 首 · ${names.length > 2 ? `${names[0]} … ${names[names.length - 1]}` : names.join('、')}</span>
+            ${g.join
+              ? html`<span class="sub">加入專輯「${g.title}」${g.album_artist ? `（${g.album_artist}）` : ''}</span>`
+              : html`<span class="sub">${g.album_id ? '加入曲庫中同名的專輯' : '建立新專輯'}</span>`}</span></label>
+        ${r.on && !g.join && html`<div class="form-grid">
+          <${Field} label="專輯名稱" value=${r.title} onInput=${(v) => set(i, { title: v })} wide />
+          <${Field} label="專輯歌手" value=${r.album_artist} placeholder="未知" onInput=${(v) => set(i, { album_artist: v })} wide />
+        </div>`}
+      </div>`;
+    })}
+    <${ErrorBox} error=${error} />
   <//>`;
 }
 
@@ -562,7 +738,7 @@ export function Missing() {
 
 // ---- the edit log ----
 
-const sourceNames = { user: '手動', identify: 'MusicBrainz', restore: '恢復原標籤', undo: '撤回' };
+const sourceNames = { user: '手動', identify: 'MusicBrainz', vgmdb: 'VGMdb', restore: '恢復原標籤', undo: '撤回' };
 const when = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false });
 
 export function Edits() {
@@ -608,7 +784,7 @@ function EditDetails({ id }) {
   return html`<ul class="edit-details">${g.data.edits.map((e, i) => html`<li key=${i}>
     <span class="diff-field">${e.name || '（已刪除）'} · ${fieldName(e.target, e.field)}</span>
     ${e.field === 'row'
-      ? html`<span>${e.new ? '放回專輯' : '從專輯移除'}</span>`
+      ? html`<span>${e.new ? '加入專輯' : '從專輯移除'}</span>`
       : html`<span class="diff-values"><span class="old">${shown(e.old, e.field, e.old_label)}</span><span class="arrow">→</span><span class="new">${shown(e.new, e.field, e.new_label)}</span></span>`}
   </li>`)}</ul>`;
 }

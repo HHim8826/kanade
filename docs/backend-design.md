@@ -103,7 +103,7 @@ DIR/
 | `GET /drive`、`POST /drive/client` | Drive 帳號與容量；載入 OAuth client JSON |
 | `POST /drive/auth`、`POST /drive/auth/paste` | 產生授權網址（回呼 `GET /oauth/google/callback`，公開但只接受本服務產生的 state）；貼上回呼網址完成授權 |
 | `GET /albums`、`GET /albums/{id}` | 專輯清單（`limit`、`offset`）與收錄 |
-| `GET /tracks`、`GET /artists`、`GET /search?q=` | 歌曲、歌手（只列有歌曲的）、搜尋 |
+| `GET /tracks`、`GET /artists`、`GET /search?q=` | 歌曲、歌手（只列有歌曲的）、搜尋；`/tracks?filter=no_album`／`no_artist` 只列沒有專輯／沒有歌手的歌曲 |
 | `GET`／`HEAD /stream/{asset_id}` | 播放（Range、D7 快取）。驗證：`Authorization` header，或 `POST /stream/{id}/url` 取得的 12 小時簽名網址 |
 | `GET /covers/{id}?size=N` | 封面縮圖（預設 300，`size=0` 為原圖） |
 | `POST /imports` | `{"path": "..."}` 匯入伺服器上 `imports/`、`downloads/`、`staging/` 內的資料夾；或 `{"upload_group": "..."}` 匯入一組客戶端上傳；`"preview": true` 時分析後等待確認 |
@@ -144,6 +144,8 @@ DIR/
 | `POST /albums/{id}/merge`、`/split`、`/remove` | 合併到 `into`；拆分 `entries` 為 `title`；移除收錄 |
 | `DELETE /albums/{id}[?tracks=1]` | 移除專輯（可撤回）；`tracks=1` 另永久刪除只在這張專輯的歌曲 |
 | `GET /albums/{id}/identify`、`GET`／`POST /albums/{id}/identify/{release}` | MusicBrainz 候選；差異；套用勾選的 `keys` |
+| `POST /albums/{id}/vgmdb`、`POST /albums/{id}/vgmdb/apply` | 用戶端從貼上的 VGMdb 專輯頁讀出的 `album`（名稱、專輯歌手、日期、型號、封面網址、各碟曲名與長度）和這張專輯比對，回傳同 MusicBrainz 的差異；套用勾選的 `keys`，勾了封面才從 media.vgm.io 下載 |
+| `GET`／`POST /organize/folders` | 沒有專輯的歌曲中，資料夾說明了專輯的（見下）；`{"folders": [{folder, title, album_artist}]}` 依資料夾整理，一次可撤回 |
 | `GET`／`PATCH /artists/{id}` | 歌手與歌曲、別名；改名（`name`）、別名（`aliases`） |
 | `GET /edits?limit&before`、`GET /edits/{id}`、`POST /edits/{id}/undo` | 修改紀錄、單筆明細、撤回（部分欄位保留時回傳 `conflicts`；全部無法撤回為 409） |
 | `GET /drive/sync` | 同步狀態：上次變更檢查、上次完整對帳與結果、是否進行中、基準對帳是否未完成、收件匣上次檢查 |
@@ -347,6 +349,21 @@ DIR/
 - 播放佇列拖曳：每列有拖曳把手，滑鼠、觸控筆、手指都可以拖到新位置；靠近捲動區邊緣時自動捲動，觸控被取消時放回原處。歌單的拖曳排序改用同一個 `useReorder`。
 - 捲動條：全站改成細的、使用主題顏色的捲動條，平常透明。區域捲動時（約一秒）或滑鼠靠近捲動條時才顯示（`scrollbars.js`）；手機保留系統的浮動捲動條；Safari 用 `::-webkit-scrollbar` 做同樣的效果。
 - 首頁「未聽完的廣播劇」：列表改為固定的格線（封面、標題／專輯／進度、固定寬度的剩餘時間），每列等高、進度條等長、時間對齊；沒有專輯也沒有歌手時顯示「沒有專輯」。原因是 `button.plain` 的 `padding: 0` 蓋掉了 `.row` 的內距，所有按鈕形式的列（播放記錄、加入歌單、整理頁）都受影響，一併修正。
+
+### 使用者回饋：VGMdb、未分類篩選、資料夾即專輯（2026-10-03）
+
+- 起因：DUE01 等廣播 MP3 完全沒有標籤，專輯只寫在資料夾名稱裡（`ARIA/Drama CD/ARIA The STATION Due COUR.1/Disc1/DUE01.mp3`），匯入時成了沒有專輯、沒有歌手的單曲（125 首）。
+- 匯入規則（計畫 §4「標籤 → 資料夾 → 檔名」補上資料夾這一層）：沒有專輯標籤的檔案依所在的專輯資料夾（Disc 1/ 等歸上一層）決定：
+  - 資料夾裡的其他檔案都屬於同一張專輯 → 加入那張（例：同一套的 Disc2 已有標籤，Disc1 的廣播就成為它的第 1 碟）；
+  - 整個資料夾都沒有專輯標籤 → 以資料夾名稱為專輯（去掉前面的日期 `[2024.09.30]` 和後面的格式說明 `[FLAC …]`；批次最上層與 `Music`、`新しいフォルダー` 這類名稱不算），專輯歌手由檔案的歌手決定（一位就是他，多位為 Various Artists）；
+  - 資料夾裡有多張專輯 → 維持單曲。
+  - 沒有歌手的檔案以專輯歌手為歌手（Various Artists 除外）。檔名沒有前置數字時，`DUE01`、`tri14` 這類「字母＋數字」取尾數為曲序。
+- 已入庫的歌曲：`FolderGroups` 依匯入紀錄用同樣的規則找出可以整理的資料夾（加入同資料夾已有檔案所在的專輯，或建立以資料夾命名的新專輯，新專輯的 origin 與之後匯入同資料夾時相同，所以後續下載會進同一張）。曲庫「歌曲」分頁新增篩選「全部／未分類（沒有專輯）／沒有歌手」，首頁「待整理」直接連到篩選；在「未分類」上方提示「依資料夾整理…」，對話框可逐一勾選、修改新專輯的名稱與歌手。整理是一筆修改紀錄（收錄的新增與歌手的填入），可撤回。以正式資料的複本實測：125 首全部歸入專輯（9 個資料夾加入既有的 STATION 專輯作為 Disc 1，2 個 NATURAL 廣播劇建立新專輯），沒有歌手的歌從 125 首降到 10 首；撤回後 240 個欄位全數還原。
+- VGMdb：沒有 API，且對非瀏覽器的請求一律回 Cloudflare 驗證頁（2026-10-03 實測 robots.txt 也是），非官方的 vgmdb.info 也已無法連線。不繞過驗證，所以伺服器不連 vgmdb.net：使用者在自己的瀏覽器打開專輯頁、全選複製，貼到專輯選單的「從 VGMdb 匯入…」。
+  - 用戶端（`vgmdb.js`）讀取剪貼簿的 HTML（專輯名稱與其他語言名稱、型號、發行日期、製作人員、目前顯示的曲目表、封面網址），只有純文字（手機）時從文字讀出名稱、型號、日期、製作人員與曲目表。瀏覽器只複製畫面上顯示的曲目表分頁，所以要日文曲名就先切到 Japanese。
+  - 使用者選擇專輯名稱（預設日文）與作為專輯歌手的製作人員（預設演出者，否則作曲者），伺服器檢查內容後產生與 MusicBrainz 相同的差異清單：曲目依碟號與曲序配對，曲序對不上但數量相同時依順序（例如 DUE14 是第二套的第 1 首），長度相差 5 秒以上的不預設勾選；多數曲目長度不符時，專輯欄位也不預設勾選（MusicBrainz 同樣適用）。VGMdb 沒有每首的歌手，專輯歌手只填到沒有歌手的歌曲。
+  - 封面網址只接受 https 的 media.vgm.io（含 medium／thumb）`/albums/…`，套用時下載原尺寸，與其他封面一樣存到 Drive。修改紀錄的來源標為「VGMdb」。
+- 對話框在手機上被不換行的文字撐出畫面：`.scrim` 的格線改為一欄 `minmax(0, 1fr)`，所有對話框都不會超出螢幕寬度。
 
 ## 使用方式（開發環境）
 

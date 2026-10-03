@@ -195,7 +195,7 @@ func TestInboxImportsInPlace(t *testing.T) {
 	if p := dd.parentOf(again); !strings.HasSuffix(p, "inbox/"+inboxDuplicates) {
 		t.Fatalf("duplicate went to %q", p)
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 2 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 2 {
 		t.Fatalf("tracks %+v", tracks)
 	}
 }
@@ -258,7 +258,7 @@ func TestInboxUsesCurrentContent(t *testing.T) {
 	if a == nil || a.State != library.AssetVerified || a.DriveFileID != id {
 		t.Fatalf("asset %+v", a)
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 || tracks[0].Title != "New" {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 || tracks[0].Title != "New" {
 		t.Fatalf("tracks %+v", tracks)
 	}
 }

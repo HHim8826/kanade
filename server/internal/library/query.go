@@ -170,8 +170,25 @@ func scanTracks(rows *sql.Rows, err error) ([]TrackItem, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) Tracks(ctx context.Context, limit, offset int) ([]TrackItem, error) {
-	return scanTracks(s.db.QueryContext(ctx, trackSQL+` ORDER BY t.title, t.id LIMIT ? OFFSET ?`, limit, offset)) // a total order: pages neither repeat nor skip
+// Track filters: the songs the home page asks to sort out.
+const (
+	NoAlbum  = "no_album"  // on no album
+	NoArtist = "no_artist" // no artist
+)
+
+var trackFilters = map[string]string{
+	"":       "",
+	NoAlbum:  ` WHERE NOT EXISTS (SELECT 1 FROM album_entries e WHERE e.track_id = t.id)`,
+	NoArtist: ` WHERE t.artist = ''`,
+}
+
+// Tracks lists songs by title, all of them or those a filter keeps.
+func (s *Store) Tracks(ctx context.Context, limit, offset int, filter string) ([]TrackItem, error) {
+	where, ok := trackFilters[filter]
+	if !ok {
+		return nil, invalid("unknown filter %q", filter)
+	}
+	return scanTracks(s.db.QueryContext(ctx, trackSQL+where+` ORDER BY t.title, t.id LIMIT ? OFFSET ?`, limit, offset)) // a total order: pages neither repeat nor skip
 }
 
 type Artist struct {

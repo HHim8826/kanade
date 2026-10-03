@@ -146,7 +146,7 @@ func TestBadCueFailsTheImage(t *testing.T) {
 	if st := states(b); st["image.flac"] != StateFailed {
 		t.Fatalf("states %v", st)
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 0 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 0 {
 		t.Fatal("the whole image was imported as one song")
 	}
 }

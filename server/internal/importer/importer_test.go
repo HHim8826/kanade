@@ -177,8 +177,64 @@ func TestFailedUploadCanBeRetried(t *testing.T) {
 	if b.Items[0].State != StatePublished {
 		t.Fatalf("after retry: %+v", b.Items[0])
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 1 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 {
 		t.Fatalf("tracks = %d", len(tracks))
+	}
+}
+
+func TestFolderAlbum(t *testing.T) {
+	for root, want := range map[string]string{
+		"ARIA/Drama CD/ARIA The STATION Due COUR.1":                                        "ARIA The STATION Due COUR.1",
+		"[2024.09.30] ATLUS Sound Team - PERSONA3 RELOAD OST [CD FLAC - 44.1 kHz, 16-bit]": "ATLUS Sound Team - PERSONA3 RELOAD OST",
+		"Album (2019) [MP3 320K] (WEB)":                                                    "Album (2019)",
+		"【2025.06.25】 ベスト [FLAC 96kHz／24bit]":                                              "ベスト",
+		".": "", "": "", "Music": "", "x/新しいフォルダー": "", "Live (Disc 2 of 2)": "Live (Disc 2 of 2)",
+	} {
+		if got := FolderAlbum(root); got != want {
+			t.Errorf("FolderAlbum(%q) = %q, want %q", root, got, want)
+		}
+	}
+}
+
+// Files whose tags name no album: an album folder without album tags is one album named after it,
+// with the artist its files share; in a folder whose other files share one album they join it; in a
+// folder with several albums, and at the top of the batch, they stay standalone.
+func TestDefaultPlansFolderAlbums(t *testing.T) {
+	probe := func(id int64, rel string, tags media.Tags) probed {
+		return probed{id: id, rel: rel, info: media.Info{Tags: tags}}
+	}
+	plans := defaultPlans([]probed{
+		probe(1, "ARIA/Due COUR.9/Disc1/DUE01.mp3", media.Tags{}),
+		probe(2, "ARIA/Due COUR.9/Disc1/DUE02.mp3", media.Tags{}),
+		probe(3, "Singles/a.mp3", media.Tags{Title: "A", Artist: "X"}),
+		probe(4, "Singles/b.mp3", media.Tags{Title: "B", Artist: "Y"}),
+		probe(5, "ARIA/Due COUR.1/Disc2/01 Track01.flac", media.Tags{Title: "T", Album: "ARIA The STATION Due COUR.1", AlbumArtist: "Hosts"}),
+		probe(6, "ARIA/Due COUR.1/Disc1/DUE01.mp3", media.Tags{}),
+		probe(7, "Box/a.mp3", media.Tags{Album: "Disc A"}),
+		probe(8, "Box/b.mp3", media.Tags{Album: "Disc B"}),
+		probe(9, "Box/c.mp3", media.Tags{}),
+		probe(10, "loose.mp3", media.Tags{}),
+	})
+	byID := map[int64]Plan{}
+	for _, p := range plans {
+		byID[p.id] = p.plan
+	}
+	if p := byID[1]; p.Album != "Due COUR.9" || p.AlbumArtist != "" || p.Group == "" || p.Group != byID[2].Group ||
+		p.Disc != 1 || p.Track != 1 || byID[2].Track != 2 || p.Tagged.Album != "Due COUR.9" {
+		t.Fatalf("drama folder: %+v / %+v", p, byID[2])
+	}
+	if p := byID[3]; p.Album != "Singles" || p.AlbumArtist != "Various Artists" || p.Artist != "X" || p.Group != byID[4].Group {
+		t.Fatalf("singles folder: %+v", p)
+	}
+	if p := byID[6]; p.Album != "ARIA The STATION Due COUR.1" || p.AlbumArtist != "Hosts" || p.Artist != "Hosts" || p.Group != byID[5].Group ||
+		p.Disc != 1 || p.Track != 1 || byID[5].Disc != 2 || p.Tagged.Album != p.Album {
+		t.Fatalf("joined the tagged disc: %+v / %+v", p, byID[5])
+	}
+	if byID[9].Album != "" || byID[9].Group != "" || byID[7].Group == byID[8].Group {
+		t.Fatalf("folder of several albums: %+v", byID[9])
+	}
+	if byID[10].Album != "" || byID[10].Group != "" {
+		t.Fatalf("top of the batch: %+v", byID[10])
 	}
 }
 
@@ -187,8 +243,8 @@ func TestEntryInputFallbacks(t *testing.T) {
 	if in.Title != "Hello World" || in.TrackNo != 7 || in.DiscNo != 2 || in.Album != "" {
 		t.Fatalf("got %+v", in)
 	}
-	in = entryInput("tri40.mp3", &media.Info{}) // the untagged radio files from the survey
-	if in.Title != "tri40" || in.TrackNo != 0 {
+	in = entryInput("tri40.mp3", &media.Info{}) // the untagged radio files from the survey: numbered by name
+	if in.Title != "tri40" || in.TrackNo != 40 {
 		t.Fatalf("got %+v", in)
 	}
 	in = entryInput("x.flac", &media.Info{Tags: media.Tags{Title: "T", AlbumArtist: "AA", Album: "Al"}})
@@ -302,7 +358,7 @@ func TestLyricsFromLRCFile(t *testing.T) {
 	if len(b.Items) != 1 || b.Items[0].State != StatePublished { // the .lrc is not an import item
 		t.Fatalf("items %+v", b.Items)
 	}
-	tracks, _ := lib.Tracks(ctx, 10, 0)
+	tracks, _ := lib.Tracks(ctx, 10, 0, "")
 	l, err := lib.Lyrics(ctx, tracks[0].ID)
 	if err != nil || l == nil || !l.Synced || l.Source != library.LyricsLRC || l.Text != "[00:01.00]一行目\n[00:02.00]二行目" {
 		t.Fatalf("lyrics %+v %v", l, err)

@@ -220,7 +220,7 @@ func TestTorrentToLibrary(t *testing.T) {
 			t.Fatalf("unselected video occupies %d bytes, more than its two boundary pieces", onDisk)
 		}
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 2 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 2 {
 		t.Fatalf("library tracks = %d, want 2", len(tracks))
 	}
 
@@ -478,7 +478,7 @@ func TestLargeSelectionDownloadsInRounds(t *testing.T) {
 	if !sawRound1Cleared {
 		t.Fatal("the first round's files were not cleared before the last round")
 	}
-	if tracks, _ := lib.Tracks(ctx, 10, 0); len(tracks) != 4 {
+	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 4 {
 		t.Fatalf("library tracks = %d, want 4", len(tracks))
 	}
 	albums, _ := lib.Albums(ctx, 10, 0, false)

@@ -7,8 +7,8 @@ import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
 import { FavoritesTab, PlaylistsTab } from './collections.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
-import { changeCover, editAlbum, editArtistAliases, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
-  restoreAlbum, splitAlbum, useLibRev } from './organize.js';
+import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
+  restoreAlbum, splitAlbum, useLibRev, vgmdbAlbum } from './organize.js';
 
 // Albums in one horizontally scrolling row (home page shelves).
 function Shelf({ title, albums, more }) {
@@ -112,14 +112,14 @@ export function Home() {
       </button></li>`)}</ul>`}
     ${d && html`<${Shelf} title="最近加入" albums=${d.recently_added} />`}
     ${att && (att.without_album > 0 || att.unknown_artist > 0 || att.missing > 0) && html`<h2 class="section-title">待整理</h2>
-      <a class="card summary-card" href=${href(att.missing > 0 ? 'missing' : 'library/tracks')}>
+      <a class="card summary-card" href=${href(att.missing > 0 ? 'missing' : 'library/tracks?filter=' + (att.without_album > 0 ? 'no_album' : 'no_artist'))}>
         <${Icon} name="note" />
         <span class="grow">
           ${att.without_album > 0 && html`<span class="pill">沒有專輯的歌曲 ${att.without_album}</span>`}
           ${att.unknown_artist > 0 && html`<span class="pill">沒有歌手 ${att.unknown_artist}</span>`}
           ${att.missing > 0 && html`<span class="pill warn">Drive 中遺失 ${att.missing}</span>`}
         </span>
-        <span class="sub">${att.missing > 0 ? '查看 ›' : '歌曲 ›'}</span>
+        <span class="sub">${att.missing > 0 ? '查看 ›' : '整理 ›'}</span>
       </a>`}
   </section>`;
 }
@@ -145,12 +145,17 @@ function LoadMore({ onMore, busy }) {
     <button class="btn tonal" disabled=${busy} onClick=${onMore}>${busy ? '載入中…' : '載入更多'}</button></div>`;
 }
 
-export function Library({ tab = 'albums' }) {
+// Filters of the songs tab: the songs the home page asks to sort out.
+const trackFilters = [['', '全部'], ['no_album', '未分類（沒有專輯）'], ['no_artist', '沒有歌手']];
+
+export function Library({ tab = 'albums', filter = '' }) {
   const rev = useLibRev();
   const paged = !tabURL[tab];
-  const data = useLoad(() => get(tabURL[tab] || `/${tab}?limit=${PAGE}`), [tab], rev);
-  // Later pages, for this tab and library version only (review #9).
-  const key = `${tab}:${rev}`;
+  if (tab !== 'tracks' || !trackFilters.some(([k]) => k === filter)) filter = '';
+  const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? '&filter=' + filter : ''}`;
+  const data = useLoad(() => get(base), [base], rev);
+  // Later pages, for this tab, filter and library version only (review #9).
+  const key = `${base}:${rev}`;
   const [more, setMore] = useState({ key: null, pages: [], done: false, busy: false });
   const own = more.key === key ? more : { key, pages: [], done: false, busy: false };
   const list = data.data && paged ? [...data.data, ...own.pages.flat()] : data.data;
@@ -159,7 +164,7 @@ export function Library({ tab = 'albums' }) {
     if (own.busy || done) return;
     setMore({ ...own, busy: true });
     try {
-      const next = await get(`/${tab}?limit=${PAGE}&offset=${list.length}`);
+      const next = await get(`${base}&offset=${list.length}`);
       setMore((m) => (m.key === key ? { key, pages: [...m.pages, next], done: next.length < PAGE, busy: false } : m));
     } catch (e) {
       toast(e.message, 'error');
@@ -174,6 +179,9 @@ export function Library({ tab = 'albums' }) {
     <nav class="tabs" role="tablist">
       ${tabs.map(([k, label]) => html`<a role="tab" aria-selected=${k === tab} class=${k === tab ? 'active' : ''} href=${href('library/' + k)}>${label}</a>`)}
     </nav>
+    ${tab === 'tracks' && html`<nav class="seg filter-seg" aria-label="篩選">${trackFilters.map(([k, label]) => html`<a key=${k}
+      class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/tracks' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
+    ${tab === 'tracks' && filter === 'no_album' && html`<${FolderCard} rev=${rev} />`}
     ${data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} />`}
     ${list && tab === 'artists' && html`<ul class="list">
@@ -182,11 +190,25 @@ export function Library({ tab = 'albums' }) {
     </ul>`}
     ${list && tab === 'tracks' && (list.length
       ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum />`
-      : html`<${Empty}>還沒有歌曲。<//>`)}
+      : html`<${Empty}>${filter === 'no_album' ? '每首歌都有專輯了。' : filter === 'no_artist' ? '每首歌都有歌手了。' : '還沒有歌曲。'}<//>`)}
     ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
     ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
   </section>`;
+}
+
+// FolderCard offers albums for songs whose folder names the album though their tags name none.
+function FolderCard({ rev }) {
+  const groups = useLoad(() => get('/organize/folders'), [], rev);
+  const g = groups.data;
+  if (!g || !g.length) return null;
+  const songs = g.reduce((n, x) => n + x.tracks.length, 0);
+  return html`<div class="card summary-card folder-card">
+    <${Icon} name="album" />
+    <span class="grow track-text"><span class="title">${songs} 首可以依資料夾歸入專輯</span>
+      <span class="sub">${g.slice(0, 3).map((x) => x.title).join('、')}${g.length > 3 ? ` 等 ${g.length} 張` : ''}</span></span>
+    <button class="btn tonal" onClick=${() => folderAlbums(g)}>依資料夾整理…</button>
+  </div>`;
 }
 
 export function Album({ id }) {
@@ -204,6 +226,7 @@ export function Album({ id }) {
     { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist(items) },
     { icon: 'edit', label: '編輯專輯資訊…', onClick: () => editAlbum(a) },
     { icon: 'identify', label: '從 MusicBrainz 辨識…', onClick: () => identifyAlbum(a) },
+    { icon: 'identify', label: '從 VGMdb 匯入…', onClick: () => vgmdbAlbum(a) },
     { icon: 'image', label: '更換封面…', onClick: () => changeCover(a) },
     { icon: 'merge', label: '合併到其他專輯…', onClick: () => mergeAlbum(a) },
     a.entries.length > 1 && { icon: 'split', label: '拆分…', onClick: () => splitAlbum(a) },

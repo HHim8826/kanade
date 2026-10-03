@@ -264,7 +264,10 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
 .upload-progress { margin-top: 12px; }
 
 /* ---- dialogs ---- */
-.scrim { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 16px; background: rgb(0 0 0 / .4); }
+/* One column as wide as the screen: an auto column would grow to fit text that does not wrap and
+   push the dialog off a phone screen. */
+.scrim { position: fixed; inset: 0; z-index: 50; display: grid; grid-template-columns: minmax(0, 1fr); place-items: center; padding: 16px;
+  background: rgb(0 0 0 / .4); }
 .dialog {
   width: min(560px, 100%); max-height: calc(100dvh - 32px); display: flex; flex-direction: column;
   background: var(--surface-container-high); border-radius: var(--radius-xl); padding: 24px;
@@ -560,3 +563,27 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .swatch.violet { background: linear-gradient(135deg, #4355b9 50%, #dee0ff 50%); }
 .swatch.teal { background: linear-gradient(135deg, #006a6a 50%, #6ff7f6 50%); }
 .swatch.rose { background: linear-gradient(135deg, #9c4146 50%, #ffdadb 50%); }
+
+/* Songs filter, folder albums, VGMdb paste (2026-10-03) */
+.filter-seg { margin: 4px 0 16px; }
+.seg a { display: flex; align-items: center; padding: 8px 16px; color: var(--on-surface); font-size: 14px; text-decoration: none; }
+.seg a + a { border-left: 1px solid var(--outline); }
+.seg a.on { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 600; }
+.folder-card .btn { flex: none; }
+.folder-group { border: 1px solid var(--outline-variant); border-radius: var(--radius-m); padding: 4px 12px 0; }
+.folder-group .diff-row { padding: 8px 0; }
+.folder-group .track-text, .folder-card .track-text { min-width: 0; }
+.folder-group .track-text .sub { overflow-wrap: anywhere; }
+.folder-group .form-grid { padding-left: 28px; }
+.steps { margin: 8px 0 16px; padding-left: 1.5em; line-height: 1.7; }
+.steps .link { color: var(--primary); }
+.paste-box { font-family: inherit; resize: vertical; }
+.field .value { font-size: 15px; color: var(--on-surface); padding: 4px 0; overflow-wrap: anywhere; }
+.field select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+@media (max-width: 600px) {
+  .filter-seg a { padding: 8px 12px; }
+  .folder-card { flex-wrap: wrap; }
+  .folder-card .track-text { flex-basis: calc(100% - 48px); }
+  .folder-card .btn { margin-left: auto; }
+  .folder-group .form-grid { padding-left: 0; grid-template-columns: 1fr; }
+}

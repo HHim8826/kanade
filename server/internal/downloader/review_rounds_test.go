@@ -109,7 +109,7 @@ func (r *rig) finished(id int64) bool {
 }
 
 func (r *rig) tracks(t *testing.T) int {
-	list, _ := r.lib.Tracks(r.ctx, 50, 0)
+	list, _ := r.lib.Tracks(r.ctx, 50, 0, "")
 	return len(list)
 }
 

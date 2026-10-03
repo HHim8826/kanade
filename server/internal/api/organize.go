@@ -11,6 +11,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/identify"
+	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
 )
 
@@ -505,6 +506,99 @@ func (s *Server) identifyApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	g, err := s.lib.ApplyChanges(ctx, library.SourceIdentify, fmt.Sprintf("套用 MusicBrainz 資料到「%s」", a.Title), changes)
+	if err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	writeGroup(w, g)
+}
+
+// folderAlbums lists the folders whose standalone tracks would make an album (files imported
+// before folders without album tags became albums).
+func (s *Server) folderAlbums(w http.ResponseWriter, r *http.Request) {
+	groups, err := s.importer.FolderGroups(r.Context())
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, groups)
+}
+
+// makeFolderAlbums makes the chosen folders' albums as one undoable action.
+func (s *Server) makeFolderAlbums(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Folders []importer.FolderChoice `json:"folders"`
+	}
+	if err := readJSON(r, &req); err != nil || len(req.Folders) == 0 || len(req.Folders) > 500 {
+		writeError(w, http.StatusBadRequest, errors.New("expected the folders to make albums of"))
+		return
+	}
+	g, err := s.importer.MakeFolderAlbums(r.Context(), req.Folders)
+	if err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	writeGroup(w, g)
+}
+
+// vgmdbBody is an album the client read from a VGMdb page the user pasted, and on apply the
+// picked changes.
+type vgmdbBody struct {
+	Album identify.VGMdbAlbum `json:"album"`
+	Keys  []string            `json:"keys"`
+}
+
+func (s *Server) vgmdbProposal(w http.ResponseWriter, r *http.Request) (*library.AlbumDetail, *vgmdbBody, *identify.Proposal) {
+	a := s.albumOr404(w, r)
+	if a == nil {
+		return nil, nil, nil
+	}
+	var req vgmdbBody
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return nil, nil, nil
+	}
+	if err := req.Album.Check(); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return nil, nil, nil
+	}
+	return a, &req, identify.ProposeVGMdb(a, &req.Album)
+}
+
+// vgmdbPropose compares an album read from VGMdb with an album of the library.
+func (s *Server) vgmdbPropose(w http.ResponseWriter, r *http.Request) {
+	if _, _, p := s.vgmdbProposal(w, r); p != nil {
+		writeJSON(w, http.StatusOK, p)
+	}
+}
+
+// vgmdbApply applies the picked changes as one undoable action; the cover is fetched from VGMdb's
+// image host only then.
+func (s *Server) vgmdbApply(w http.ResponseWriter, r *http.Request) {
+	a, req, p := s.vgmdbProposal(w, r)
+	if p == nil {
+		return
+	}
+	ctx := r.Context()
+	changes := p.Selected(req.Keys)
+	if p.Cover && slices.Contains(req.Keys, identify.CoverKey) && s.mb != nil {
+		data, err := s.mb.VGMdbCover(ctx, &req.Album)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		cover, err := s.importer.StoreCover(ctx, data)
+		if err != nil {
+			writeError(w, http.StatusBadGateway, err)
+			return
+		}
+		changes = append(changes, library.Change{Target: "album", ID: a.ID, Field: "cover_id", Value: library.Str(strconv.FormatInt(cover, 10))})
+	}
+	if len(changes) == 0 {
+		writeGroup(w, 0)
+		return
+	}
+	g, err := s.lib.ApplyChanges(ctx, library.SourceVGMdb, fmt.Sprintf("套用 VGMdb 資料到「%s」", a.Title), changes)
 	if err != nil {
 		s.libError(w, r, err)
 		return

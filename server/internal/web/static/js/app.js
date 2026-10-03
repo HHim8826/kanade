@@ -30,7 +30,7 @@ function Page({ route, onLogout }) {
   switch (name) {
     case undefined: return html`<${Home} />`;
     case 'search': return html`<${Search} />`;
-    case 'library': return html`<${Library} tab=${arg || 'albums'} />`;
+    case 'library': return html`<${Library} tab=${arg || 'albums'} filter=${route.query.get('filter') || ''} />`;
     case 'album': return html`<${Album} id=${arg} />`;
     case 'artist': return html`<${Artist} id=${arg} name=${route.query.get('name')} />`;
     case 'playlist': return html`<${Playlist} id=${arg} />`;
