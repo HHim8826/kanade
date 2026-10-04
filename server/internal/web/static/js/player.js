@@ -207,7 +207,11 @@ export function playQueue(items, index = 0) {
 // ---- songs from the whole library (reviews #72, #73) ----
 
 let gen = 0; // a new queue (or a reset) makes answers for the old one late: they are dropped
-let topping = false;
+// The request for more library songs on its way, shared by everyone who needs songs meanwhile: the
+// end of the queue reached before it answers waits for it (review #90). It resolves to 'ok',
+// 'failed' (radioError says why) or 'stale' (asked for a queue since replaced).
+let topping = null;
+let pauses = 0; // pauses the listener asked for: a wait for songs that saw one does not start playing
 const kindOf = (item) => (item && item.kind === 'spoken' ? 'spoken' : 'music');
 
 // playLibraryShuffle plays songs picked at random from the whole library, one after another, each
@@ -234,28 +238,42 @@ const autoItem = (it) => ({ ...it, auto: true });
 const recentIds = (s) => [...new Set(s.queue.slice(Math.max(s.index - 49, 0), s.index + 1).map((q) => q.trackId).filter(Boolean))];
 
 // topUp keeps library songs ahead while the queue goes on by itself: two ahead with preloading
-// (so the next one can be warmed), else one when the queue reaches its end (now).
+// (so the next one can be warmed), else one when the queue reaches its end (now), which needs one
+// song ahead to go on.
 export async function topUp(now = false) {
-  const s = player.get();
-  if (!s.radio || topping) return false;
-  const ahead = s.queue.length - 1 - s.index;
-  const want = s.preload ? 2 : now ? 1 : 0;
-  if (ahead >= want) return true;
-  topping = true;
+  for (;;) {
+    if (topping) {
+      const got = await topping;
+      if (got === 'failed') return false;
+      continue; // it brought songs (enough now?), or was for an old queue: ask anew
+    }
+    const s = player.get();
+    if (!s.radio) return false;
+    const ahead = s.queue.length - 1 - s.index;
+    const want = s.preload ? 2 : now ? 1 : 0;
+    if (ahead >= (now ? 1 : want)) return true; // at the end, one song ahead is enough to go on
+    const asked = fetchMore(s, Math.max(want - ahead, 1));
+    topping = asked;
+    const got = await asked;
+    if (topping === asked) topping = null;
+    if (got !== 'stale') return got === 'ok';
+  }
+}
+
+async function fetchMore(s, n) {
   const my = gen;
   try {
-    const list = await get(`/tracks/random?n=${Math.max(want - ahead, 1)}&kind=${s.radio.kind}&not=${recentIds(s).join(',')}`);
-    if (my !== gen || !player.get().radio) return false; // another queue began, or it was turned off
+    const list = await get(`/tracks/random?n=${n}&kind=${s.radio.kind}&not=${recentIds(s).join(',')}`);
+    if (my !== gen || !player.get().radio) return 'stale'; // another queue began, or it was turned off
     if (!list.length) throw new Error('曲庫沒有可以接續的歌');
     const q = player.get();
     player.set({ queue: [...q.queue, ...tag(list.map(fromTrack).map(autoItem))], radioError: null });
     prefetchNext();
-    return true;
+    return 'ok';
   } catch (e) {
-    if (my === gen) player.set({ radioError: e.message });
-    return false;
-  } finally {
-    topping = false;
+    if (my !== gen) return 'stale';
+    player.set({ radioError: e.message });
+    return 'failed';
   }
 }
 
@@ -441,7 +459,10 @@ export function resetPlayer(withReport = true) {
 export function toggle() {
   if (!current()) return;
   if (audio.paused) audio.play().catch(() => {});
-  else audio.pause();
+  else {
+    pauses++;
+    audio.pause();
+  }
 }
 
 // next moves on. Past the end: a queue going on by itself picks from the library; looping the
@@ -454,9 +475,9 @@ export async function next() {
   if (!s.queue.length) return;
   if (s.radio || (s.autoContinue && s.mode !== 'all')) {
     if (!s.radio) player.set({ radio: { kind: kindOf(s.queue[s.index]) }, radioError: null });
-    const my = gen;
-    if (await topUp(true) && my === gen && player.get().index + 1 < player.get().queue.length) {
-      load(player.get().index + 1);
+    const my = gen, paused = pauses, at = s.index;
+    if (await topUp(true) && my === gen && player.get().index === at && at + 1 < player.get().queue.length) {
+      load(at + 1, pauses === paused); // paused while waiting: the next song waits too
       return;
     }
     if (my === gen) stopAtEnd(); // nothing to go on with: radioError says why
