@@ -188,7 +188,8 @@ func enc(kv ...string) string {
 }
 
 // A title that carries its singer ("曲名 / 歌手") is also looked for as the title and singer, and by
-// keywords; what is found with the same title, singer and length is exact (review #122).
+// keywords (review #122). What is found that way is exact only when that singer is the song's artist:
+// the words after a slash are a guess, which never overrules the artist the song has (review #128).
 func TestDecoratedTitleCanFindLyrics(t *testing.T) {
 	ctx := context.Background()
 	rec := `[{"id": 31, "trackName": "ユーフォリア", "artistName": "牧野由依", "duration": 250, "syncedLyrics": "[00:01.00]words"}]`
@@ -202,11 +203,29 @@ func TestDecoratedTitleCanFindLyrics(t *testing.T) {
 	} {
 		c, asked := fakeSearch(t, tc.answers)
 		list, err := c.Find(ctx, Song{Title: "ユーフォリア / 牧野由依", Artist: "Makino Yui", DurationMS: 250_000})
-		if err != nil || len(list) != 1 || list[0].ID != 31 || !list[0].Exact {
+		if err != nil || len(list) != 1 || list[0].ID != 31 || list[0].Exact {
 			t.Fatalf("%s: %+v %v", tc.name, list, err)
 		}
 		if len(*asked) != tc.want {
 			t.Fatalf("%s: asked %v", tc.name, *asked)
+		}
+	}
+	for _, tc := range []struct {
+		title, artist, recTitle, recArtist string
+		exact                              bool
+	}{
+		{"ユーフォリア / 牧野由依", "牧野由依", "ユーフォリア", "牧野由依", true},  // the singer is the song's artist
+		{"ユーフォリア／牧野由依", "ＭＡＫＩＮＯ", "ユーフォリア", "牧野由依", false}, // another artist: asked
+		{"ユーフォリア / 牧野由依", "", "ユーフォリア", "牧野由依", false},     // no artist: only a guess
+		{"Song / Live", "Known Singer", "Song", "Live", false},
+		{"Song / Live", "Known Singer", "Song", "Known Singer", false}, // perhaps another recording
+		{"Song / Live", "Known Singer", "Song / Live", "Known Singer", true},
+		{"Song / Live", "", "Song / Live", "Anyone", true},
+	} {
+		got := rank(Song{Title: tc.title, Artist: tc.artist, DurationMS: 180_000},
+			[]Lyrics{{ID: 1, Title: tc.recTitle, Artist: tc.recArtist, Duration: 180, Plain: "words"}})
+		if len(got) != 1 || got[0].Exact != tc.exact {
+			t.Errorf("%q by %q, record %q by %q: %+v, want exact %v", tc.title, tc.artist, tc.recTitle, tc.recArtist, got, tc.exact)
 		}
 	}
 	// A slash without spaces is part of the title.

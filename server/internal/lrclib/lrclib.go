@@ -230,7 +230,8 @@ type Candidate struct {
 	Instrumental bool    `json:"instrumental"`
 	Preview      string  `json:"preview"` // the first lines, without time tags
 	// Exact: the same title and artist (when the song has one) and a length within two seconds,
-	// close enough to use without asking.
+	// close enough to use without asking. The title without a singer after its slash counts only
+	// when that singer is the song's artist (review #128).
 	Exact bool `json:"exact"`
 	off   float64
 }
@@ -320,13 +321,17 @@ func hasWords(l *Lyrics) bool { return strings.TrimSpace(l.Text()) != "" }
 // rank keeps the records with words or marked instrumental, once each, and orders them: records
 // with words before instrumental ones, exact matches first, then synced lyrics, then the closest
 // length. At most ten.
+//
+// What follows a slash is only a guess at the singer (it may be "Live", a version, a guest), so it
+// never stands in for the song's artist: a record found by it is exact only when the guess is the
+// song's artist; else it waits for the listener to choose it (review #128).
 func rank(s Song, list []Lyrics) []Candidate {
-	titles, artists := []string{s.Title}, []string{s.Artist}
-	if title, singer, ok := splitSinger(s.Title); ok {
-		titles, artists = append(titles, title), append(artists, singer)
+	titles := []string{s.Title}
+	if title, singer, ok := splitSinger(s.Title); ok && s.Artist != "" && same(singer, s.Artist) {
+		titles = append(titles, title)
 	}
-	anyOf := func(name string, names []string) bool {
-		return slices.ContainsFunc(names, func(n string) bool { return same(name, n) })
+	fits := func(l *Lyrics) bool {
+		return slices.ContainsFunc(titles, func(t string) bool { return same(l.Title, t) }) && (s.Artist == "" || same(l.Artist, s.Artist))
 	}
 	out := make([]Candidate, 0, len(list))
 	seen := map[int64]bool{}
@@ -342,7 +347,7 @@ func rank(s Song, list []Lyrics) []Candidate {
 		}
 		c := Candidate{ID: l.ID, Title: l.Title, Artist: l.Artist, Album: l.Album, Duration: l.Duration,
 			Synced: strings.TrimSpace(l.Synced) != "", Instrumental: l.Instrumental, Preview: preview(l.Text()), off: off}
-		c.Exact = words && !l.Instrumental && off <= 2 && anyOf(l.Title, titles) && (s.Artist == "" || anyOf(l.Artist, artists))
+		c.Exact = words && !l.Instrumental && off <= 2 && fits(&l)
 		out = append(out, c)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
