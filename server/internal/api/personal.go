@@ -72,6 +72,7 @@ type playlistBody struct {
 	Name        string                `json:"name"`
 	Description string                `json:"description"`
 	Items       []library.PlaylistAdd `json:"items"` // on create: initial items
+	Rules       *library.Rules        `json:"rules"` // a smart playlist (review #96)
 }
 
 func (s *Server) createPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -80,7 +81,13 @@ func (s *Server) createPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	id, err := s.lib.CreatePlaylist(r.Context(), req.Name, req.Description)
+	var id int64
+	var err error
+	if req.Rules != nil {
+		id, err = s.lib.CreateSmartPlaylist(r.Context(), req.Name, req.Description, *req.Rules)
+	} else {
+		id, err = s.lib.CreatePlaylist(r.Context(), req.Name, req.Description)
+	}
 	if err != nil {
 		s.libError(w, r, err)
 		return

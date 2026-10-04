@@ -239,6 +239,26 @@ export async function playLibraryShuffle(kind = 'music') {
   }
 }
 
+// playSmart plays a smart playlist on and on (review #96): every pick asks its rules again,
+// leaving out the songs just played.
+export async function playSmart(id, name) {
+  const my = ++gen;
+  const s = player.get();
+  try {
+    const list = await get(`/playlists/${id}/next?n=3&not=${recentIds(s).join(',')}`);
+    if (my !== gen) return;
+    if (!list.length) {
+      toast('沒有符合條件的歌', 'error');
+      return;
+    }
+    player.set({ queue: tag(list.map(fromTrack).map(autoItem)), index: 0, original: null,
+      radio: { kind: 'music', playlist: id, name, chosen: true }, radioError: null });
+    load(0);
+  } catch (e) {
+    if (my === gen) toast(e.message, 'error');
+  }
+}
+
 const autoItem = (it) => ({ ...it, auto: true });
 const recentIds = (s) => [...new Set(s.queue.slice(Math.max(s.index - 49, 0), s.index + 1).map((q) => q.trackId).filter(Boolean))];
 
@@ -268,9 +288,11 @@ export async function topUp(now = false) {
 async function fetchMore(s, n) {
   const my = gen;
   try {
-    const list = await get(`/tracks/random?n=${n}&kind=${s.radio.kind}&not=${recentIds(s).join(',')}`);
+    const list = await get(s.radio.playlist // a smart playlist played on: its rules pick (review #96)
+      ? `/playlists/${s.radio.playlist}/next?n=${n}&not=${recentIds(s).join(',')}`
+      : `/tracks/random?n=${n}&kind=${s.radio.kind}&not=${recentIds(s).join(',')}`);
     if (my !== gen || !player.get().radio) return 'stale'; // another queue began, or it was turned off
-    if (!list.length) throw new Error('曲庫沒有可以接續的歌');
+    if (!list.length) throw new Error(s.radio.playlist ? '沒有其他符合條件的歌' : '曲庫沒有可以接續的歌');
     const q = player.get();
     player.set({ queue: [...q.queue, ...tag(list.map(fromTrack).map(autoItem))], radioError: null });
     prefetchNext();

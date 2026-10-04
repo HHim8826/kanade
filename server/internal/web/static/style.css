@@ -761,3 +761,25 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .bookmark-row .row:disabled { cursor: default; opacity: .6; }
 .bm-time { flex: none; min-width: 52px; font-variant-numeric: tabular-nums; color: var(--primary); font-weight: 600; }
 .np-bookmarks { padding: 8px 0; }
+
+/* Smart playlists (review #96) */
+.rule-match { display: flex; align-items: center; gap: 12px; margin: 12px 0 8px; }
+.rules { list-style: none; padding: 0; margin: 4px 0; }
+.rules .rule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--outline-variant); }
+.rules select, .rules input, .smart-editor select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline);
+  border-radius: var(--radius-s); padding: 6px 8px; }
+.rule-n { display: inline-flex; align-items: center; gap: 6px; }
+.rule-n input { width: 80px; }
+.rule-picks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1 1 240px; }
+.chip-check { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 16px; font-size: 13px; cursor: pointer;
+  background: var(--surface-container-high); border: 0; color: var(--on-surface); font-family: inherit; }
+.chip-check.on, .chip-check:has(input:checked) { background: var(--secondary-container); color: var(--on-secondary-container); }
+.chip-check input { margin: 0; }
+.album-pick { position: relative; }
+.pick-list { position: absolute; z-index: 5; top: 100%; left: 0; min-width: 240px; display: flex; flex-direction: column; background: var(--surface-container);
+  border-radius: var(--radius-s); box-shadow: 0 4px 12px rgb(0 0 0 / .2); }
+.pick-list button { text-align: left; padding: 8px 12px; border: 0; background: none; color: var(--on-surface); font: inherit; cursor: pointer; }
+.pick-list button:hover { background: var(--surface-container-high); }
+.form-grid .field select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s); padding: 8px; }
+.smart-preview { margin-top: 12px; padding: 12px; border-radius: var(--radius-m); background: var(--surface-container-low); }
+.preview-list { margin: 4px 0 0; padding-left: 20px; font-size: 14px; }

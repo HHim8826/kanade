@@ -107,6 +107,7 @@ type Playlist struct {
 	Tracks      int    `json:"tracks"`
 	CoverID     int64  `json:"cover_id,omitempty"` // the first item with a cover
 	UpdatedAt   int64  `json:"updated_at"`
+	Smart       bool   `json:"smart,omitempty"` // picks its songs by rules (review #96)
 }
 
 type PlaylistItem struct {
@@ -118,6 +119,8 @@ type PlaylistDetail struct {
 	Playlist
 	DurationMS int64          `json:"duration_ms"`
 	Items      []PlaylistItem `json:"items"`
+	Rules      *Rules         `json:"rules,omitempty"`   // a smart playlist's (its items are what they pick now)
+	Matches    int            `json:"matches,omitempty"` // songs fitting its conditions, before its limits
 }
 
 // itemAlbum is the album an item shows and plays in: the one it was added from, else the
@@ -127,7 +130,7 @@ const itemAlbum = `coalesce(pi.album_id, (SELECT e.album_id FROM album_entries e
 const playlistSQL = `SELECT p.id, p.name, p.description, p.updated_at,
 	(SELECT count(*) FROM playlist_items pi WHERE pi.playlist_id = p.id),
 	coalesce((SELECT al.cover_id FROM playlist_items pi JOIN albums al ON al.id = ` + itemAlbum + `
-		WHERE pi.playlist_id = p.id AND al.cover_id IS NOT NULL ORDER BY pi.pos, pi.id LIMIT 1), 0)
+		WHERE pi.playlist_id = p.id AND al.cover_id IS NOT NULL ORDER BY pi.pos, pi.id LIMIT 1), 0), p.rules IS NOT NULL
 	FROM playlists p`
 
 func scanPlaylists(rows *sql.Rows, err error) ([]Playlist, error) {
@@ -138,7 +141,7 @@ func scanPlaylists(rows *sql.Rows, err error) ([]Playlist, error) {
 	out := []Playlist{}
 	for rows.Next() {
 		var p Playlist
-		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.UpdatedAt, &p.Tracks, &p.CoverID); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Description, &p.UpdatedAt, &p.Tracks, &p.CoverID, &p.Smart); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -147,7 +150,29 @@ func scanPlaylists(rows *sql.Rows, err error) ([]Playlist, error) {
 }
 
 func (s *Store) Playlists(ctx context.Context) ([]Playlist, error) {
-	return scanPlaylists(s.db.QueryContext(ctx, playlistSQL+` ORDER BY p.updated_at DESC`))
+	list, err := scanPlaylists(s.db.QueryContext(ctx, playlistSQL+` ORDER BY p.updated_at DESC`))
+	if err != nil {
+		return nil, err
+	}
+	for i := range list {
+		if !list[i].Smart {
+			continue
+		}
+		r, err := s.PlaylistRules(ctx, list[i].ID)
+		if err != nil || r == nil {
+			continue
+		}
+		if tracks, _, err := s.SmartTracks(ctx, *r, nil, 0); err == nil {
+			list[i].Tracks = len(tracks)
+			for _, t := range tracks {
+				if t.CoverID != 0 {
+					list[i].CoverID = t.CoverID
+					break
+				}
+			}
+		}
+	}
+	return list, nil
 }
 
 func (s *Store) Playlist(ctx context.Context, id int64) (*PlaylistDetail, error) {
@@ -156,6 +181,24 @@ func (s *Store) Playlist(ctx context.Context, id int64) (*PlaylistDetail, error)
 		return nil, err
 	}
 	d := &PlaylistDetail{Playlist: list[0], Items: []PlaylistItem{}}
+	if d.Smart {
+		if d.Rules, err = s.PlaylistRules(ctx, id); err != nil {
+			return nil, err
+		}
+		tracks, matches, err := s.SmartTracks(ctx, *d.Rules, nil, 0)
+		if err != nil {
+			return nil, err
+		}
+		d.Matches, d.Tracks = matches, len(tracks)
+		for _, t := range tracks {
+			d.DurationMS += t.Asset.DurationMS
+			d.Items = append(d.Items, PlaylistItem{TrackItem: t})
+			if d.CoverID == 0 {
+				d.CoverID = t.CoverID
+			}
+		}
+		return d, nil
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT pi.id, t.id, t.title, t.artist,
 		coalesce(al.title, ''), coalesce(al.id, 0), coalesce(al.cover_id, 0), t.kind, `+briefCols+`
 		FROM playlist_items pi JOIN tracks t ON t.id = pi.track_id
@@ -242,12 +285,16 @@ func (s *Store) AddToPlaylist(ctx context.Context, id int64, items []PlaylistAdd
 	}
 	defer tx.Rollback()
 	var pos int64
-	if err := tx.QueryRowContext(ctx, `SELECT coalesce((SELECT max(pos) + 1 FROM playlist_items WHERE playlist_id = p.id), 0)
-		FROM playlists p WHERE p.id = ?`, id).Scan(&pos); err != nil {
+	var smart bool
+	if err := tx.QueryRowContext(ctx, `SELECT coalesce((SELECT max(pos) + 1 FROM playlist_items WHERE playlist_id = p.id), 0), p.rules IS NOT NULL
+		FROM playlists p WHERE p.id = ?`, id).Scan(&pos, &smart); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrNotFound
 		}
 		return 0, err
+	}
+	if smart {
+		return 0, invalid("a smart playlist picks its songs itself")
 	}
 	now := db.Now()
 	added := 0

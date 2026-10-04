@@ -239,7 +239,8 @@ function Queue({ s }) {
     { icon: 'close', label: '從佇列移除', onClick: () => removeAt(i) },
   ]);
   const libraryShuffle = s.shuffle && s.scope === 'library';
-  const going = s.radio ? (s.radio.chosen || libraryShuffle ? '全曲庫隨機：會一直從曲庫挑歌接著播' : '已播完佇列，正從曲庫隨機挑歌接著播') : '';
+  const going = !s.radio ? '' : s.radio.playlist ? `依智慧歌單「${s.radio.name}」的條件一直挑歌接著播`
+    : s.radio.chosen || libraryShuffle ? '全曲庫隨機：會一直從曲庫挑歌接著播' : '已播完佇列，正從曲庫隨機挑歌接著播';
   return html`<div class="queue">
     <div class="queue-head">
       <span class="sub grow">${s.queue.length} 首 · ${libraryShuffle ? '全曲庫隨機' : modeLook[s.mode][1]}</span>
@@ -251,7 +252,7 @@ function Queue({ s }) {
         <span class="sub">${going || (s.mode === 'all' ? '列表循環中：播完會從頭再播一次' : s.mode === 'one' ? '單曲循環中' : '佇列播完後，從曲庫隨機挑歌接著播')}</span></span>
       <input type="checkbox" role="switch" checked=${s.autoContinue} onChange=${(e) => setPrefs({ autoContinue: e.target.checked })} />
     </label>
-    ${s.radioError && html`<div class="error-box" role="alert"><span>沒能從曲庫挑歌接著播：${s.radioError}</span>
+    ${s.radioError && html`<div class="error-box" role="alert"><span>沒能${s.radio && s.radio.playlist ? '依條件' : '從曲庫'}挑歌接著播：${s.radioError}</span>
       <button class="btn text" onClick=${retryRadio}>重試</button></div>`}
     <ol class=${'tracks queue-list' + (drag ? ' dragging' : '')}>${s.queue.map((q, i) => html`<li key=${q.qid || i} ...${lift(i)}>
       <div class=${'track' + (q.qid === current ? ' current' : '')}>

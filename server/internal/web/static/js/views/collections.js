@@ -8,6 +8,7 @@ import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { AlbumActions, SongActions } from './batch.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { useLibRev } from './organize.js';
+import { SmartActions, describe, editSmart, newSmart, saveAsPlain, useRuleNames } from './smart.js';
 
 // Playlists, favorites and play history (P2-1).
 
@@ -43,12 +44,13 @@ function newPlaylist() {
 }
 
 export function PlaylistsTab({ lists }) {
-  return html`<div class="actions"><button class="btn tonal" onClick=${newPlaylist}><${Icon} name="add" />新增歌單</button></div>
+  return html`<div class="actions"><button class="btn tonal" onClick=${newPlaylist}><${Icon} name="add" />新增歌單</button>
+      <button class="btn tonal" onClick=${newSmart}><${Icon} name="shuffle" />新增智慧歌單</button></div>
     ${lists.length === 0
       ? html`<${Empty} icon="queue">還沒有歌單。在歌曲的「更多」選單選「加入歌單」，或按上面的按鈕建立。<//>`
       : html`<div class="grid">${lists.map((p) => html`<a key=${p.id} class="card album-card" href=${href('playlist/' + p.id)}>
           <${Cover} id=${p.cover_id} alt="" />
-          <div class="card-text"><div class="title" title=${p.name}>${p.name}</div><div class="sub">${p.tracks} 首</div></div>
+          <div class="card-text"><div class="title" title=${p.name}>${p.name}</div><div class="sub">${p.smart ? '智慧歌單 · ' : ''}${p.tracks} 首</div></div>
         </a>`)}</div>`}`;
 }
 
@@ -78,9 +80,11 @@ export function Playlist({ id }) {
   const rev = useLibRev();
   const pl = useLoad(() => get('/playlists/' + id), [id], rev);
   const [order, setOrder] = useState(null); // optimistic item order while a reorder is saved
+  const names = useRuleNames(pl.data && pl.data.rules);
   if (pl.loading && !pl.data) return html`<${Spinner} />`;
   if (pl.error) return html`<${ErrorBox} error=${pl.error} onRetry=${pl.reload} />`;
   const p = pl.data;
+  if (p.smart) return html`<${SmartPlaylist} p=${p} names=${names} reload=${pl.reload} />`;
   const byId = new Map(p.items.map((it) => [it.item_id, it]));
   // A saved order stays in use while it still names exactly the loaded items, so the list does not
   // jump back while the reload is on its way.
@@ -157,6 +161,50 @@ export function Playlist({ id }) {
           i < items.length - 1 && { icon: 'down', label: '下移', onClick: () => reorder(i, i + 1) },
           { icon: 'delete', label: '從歌單移除', onClick: () => remove(it) },
         ]} />`}
+  </section>`;
+}
+
+// SmartPlaylist shows what a smart playlist picks now (review #96), to play as it is or on and on.
+function SmartPlaylist({ p, names }) {
+  const items = p.items.map((it, i) => ({ ...fromTrack(it), key: 's' + it.id + ':' + i }));
+  const rename = () => showDialog((close) => html`<${NameDialog} title="重新命名歌單" action="儲存" initial=${p.name} close=${close}
+    onSubmit=${async (name) => { await api('PATCH', '/playlists/' + p.id, { name, description: p.description }); go('playlist/' + p.id); }} />`);
+  const destroy = () => showDialog((close) => html`<${Dialog} title="刪除智慧歌單" onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled danger" onClick=${async () => {
+        try {
+          await api('DELETE', '/playlists/' + p.id);
+          close();
+          toast(`已刪除「${p.name}」`);
+          go('library/playlists');
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      }}>刪除</button>`}>
+    <p>只刪除這個智慧歌單的條件；曲庫裡的歌曲都不受影響。</p>
+  <//>`);
+  return html`<section>
+    <header class="album-head">
+      <${Cover} id=${p.cover_id} size=${600} alt=${p.name} className="big" />
+      <div class="album-info">
+        <div class="overline">智慧歌單</div>
+        <h1>${p.name}</h1>
+        <div class="sub">${describe(p.rules, names)}</div>
+        <div class="sub">${p.tracks} 首 · ${fmtTime(p.duration_ms)}${p.matches > p.tracks ? `（符合條件的有 ${p.matches} 首）` : ''}</div>
+        <div class="actions">
+          <${SmartActions} p=${p} items=${items} />
+          <${IconButton} icon="more" label="更多" onClick=${(e) => openMenu(e, [
+            { icon: 'edit', label: '編輯條件…', onClick: () => editSmart(p) },
+            items.length && { icon: 'playlistAdd', label: '另存為一般歌單', onClick: () => saveAsPlain(p, items) },
+            items.length && { icon: 'queue', label: '加入佇列', onClick: () => enqueue(items) },
+            { icon: 'edit', label: '重新命名', onClick: rename },
+            { icon: 'delete', label: '刪除智慧歌單', onClick: destroy },
+          ])} />
+        </div>
+      </div>
+    </header>
+    <p class="hint">內容依條件即時挑選：曲庫、分類、收藏或聆聽紀錄改變後，重新開啟就會更新。「依條件一直播」每次接歌都重新挑，不重複最近播過的歌。</p>
+    ${items.length === 0 ? html`<${Empty} icon="queue">目前沒有符合條件的歌。<//>` : html`<${TrackList} items=${items} showAlbum />`}
   </section>`;
 }
 
