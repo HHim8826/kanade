@@ -400,6 +400,27 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .found-item .title, .found-item .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .found-preview { white-space: pre-line; color: var(--on-surface-variant); font-size: 13px; line-height: 1.5;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+/* ---- a cover, whole (review #134) ---- */
+.cover-open { display: block; padding: 0; border: 0; background: none; border-radius: var(--radius-l); cursor: zoom-in; }
+.cover-open.add { cursor: pointer; }
+.cover-open:focus-visible { outline: 3px solid var(--primary); outline-offset: 3px; }
+.cover-view { position: fixed; inset: 0; z-index: 50; display: flex; flex-direction: column; background: #0d0d0f; color: #f1f1f3; }
+.cover-view.light { background: #f3f3f1; color: #1b1b1f; }
+.cover-bar { display: flex; align-items: center; gap: 2px; padding: calc(8px + env(safe-area-inset-top, 0px)) 8px 8px 16px; min-height: 60px;
+  background: color-mix(in srgb, currentColor 6%, transparent); }
+.cover-title { flex: 1; min-width: 0; }
+.cover-title .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.cover-title .dims { font-size: 12px; opacity: .7; font-variant-numeric: tabular-nums; min-height: 1.4em; }
+.cover-view .icon-btn:hover:not(:disabled) { background: color-mix(in srgb, currentColor 12%, transparent); }
+.cover-view .icon-btn.one-to-one { font-size: 14px; font-weight: 600; }
+.cover-view .btn.text { color: inherit; }
+.cover-stage { position: relative; flex: 1; overflow: hidden; touch-action: none; user-select: none; cursor: zoom-in; }
+.cover-stage.zoomed { cursor: grab; }
+.cover-stage.dragging.zoomed { cursor: grabbing; }
+.cover-full { position: absolute; left: 50%; top: 50%; max-width: none; transform-origin: center; -webkit-user-drag: none;
+  box-shadow: 0 8px 40px rgb(0 0 0 / .35); }
+.cover-msg { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 12px; text-align: center; }
+@media (max-width: 479px) { .cover-bar { padding-left: 12px; } .cover-view .icon-btn { width: 40px; height: 40px; } }
 @media (min-width: 840px) {
   .np-main { flex-direction: row; align-items: center; justify-content: center; gap: 48px; padding-top: 24px; }
 }

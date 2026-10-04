@@ -10,6 +10,7 @@ import { DragHandle, useReorder } from './common.js';
 import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { BookmarkDialog, BookmarkList } from './bookmarks.js';
+import { viewCover } from './coverview.js';
 import { Field } from './organize.js';
 
 const open = (v) => player.set({ nowPlayingOpen: v });
@@ -113,6 +114,7 @@ export function NowPlaying() {
     item.trackId && { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist([item]) },
     item.albumId && { icon: 'album', label: '前往專輯', onClick: () => go('album/' + item.albumId) },
     item.trackId && { icon: 'lyrics', label: '編輯歌詞', onClick: () => editLyrics(item) },
+    item.coverId && { icon: 'image', label: '檢視封面', onClick: () => viewCover(item.coverId, item.album || item.title) },
   ]);
   return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放">
     <div class="np-top">
@@ -120,7 +122,10 @@ export function NowPlaying() {
       <${IconButton} icon="more" label="更多" onClick=${menu} />
     </div>
     <div class="np-main">
-      <${Cover} id=${item.coverId} size=${600} alt=${item.album || item.title} className="np-cover" />
+      ${item.coverId
+        ? html`<button class="cover-open" onClick=${() => viewCover(item.coverId, item.album || item.title)} aria-label="檢視封面" title="檢視封面">
+            <${Cover} id=${item.coverId} size=${600} alt=${item.album || item.title} className="np-cover" /></button>`
+        : html`<${Cover} id=${item.coverId} size=${600} alt=${item.album || item.title} className="np-cover" />`}
       <div class="np-info">
         <div class="np-title-row">
           <div class="grow">

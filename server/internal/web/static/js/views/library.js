@@ -10,6 +10,7 @@ import { AlbumActions, Categorize, SongActions, editSections } from './batch.js'
 import { CategoriesTab } from './categories.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
+import { viewCover } from './coverview.js';
 import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
   restoreAlbum, splitAlbum, useLibRev, vgmdbAlbum } from './organize.js';
 
@@ -253,7 +254,8 @@ export function Album({ id }) {
     { icon: 'edit', label: '編輯專輯資訊…', onClick: () => editAlbum(a) },
     { icon: 'identify', label: '從 MusicBrainz 辨識…', onClick: () => identifyAlbum(a) },
     { icon: 'identify', label: '從 VGMdb 匯入…', onClick: () => vgmdbAlbum(a) },
-    { icon: 'image', label: '更換封面…', onClick: () => changeCover(a) },
+    a.cover_id && { icon: 'image', label: '檢視封面', onClick: () => viewCover(a.cover_id, a.title) },
+    { icon: 'image', label: a.cover_id ? '更換封面…' : '加上封面…', onClick: () => changeCover(a) },
     { icon: 'merge', label: '合併到其他專輯…', onClick: () => mergeAlbum(a) },
     a.entries.length > 1 && { icon: 'split', label: '拆分…', onClick: () => splitAlbum(a) },
     { icon: 'order', label: '區段名稱…', onClick: () => editSections(a) },
@@ -262,7 +264,11 @@ export function Album({ id }) {
   ]);
   return html`<section>
     <header class="album-head">
-      <${Cover} id=${a.cover_id} size=${600} alt=${a.title} className="big" />
+      ${a.cover_id
+        ? html`<button class="cover-open" onClick=${() => viewCover(a.cover_id, a.title)} aria-label="檢視封面" title="檢視封面">
+            <${Cover} id=${a.cover_id} size=${600} alt=${a.title} className="big" /></button>`
+        : html`<button class="cover-open add" onClick=${() => changeCover(a)} aria-label="加上封面" title="加上封面">
+            <${Cover} id=${0} alt=${a.title} className="big" /></button>`}
       <div class="album-info">
         <div class="overline">專輯${a.edition ? ` · ${a.edition}` : ''}</div>
         <h1>${a.title}</h1>
