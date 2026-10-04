@@ -120,7 +120,9 @@ export function fromTrack(t) {
 let session = null;
 
 function report(finished = false, keepalive = false) {
-  if (!session) return;
+  // A song loaded but never played (brought back paused after a reload, say) is no playback: the
+  // home page keeps what was last heard, here or on another device (review #127).
+  if (!session || !session.played) return;
   const p = session;
   const position = Math.round(audio.currentTime * 1000), heard = Math.round(p.heard);
   // Nothing new (say, a paused tab going to the background): stay quiet, or this old playback
@@ -136,6 +138,7 @@ function report(finished = false, keepalive = false) {
 }
 
 let pendingSeek = null; // ms to jump to once the new track can seek
+let loads = 0; // counts songs loaded: a wait begun for one song controls nothing once another began (review #125)
 
 // load plays the queue item at index. again is a loop coming round (repeat one, or the queue
 // starting over): that plays from the start, never from where it was resumed (review #42).
@@ -144,7 +147,8 @@ function load(index, autoplay = true, again = false) {
   const item = s.queue[index];
   if (!item) return;
   if (session) report(); // close out the track we are leaving
-  session = { id: crypto.randomUUID(), item, heard: 0, last: null };
+  loads++;
+  session = { id: crypto.randomUUID(), item, heard: 0, last: null, played: false };
   // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
   // 0 is a place too, the start, which the settings' resuming does not override (review #106).
   pendingSeek = again ? null : item.resumeMs ?? null;
@@ -181,7 +185,10 @@ audio.addEventListener('timeupdate', () => {
   session.last = t;
 });
 audio.addEventListener('seeking', () => session && (session.last = null));
-audio.addEventListener('playing', () => report()); // the home page shows the latest playback from its start
+audio.addEventListener('playing', () => { // the home page shows the latest playback from its start
+  if (session) session.played = true;
+  report();
+});
 setInterval(() => !audio.paused && report(), 15000);
 document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && report(false, true));
 addEventListener('pagehide', () => report(false, true));
@@ -317,10 +324,12 @@ async function fetchMore(s, n) {
 export async function retryRadio() {
   const s = player.get();
   const atEnd = s.index === s.queue.length - 1 && audio.paused;
-  const my = gen, paused = pauses, at = s.index, qid = s.queue[at] && s.queue[at].qid;
+  const my = gen, paused = pauses, loaded = loads, at = s.index, qid = s.queue[at] && s.queue[at].qid;
   if (!(await topUp(true)) || !atEnd) return;
   const q = player.get();
-  if (my === gen && pauses === paused && q.index === at && q.queue[at] && q.queue[at].qid === qid && at + 1 < q.queue.length) load(at + 1);
+  if (my === gen && pauses === paused && loads === loaded && q.index === at && q.queue[at] && q.queue[at].qid === qid && at + 1 < q.queue.length) {
+    load(at + 1);
+  }
 }
 
 // endRadio stops going on by itself: library songs not reached yet leave the queue.
@@ -480,41 +489,62 @@ export function playAfterCurrent(i) {
   moveItem(i, i < s.index ? s.index : s.index + 1);
 }
 
-// resetPlayer stops playback and forgets the queue (logging out, clearing the queue). With report,
-// the playback so far is reported first.
 // ---- this device's playback, kept across reloads ----
 // The queue, the song and the place in it are kept in this browser, so reloading the page (or
 // opening it again) brings the player back where it was, paused. Logging out forgets them.
+// Every tab of the browser shares what is kept (review #126): it is the queue of the tab that did
+// something last (changed its queue, played, paused, sought), and the place goes with that queue
+// (its id) and song. Tabs hear of each other's writes late, so the two keys can still come from two
+// tabs: a place is used only for the queue and entry it was kept for, else the place kept with the
+// queue itself; never another queue's. A tab that brought a queue back goes on with that queue
+// (and its id) until it changes it.
 const SESSION = 'kanade.playback', PLACE = 'kanade.playback.at';
 const MAX_SAVED = 500; // songs kept around the one playing
+let sid = crypto.randomUUID(); // this tab's queue: a new one once the queue changes
+let savedSid = null; // the queue this tab kept last
 let restored = false; // nothing is saved before what was saved is brought back (the empty start would erase it)
+let owner = false; // what is kept is this tab's
+let unsaved = false; // this tab's queue changed and is not kept yet
+
+// place is where in the current song playback is, with the song it is for.
+function place() {
+  const s = player.get(), item = s.queue[s.index];
+  return item && { tab: sid, qid: item.qid, asset: item.assetId, t: pendingSeek !== null ? pendingSeek / 1000 : audio.currentTime || 0,
+    d: isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (item.durationMs || 0) / 1000 };
+}
 
 function saveSession() {
   if (!restored) return;
+  clearTimeout(saveTimer);
+  unsaved = false;
   const s = player.get();
   try {
     if (!s.queue.length || s.index < 0) {
-      localStorage.removeItem(SESSION);
-      localStorage.removeItem(PLACE);
+      if (owner) forgetSession();
       return;
     }
     const start = Math.max(0, Math.min(s.index - 100, s.queue.length - MAX_SAVED));
     const strip = ({ resumeMs, ...it }) => it;
     localStorage.setItem(SESSION, JSON.stringify({
-      queue: s.queue.slice(start, start + MAX_SAVED).map(strip), index: s.index - start,
+      tab: sid, queue: s.queue.slice(start, start + MAX_SAVED).map(strip), index: s.index - start,
       original: s.original && s.original.length <= MAX_SAVED ? s.original.map(strip) : null,
-      from: s.from, radio: s.radio,
+      from: s.from, radio: s.radio, at: place(),
     }));
+    owner = true;
+    savedSid = sid;
   } catch { /* storage full or blocked: kept for this page only */ }
 }
 
-// savePlace keeps where in the song playback is (a small key of its own, written often).
+// savePlace keeps where in the song playback is (a small key of its own, written often). When
+// another tab's queue is kept, or this tab's as it was before a change, the queue is kept first:
+// the two go together.
 function savePlace() {
-  const s = player.get(), item = s.queue[s.index];
-  if (!restored || !item) return;
+  const at = restored && place();
+  if (!at) return;
+  if (!owner || savedSid !== sid) saveSession();
+  if (!owner) return;
   try {
-    localStorage.setItem(PLACE, JSON.stringify({ qid: item.qid, t: pendingSeek !== null ? pendingSeek / 1000 : audio.currentTime || 0,
-      d: isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (item.durationMs || 0) / 1000 }));
+    localStorage.setItem(PLACE, JSON.stringify(at));
   } catch { /* as above */ }
 }
 
@@ -522,14 +552,25 @@ let savedShape = null, saveTimer = 0;
 player.subscribe((s) => { // the queue changed: saved shortly after (a burst of changes is written once)
   const shape = [s.queue, s.index, s.original, s.from, s.radio];
   if (savedShape && shape.every((v, i) => v === savedShape[i])) return;
+  // Other songs in it: another queue, which places kept for the old one do not fit.
+  if (savedShape && (s.queue !== savedShape[0] || s.original !== savedShape[2])) sid = crypto.randomUUID();
   savedShape = shape;
+  unsaved = true;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(saveSession, 300);
 });
 setInterval(() => !audio.paused && savePlace(), 5000);
-for (const e of ['pause', 'seeked']) audio.addEventListener(e, savePlace);
-addEventListener('pagehide', () => { saveSession(); savePlace(); });
-document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && (saveSession(), savePlace()));
+audio.addEventListener('pause', savePlace); // seek keeps the place too: not the seeks a loading song makes by itself
+const saveOnLeave = () => {
+  if (!owner && !unsaved) return;
+  saveSession();
+  savePlace();
+};
+addEventListener('pagehide', saveOnLeave);
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && saveOnLeave());
+addEventListener('storage', (e) => { // another tab kept its own (or forgot it)
+  if (e.key === SESSION || e.key === PLACE || e.key === null) owner = false;
+});
 
 // restoreSession brings back this browser's last queue, paused at the place it was left; a song
 // played to its end comes back from its start. Called once logged in.
@@ -550,12 +591,22 @@ export function restoreSession() {
   const index = Math.min(Math.max(Number(saved.index) || 0, 0), saved.queue.length - 1);
   qseq = Math.max(qseq, ...saved.queue.map((q) => q.qid), ...(original || []).map((q) => q.qid));
   const item = saved.queue[index];
-  let t = at && at.qid === item.qid ? Number(at.t) || 0 : 0;
-  const d = (at && at.qid === item.qid && Number(at.d)) || (item.durationMs || 0) / 1000;
+  // The place kept most recently, if it is for this queue and song; else the one kept with the queue.
+  const mine = (p) => p && p.tab === saved.tab && p.qid === item.qid && (p.asset ?? item.assetId) === item.assetId;
+  const p = mine(at) ? at : mine(saved.at) ? saved.at : null;
+  let t = p ? Number(p.t) || 0 : 0;
+  const d = (p && Number(p.d)) || (item.durationMs || 0) / 1000;
   if (d && t > d - 2) t = 0;
   item.resumeMs = Math.round(t * 1000);
+  restored = false; // bringing it back is not a change of this tab's to keep
   player.set({ queue: saved.queue, index, original, from: saved.from || 0, radio: saved.radio || null, radioError: null });
   load(index, false);
+  restored = true;
+  clearTimeout(saveTimer);
+  unsaved = false;
+  sid = saved.tab || sid; // the same queue: what is kept is this tab's, until another tab keeps its own
+  savedSid = saved.tab || null;
+  owner = true;
 }
 
 function forgetSession() {
@@ -565,9 +616,12 @@ function forgetSession() {
   } catch { /* nothing kept */ }
 }
 
-export function resetPlayer(withReport = true) {
+// resetPlayer stops playback and forgets the queue (clearing the queue; signOut: logging out,
+// which also forgets what another tab kept). With report, the playback so far is reported first.
+export function resetPlayer(withReport = true, signOut = false) {
   if (withReport) report(false, true);
-  forgetSession();
+  if (owner || signOut) forgetSession();
+  owner = false;
   gen++;
   session = null;
   pendingSeek = null;
@@ -576,6 +630,8 @@ export function resetPlayer(withReport = true) {
   audio.load();
   player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, scrub: null, duration: 0, nowPlayingOpen: false,
     radio: null, radioError: null });
+  clearTimeout(saveTimer); // an empty queue is nothing to keep
+  unsaved = false;
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
 }
 
@@ -598,12 +654,13 @@ export async function next() {
   if (!s.queue.length) return;
   if (s.radio || (s.autoContinue && s.mode !== 'all')) {
     if (!s.radio) player.set({ radio: { kind: kindOf(s.queue[s.index]) }, radioError: null });
-    const my = gen, paused = pauses, at = s.index;
-    if (await topUp(true) && my === gen && player.get().index === at && at + 1 < player.get().queue.length) {
-      load(at + 1, pauses === paused); // paused while waiting: the next song waits too
-      return;
-    }
-    if (my === gen) stopAtEnd(); // nothing to go on with: radioError says why
+    const my = gen, paused = pauses, loaded = loads;
+    const ok = await topUp(true);
+    // Another queue, or another song chosen while waiting: this wait has nothing more to do.
+    if (my !== gen || loads !== loaded) return;
+    const q = player.get();
+    if (ok && q.index + 1 < q.queue.length) load(q.index + 1, pauses === paused); // paused while waiting: the next song waits too
+    else stopAtEnd(); // nothing to go on with: radioError says why
     return;
   }
   if (s.repeat !== 'off') {
@@ -637,6 +694,7 @@ export const seek = (sec) => {
   if (!isFinite(sec) || !current()) return;
   audio.currentTime = sec;
   player.set({ time: sec, scrub: null });
+  savePlace();
 };
 export const scrubTo = (sec) => isFinite(sec) && player.set({ scrub: sec });
 export const endScrub = (commit) => {

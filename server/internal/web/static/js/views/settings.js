@@ -420,7 +420,7 @@ function ChangePassword({ close, onDone }) {
       await post('/account/password', { current, password: next });
       close();
       toast('已更改密碼，所有裝置都已登出；請用新密碼重新登入');
-      resetPlayer();
+      resetPlayer(true, true);
       onDone();
     } catch (err) {
       setError(err.status === 403 ? new Error('目前的密碼不對。') : err.status === 429 ? new Error('錯誤太多次，請 15 分鐘後再試。') : err);
@@ -669,7 +669,7 @@ function SettingsPage({ first, onLogout }) {
   const drive = useSection('/drive', first.drive);
   const conf = useSection('/settings', first.conf);
   const logout = async () => {
-    resetPlayer(); // stop and report the playback while the login still works (review #14)
+    resetPlayer(true, true); // stop and report the playback while the login still works (review #14)
     await post('/logout').catch(() => {});
     onLogout();
   };

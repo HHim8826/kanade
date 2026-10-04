@@ -57,7 +57,7 @@ function App() {
   const route = useRoute();
   useEffect(() => {
     setUnauthorizedHandler(() => { // logged out elsewhere: nothing may keep playing (review #14)
-      resetPlayer(false);
+      resetPlayer(false, true);
       setAuth('out');
     });
     get('/status', { allow401: true }).then(() => setAuth('in'), (e) => setAuth(e.status === 401 ? 'out' : 'in'));
