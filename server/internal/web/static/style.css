@@ -628,7 +628,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 
 /* ---- appearance (settings) ---- */
 .choices { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }
-.choice { display: inline-flex; align-items: center; gap: 8px; padding: 8px 14px 8px 10px; border-radius: var(--radius-xl);
+.choice { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 8px 14px; border-radius: var(--radius-xl);
   border: 1px solid var(--outline-variant); background: none; cursor: pointer; font: inherit; color: var(--on-surface); }
 .choice[aria-checked="true"] { background: var(--secondary-container); color: var(--on-secondary-container); border-color: transparent; font-weight: 600; }
 .choice:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
