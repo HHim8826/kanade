@@ -497,13 +497,24 @@ download_release() {
   "$dir/kanade" version >/dev/null 2>&1 || die "下載的程式無法在這台機器執行。"
 }
 
-# install_manager [FILE]: this script as kanade-manager (the release's copy when given one).
+# install_manager [FILE]: this script as kanade-manager (the release's copy when given one). Every
+# way in checks what it installs (review #131): the release's copy as script_ok does, this script as
+# a whole one. One that fails leaves kanade-manager as it was, says so and returns 1.
 install_manager() {
   local src="${1:-}"
-  if [ -z "$src" ] || [ ! -s "$src" ]; then
+  if [ -n "$src" ] && [ -s "$src" ]; then
+    if ! script_ok "$(dirname "$src")"; then
+      warn "下載的管理腳本沒有通過檢查，kanade-manager 沒有更新。"
+      return 1
+    fi
+  else
     src="${BASH_SOURCE[0]}"
   fi
   if [ -f "$src" ] && [ "$(readlink -f "$src")" != "$(readlink -f "$MANAGER_PATH" 2>/dev/null)" ]; then
+    if ! script_whole "$src"; then
+      warn "這個腳本不完整，kanade-manager 沒有更新。"
+      return 1
+    fi
     install -m 755 "$src" "$MANAGER_PATH"
   elif [ ! -x "$MANAGER_PATH" ]; then
     warn "沒有安裝 kanade-manager：請把這個腳本存成檔案再執行（curl … -o kanade.sh && sudo bash kanade.sh）。"
@@ -609,12 +620,16 @@ RUN_USER=$q_user
 LOG=$q_log
 PIDFILE=\${KANADE_PIDFILE:-/run/$SERVICE.pid}
 
+# alive: the pidfile names this Kanade, running: a process with its command line, not a zombie. A
+# pid taken since by another program counts as stopped, and nothing is sent to it (review #130).
 alive() {
 	[ -r "\$PIDFILE" ] || return 1
 	pid=\$(cat "\$PIDFILE" 2>/dev/null)
-	[ -n "\$pid" ] && [ -r "/proc/\$pid/stat" ] || return 1
+	case "\$pid" in '' | *[!0-9]*) return 1 ;; esac
+	[ -r "/proc/\$pid/stat" ] || return 1
 	state=\$(sed 's/^.*) //' "/proc/\$pid/stat" | cut -d' ' -f1)
-	[ "\$state" != Z ] && [ "\$state" != X ]
+	[ "\$state" != Z ] && [ "\$state" != X ] || return 1
+	[ "\$(tr '\\0' '\\n' <"/proc/\$pid/cmdline" 2>/dev/null)" = "\$(printf '%s\\n' "\$BIN" -data "\$DATA" serve)" ]
 }
 
 start() {
@@ -994,7 +1009,12 @@ script_ok() {
   if [ -s "$dir/SHA256SUMS" ] && grep -q ' kanade.sh$' "$dir/SHA256SUMS"; then
     (cd "$dir" && grep ' kanade.sh$' SHA256SUMS | sha256sum -c --status) || return 1
   fi
-  bash -n "$dir/kanade.sh" 2>/dev/null && grep -q '^main "\$@"' "$dir/kanade.sh"
+  script_whole "$dir/kanade.sh"
+}
+
+# script_whole FILE: bash can read FILE, and it runs to the end (the last line calls main).
+script_whole() {
+  bash -n "$1" 2>/dev/null && grep -q '^main "\$@"' "$1"
 }
 
 # update_manager: kanade-manager becomes the release's script when it differs, without touching
@@ -1080,8 +1100,12 @@ do_update() {
   fi
   if service_start && wait_up && serving && [ "$(installed_version)" = "$latest" ]; then
     rm -f "$BIN.old"
-    install_manager "$tmp/kanade.sh"
     info "已更新到 $latest。"
+    if [ ! -s "$tmp/kanade.sh" ]; then
+      warn "無法下載這個版本的管理腳本，kanade-manager 沒有更新；之後可再執行 kanade-manager update。"
+    elif ! install_manager "$tmp/kanade.sh"; then
+      warn "kanade-manager 仍是原本的版本；之後可再執行 kanade-manager update。"
+    fi
     return 0
   fi
   error "新版本沒有正常啟動，退回 $current。"
