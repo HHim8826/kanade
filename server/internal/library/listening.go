@@ -44,7 +44,7 @@ func addListening(ctx context.Context, q querier, playID, at, ms int64, counted 
 	if err != nil {
 		return err
 	}
-	spans := spread(at, ms)
+	spans := spread(at, min(ms, maxHeardMS)) // plays from before the bound (review #102)
 	if counted && len(spans) == 0 {
 		spans = []span{{at - at%spanMS, 0}}
 	}

@@ -213,3 +213,54 @@ func TestBackfillListening(t *testing.T) {
 		t.Fatalf("spread again after clearing: %+v", days)
 	}
 }
+
+// Heard time is bounded by real time (review #102): a report of more than a day is refused before
+// any work, a first report hears no more than the file, and later ones no more than the time since
+// the playback started; what the play keeps and what the spans add up stay the same.
+func TestHeardTimeIsBounded(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	f := fixture{t, s}
+	r := f.song("a", "A", "Album", 1, 1) // a 60 s file
+	var asset int64
+	s.db.QueryRow(`SELECT asset_id FROM album_entries WHERE id = ?`, r.EntryID).Scan(&asset)
+	report := func(session string, seq, heard int64) error {
+		return s.RecordPlay(ctx, PlayReport{Session: session, AssetID: asset, ListenedMS: heard, PositionMS: 1, Seq: seq})
+	}
+	totals := func(session string) (heard, spans, rows int64) {
+		t.Helper()
+		s.db.QueryRow(`SELECT listened_ms FROM plays WHERE session = ?`, session).Scan(&heard)
+		s.db.QueryRow(`SELECT coalesce(sum(l.ms), 0), count(*) FROM listening l JOIN plays p ON p.id = l.play_id
+			WHERE p.session = ?`, session).Scan(&spans, &rows)
+		return
+	}
+	if err := report("year", 1, 365*24*60*60_000); err != ErrBadPlay {
+		t.Fatalf("a year heard: %v", err)
+	}
+	var n int64
+	s.db.QueryRow(`SELECT count(*) FROM plays`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("%d plays after a refused report", n)
+	}
+	// Within a day, but more than the file and the time since: kept to what could have been heard.
+	if err := report("first", 1, 20*60*60_000); err != nil {
+		t.Fatal(err)
+	}
+	if heard, spans, rows := totals("first"); heard != 60_000+heardSlackMS || spans != heard || rows > 1 {
+		t.Fatalf("first report: heard %d, spans %d in %d rows", heard, spans, rows)
+	}
+	if err := report("first", 2, 20*60*60_000); err != nil {
+		t.Fatal(err)
+	}
+	if heard, spans, _ := totals("first"); heard > 60_000+2*heardSlackMS || spans != heard {
+		t.Fatalf("second report: heard %d, spans %d", heard, spans)
+	}
+	// Hearing it again in the same playback counts, as far as the time since it started allows.
+	s.db.Exec(`UPDATE plays SET started_at = started_at - 600000 WHERE session = 'first'`)
+	if err := report("first", 3, 7*60_000); err != nil {
+		t.Fatal(err)
+	}
+	if heard, spans, _ := totals("first"); heard != 7*60_000 || spans != heard {
+		t.Fatalf("heard again: heard %d, spans %d", heard, spans)
+	}
+}

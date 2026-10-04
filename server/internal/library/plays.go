@@ -52,10 +52,18 @@ const offsetWindow = 12 * time.Hour
 
 var ErrBadPlay = errors.New("invalid play report")
 
+// Heard time is real time (review #102): no playback hears more than a day, and a playback hears no
+// more than the time since it started, give or take the reports' clocks (heardSlackMS). A first
+// report hears no more than the file, as playback reports from its start.
+const (
+	maxHeardMS   = 24 * 60 * 60_000
+	heardSlackMS = 2 * 60_000
+)
+
 // RecordPlay creates or updates the session's row. Reports may repeat or arrive out of order:
 // heard time only grows, and a counted or finished play stays so.
 func (s *Store) RecordPlay(ctx context.Context, r PlayReport) error {
-	if r.Session == "" || len(r.Session) > 64 || r.AssetID <= 0 || r.PositionMS < 0 || r.ListenedMS < 0 {
+	if r.Session == "" || len(r.Session) > 64 || r.AssetID <= 0 || r.PositionMS < 0 || r.ListenedMS < 0 || r.ListenedMS > maxHeardMS {
 		return ErrBadPlay
 	}
 	var trackID, duration int64
@@ -78,10 +86,6 @@ func (s *Store) RecordPlay(ctx context.Context, r PlayReport) error {
 		r.PositionMS = min(r.PositionMS, duration)
 	}
 	need := playThreshold(duration)
-	counted := 0
-	if need >= 0 && r.ListenedMS >= need {
-		counted = 1
-	}
 	finished := 0
 	if r.Finished {
 		finished = 1
@@ -111,12 +115,22 @@ func (s *Store) RecordPlay(ctx context.Context, r PlayReport) error {
 	}
 	defer tx.Rollback()
 	var before struct {
-		heard   int64
-		counted bool
+		heard, started int64
+		counted        bool
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT listened_ms, counted FROM plays WHERE session = ?`, r.Session).
-		Scan(&before.heard, &before.counted); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	err = tx.QueryRowContext(ctx, `SELECT listened_ms, started_at, counted FROM plays WHERE session = ?`, r.Session).
+		Scan(&before.heard, &before.started, &before.counted)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		r.ListenedMS = min(r.ListenedMS, max(duration, 0)+heardSlackMS)
+	case err != nil:
 		return err
+	default:
+		r.ListenedMS = min(r.ListenedMS, max(before.heard, at-min(before.started, at)+heardSlackMS))
+	}
+	counted := 0
+	if need >= 0 && r.ListenedMS >= need {
+		counted = 1
 	}
 	// A newer report (higher seq) sets the position and the time, never earlier than the last; an
 	// older one arriving late changes neither, but can only move the start earlier. Heard time,

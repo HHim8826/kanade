@@ -112,6 +112,7 @@ func TestPlayReportsKeepTheirOrder(t *testing.T) {
 	s.Publish(ctx, drama, EntryInput{Title: "Drama", Kind: "spoken"})
 	now := time.Now().UnixMilli()
 	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 60_000, ListenedMS: 60_000, Seq: 1, At: now})
+	s.db.Exec(`UPDATE plays SET started_at = started_at - 600000 WHERE session = 'a'`) // heard over ten minutes (review #102)
 	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 600_000, ListenedMS: 600_000, Seq: 3, At: now + 1})
 	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, PositionMS: 300_000, ListenedMS: 300_000, Seq: 2, At: now}) // late
 	if pos, _ := s.ResumePosition(ctx, drama); pos != 600_000 {
