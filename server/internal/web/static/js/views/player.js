@@ -53,15 +53,12 @@ function ModeButton({ s, size }) {
     className=${'mode' + (s.mode !== 'order' ? ' on' : '')} onClick=${cycleMode} />`;
 }
 
-// Volume: mute and the slider. On the now-playing page (ends) it reads as a scale, a small speaker
-// at the quiet end (muting) and a big one at the loud end, so the row is even on both sides.
-function Volume({ s, ends }) {
+function Volume({ s }) {
   const level = s.muted ? 0 : s.volume;
   return html`<div class="volume">
-    <${IconButton} icon=${level === 0 ? 'volumeOff' : ends ? 'volumeDown' : 'volume'} label=${s.muted ? '取消靜音' : '靜音'} pressed=${s.muted} onClick=${toggleMute} />
+    <${IconButton} icon=${level === 0 ? 'volumeOff' : 'volume'} label=${s.muted ? '取消靜音' : '靜音'} pressed=${s.muted} onClick=${toggleMute} />
     <input type="range" min="0" max="1" step="0.01" value=${level} style=${{ '--p': level * 100 + '%' }} aria-label="音量"
       aria-valuetext=${Math.round(level * 100) + '%'} onInput=${(e) => setVolume(parseFloat(e.target.value))} />
-    ${ends && html`<span class="volume-loud" aria-hidden="true"><${Icon} name="volume" /></span>`}
   </div>`;
 }
 
@@ -143,7 +140,7 @@ export function NowPlaying() {
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
           <${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} />
         </div>
-        <${Volume} s=${s} ends />
+        <${Volume} s=${s} />
         <div class="np-tools">
           <${SleepButton} s=${s} />
           ${item.trackId && html`<button class="btn text" onClick=${() => addBookmark(item)} aria-label=${`在 ${fmtTime(shownTime(s) * 1000)} 加書籤`}>
