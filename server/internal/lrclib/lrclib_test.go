@@ -227,7 +227,7 @@ func TestNoUsableLyricsStillFallsBack(t *testing.T) {
 		narrow := `[{"id": 201, "trackName": "Undine", "artistName": "Makino Yui", "duration": 200, ` + empty + `}]`
 		c, asked := fakeSearch(t, map[string]string{
 			enc("track_name", "Undine", "artist_name", "Makino Yui"): narrow,
-			enc("track_name", "Undine"):                             "[" + good + "]",
+			enc("track_name", "Undine"):                              "[" + good + "]",
 		})
 		list, err := c.Find(ctx, Song{Title: "Undine", Artist: "Makino Yui", DurationMS: 200_000})
 		if err != nil || len(list) != 1 || list[0].ID != 202 {
