@@ -177,10 +177,11 @@ const fmtLeft = (ms) => {
 };
 
 // SleepButton sets, extends or cancels the sleep timer, and shows what is left (compact: in the
-// player bar, only while it is on).
+// player bar, only while it is on, as a short countdown, an icon alone on a phone: review #110).
 function SleepButton({ s, compact }) {
   const now = useNow(!!(s.sleep && s.sleep.until));
   const label = !s.sleep ? '睡眠定時' : s.sleep.endOfTrack ? '播完這首停止' : `${fmtLeft(s.sleep.until - now)} 後停止`;
+  const short = s.sleep && (s.sleep.endOfTrack ? '本首' : fmtLeft(s.sleep.until - now));
   const menu = (e) => openMenu(e, s.sleep ? [
     s.sleep.until && { icon: 'add', label: '延長 15 分鐘', onClick: () => extendSleep(15) },
     { icon: 'close', label: '取消睡眠定時', onClick: () => { cancelSleep(); toast('已取消睡眠定時'); } },
@@ -190,7 +191,7 @@ function SleepButton({ s, compact }) {
     { icon: 'next', label: '播完這首後停止', onClick: sleepAfterTrack },
   ]);
   return html`<button class=${'btn ' + (s.sleep ? 'tonal' : 'text') + (compact ? ' sleep-chip' : '')} onClick=${menu}
-    aria-label=${s.sleep ? `睡眠定時：${label}` : '睡眠定時'}><${Icon} name="bedtime" />${!compact || s.sleep ? label : ''}</button>`;
+    aria-label=${s.sleep ? `睡眠定時：${label}` : '睡眠定時'}><${Icon} name="bedtime" />${compact ? short && html`<span class="sleep-left">${short}</span>` : label}</button>`;
 }
 
 function SleepDialog({ close }) {
