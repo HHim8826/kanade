@@ -92,6 +92,7 @@ export function Home() {
       <div class="actions">
         <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
         <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="album" />隨便聽一張</button>
+        <a class="btn text" href=${href('stats')}><${Icon} name="history" />我的聆聽</a>
       </div>
     </div>
     ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}

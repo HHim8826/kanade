@@ -103,11 +103,26 @@ func (s *Store) RecordPlay(ctx context.Context, r PlayReport) error {
 		}
 		at = min(now, r.At+offset)
 	}
+	// The play and what it adds to the listening spans change together (review #93): heard time
+	// before and after the report tell what this one adds.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var before struct {
+		heard   int64
+		counted bool
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT listened_ms, counted FROM plays WHERE session = ?`, r.Session).
+		Scan(&before.heard, &before.counted); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	// A newer report (higher seq) sets the position and the time, never earlier than the last; an
 	// older one arriving late changes neither, but can only move the start earlier. Heard time,
 	// counting and finishing only ever grow, whatever the order. skew keeps the session's smallest
 	// gap, for the offsets of later reports.
-	_, err = s.db.ExecContext(ctx, `INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at,
+	_, err = tx.ExecContext(ctx, `INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at,
 		position_ms, listened_ms, duration_ms, counted, finished, seq, skew, client) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?15)
 		ON CONFLICT (session) DO UPDATE SET
 			updated_at = CASE WHEN excluded.seq = 0 THEN ?13
@@ -123,7 +138,20 @@ func (s *Store) RecordPlay(ctx context.Context, r PlayReport) error {
 			finished = max(plays.finished, excluded.finished)
 		WHERE plays.asset_id = excluded.asset_id`,
 		r.Session, r.AssetID, trackID, album, at, r.PositionMS, r.ListenedMS, duration, counted, finished, r.Seq, sample, now, need, r.Client)
-	return err
+	if err != nil {
+		return err
+	}
+	var id, heard int64
+	var nowCounted bool
+	if err := tx.QueryRowContext(ctx, `SELECT id, listened_ms, counted FROM plays WHERE session = ?`, r.Session).Scan(&id, &heard, &nowCounted); err != nil {
+		return err
+	}
+	if added, reached := heard-before.heard, nowCounted && !before.counted; added > 0 || reached {
+		if err := addListening(ctx, tx, id, at, max(added, 0), reached, false); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ResumePosition is where an unfinished recent playback of this file stopped, or 0.

@@ -20,6 +20,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	_ "time/tzdata" // listening statistics by the listener's time zone, also where the system has none
 
 	"github.com/HHim8826/kanade/server/internal/api"
 	"github.com/HHim8826/kanade/server/internal/auth"
@@ -156,6 +157,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	drive := gdrive.New(d, gdrive.RedirectFor(cfg.PublicURL))
 	lib := library.New(d)
 	if err := lib.EnsureSearchIndex(ctx); err != nil {
+		return err
+	}
+	if err := lib.BackfillListening(ctx); err != nil { // plays from before the listening spans (review #93)
 		return err
 	}
 	store := &settings.Store{DB: d}
