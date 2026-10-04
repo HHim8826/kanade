@@ -24,6 +24,12 @@ var migrations embed.FS
 
 // Open creates the file with mode 0600 if needed (it holds OAuth tokens) and migrates it.
 func Open(ctx context.Context, path string) (*sql.DB, error) {
+	return OpenVersion(ctx, path, 1<<30)
+}
+
+// OpenVersion is Open with the migrations up to version only: a database as an older Kanade left
+// it, for tests of upgrading.
+func OpenVersion(ctx context.Context, path string, version int) (*sql.DB, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return nil, err
@@ -39,14 +45,14 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(4)
-	if err := migrate(ctx, db); err != nil {
+	if err := migrate(ctx, db, version); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return db, nil
 }
 
-func migrate(ctx context.Context, db *sql.DB) error {
+func migrate(ctx context.Context, db *sql.DB, upTo int) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT`); err != nil {
 		return err
@@ -66,7 +72,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version = ?`, version).Scan(&applied); err != nil {
 			return err
 		}
-		if applied > 0 {
+		if applied > 0 || version > upTo {
 			continue
 		}
 		body, err := migrations.ReadFile(name)

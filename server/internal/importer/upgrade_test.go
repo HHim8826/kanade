@@ -14,22 +14,64 @@ import (
 )
 
 // toVersion22 takes a database back to how migration 22 left it, the data as the importer of then
-// wrote it: no album_scopes, no batch root, no derived marks in the plans.
+// wrote it: the tables and columns later migrations added are dropped (whatever they are, by a
+// database migrated up to 22 alone), and the plans lose their derived marks.
 func toVersion22(t *testing.T, d *sql.DB) {
 	t.Helper()
-	for _, q := range []string{
-		`DROP TABLE album_scopes`,
-		`ALTER TABLE import_batches DROP COLUMN root`,
-		`ALTER TABLE downloads DROP COLUMN uploaded_before`,
-		`DROP TABLE album_sections`,
-		`ALTER TABLE downloads DROP COLUMN grouping`,
-		`UPDATE import_items SET plan = json_remove(plan, '$.derived_artist', '$.tagged.Derived', '$.anchor.Derived') WHERE plan IS NOT NULL`,
-		`DELETE FROM schema_migrations WHERE version > 22`,
-	} {
-		if _, err := d.Exec(q); err != nil {
+	ctx := context.Background()
+	ref, err := db.OpenVersion(ctx, filepath.Join(t.TempDir(), "v22.sqlite"), 22)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ref.Close()
+	columns := func(q interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	}) map[string]map[string]bool {
+		out := map[string]map[string]bool{}
+		rows, err := q.QueryContext(ctx, `SELECT m.name, p.name FROM sqlite_master m, pragma_table_info(m.name) p
+			WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var table, col string
+			rows.Scan(&table, &col)
+			if out[table] == nil {
+				out[table] = map[string]bool{}
+			}
+			out[table][col] = true
+		}
+		return out
+	}
+	then := columns(ref)
+	conn, err := d.Conn(ctx) // one connection, so foreign keys stay off while tables go
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	exec := func(q string) {
+		t.Helper()
+		if _, err := conn.ExecContext(ctx, q); err != nil {
 			t.Fatalf("%s: %v", q, err)
 		}
 	}
+	exec(`PRAGMA foreign_keys = OFF`)
+	for table, cols := range columns(conn) {
+		if then[table] == nil {
+			exec(`DROP TABLE "` + table + `"`)
+			continue
+		}
+		for col := range cols {
+			if !then[table][col] {
+				exec(`ALTER TABLE "` + table + `" DROP COLUMN "` + col + `"`)
+			}
+		}
+	}
+	exec(`UPDATE import_items SET plan = json_remove(plan, '$.derived_artist', '$.tagged.Derived', '$.anchor.Derived', '$.folders')
+		WHERE plan IS NOT NULL`)
+	exec(`DELETE FROM schema_migrations WHERE version > 22`)
+	exec(`PRAGMA foreign_keys = ON`)
 }
 
 // A database from before album_scopes keeps telling an album artist worked out from the songs from
