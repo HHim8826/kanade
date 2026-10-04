@@ -156,10 +156,11 @@ function load(index, autoplay = true, again = false) {
       if (session && session.item === item && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
   }
-  player.set({ index, time: 0, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: true });
+  player.set({ index, time: (pendingSeek || 0) / 1000, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay });
   audio.src = streamURL(item.assetId);
   if (autoplay) audio.play().catch(() => player.set({ playing: false, buffering: false }));
   updateMediaSession(item);
+  savePlace();
 }
 
 function seekWhenReady(ms) {
@@ -481,8 +482,92 @@ export function playAfterCurrent(i) {
 
 // resetPlayer stops playback and forgets the queue (logging out, clearing the queue). With report,
 // the playback so far is reported first.
+// ---- this device's playback, kept across reloads ----
+// The queue, the song and the place in it are kept in this browser, so reloading the page (or
+// opening it again) brings the player back where it was, paused. Logging out forgets them.
+const SESSION = 'kanade.playback', PLACE = 'kanade.playback.at';
+const MAX_SAVED = 500; // songs kept around the one playing
+let restored = false; // nothing is saved before what was saved is brought back (the empty start would erase it)
+
+function saveSession() {
+  if (!restored) return;
+  const s = player.get();
+  try {
+    if (!s.queue.length || s.index < 0) {
+      localStorage.removeItem(SESSION);
+      localStorage.removeItem(PLACE);
+      return;
+    }
+    const start = Math.max(0, Math.min(s.index - 100, s.queue.length - MAX_SAVED));
+    const strip = ({ resumeMs, ...it }) => it;
+    localStorage.setItem(SESSION, JSON.stringify({
+      queue: s.queue.slice(start, start + MAX_SAVED).map(strip), index: s.index - start,
+      original: s.original && s.original.length <= MAX_SAVED ? s.original.map(strip) : null,
+      from: s.from, radio: s.radio,
+    }));
+  } catch { /* storage full or blocked: kept for this page only */ }
+}
+
+// savePlace keeps where in the song playback is (a small key of its own, written often).
+function savePlace() {
+  const s = player.get(), item = s.queue[s.index];
+  if (!restored || !item) return;
+  try {
+    localStorage.setItem(PLACE, JSON.stringify({ qid: item.qid, t: pendingSeek !== null ? pendingSeek / 1000 : audio.currentTime || 0,
+      d: isFinite(audio.duration) && audio.duration > 0 ? audio.duration : (item.durationMs || 0) / 1000 }));
+  } catch { /* as above */ }
+}
+
+let savedShape = null, saveTimer = 0;
+player.subscribe((s) => { // the queue changed: saved shortly after (a burst of changes is written once)
+  const shape = [s.queue, s.index, s.original, s.from, s.radio];
+  if (savedShape && shape.every((v, i) => v === savedShape[i])) return;
+  savedShape = shape;
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(saveSession, 300);
+});
+setInterval(() => !audio.paused && savePlace(), 5000);
+for (const e of ['pause', 'seeked']) audio.addEventListener(e, savePlace);
+addEventListener('pagehide', () => { saveSession(); savePlace(); });
+document.addEventListener('visibilitychange', () => document.visibilityState === 'hidden' && (saveSession(), savePlace()));
+
+// restoreSession brings back this browser's last queue, paused at the place it was left; a song
+// played to its end comes back from its start. Called once logged in.
+export function restoreSession() {
+  if (restored) return;
+  restored = true;
+  if (player.get().queue.length) return;
+  let saved, at;
+  try {
+    saved = JSON.parse(localStorage.getItem(SESSION) || 'null');
+    at = JSON.parse(localStorage.getItem(PLACE) || 'null');
+  } catch {
+    return;
+  }
+  const ok = (list) => Array.isArray(list) && list.length > 0 && list.every((q) => q && q.assetId > 0 && q.qid > 0);
+  if (!saved || !ok(saved.queue)) return;
+  const original = ok(saved.original) ? saved.original : null;
+  const index = Math.min(Math.max(Number(saved.index) || 0, 0), saved.queue.length - 1);
+  qseq = Math.max(qseq, ...saved.queue.map((q) => q.qid), ...(original || []).map((q) => q.qid));
+  const item = saved.queue[index];
+  let t = at && at.qid === item.qid ? Number(at.t) || 0 : 0;
+  const d = (at && at.qid === item.qid && Number(at.d)) || (item.durationMs || 0) / 1000;
+  if (d && t > d - 2) t = 0;
+  item.resumeMs = Math.round(t * 1000);
+  player.set({ queue: saved.queue, index, original, from: saved.from || 0, radio: saved.radio || null, radioError: null });
+  load(index, false);
+}
+
+function forgetSession() {
+  try {
+    localStorage.removeItem(SESSION);
+    localStorage.removeItem(PLACE);
+  } catch { /* nothing kept */ }
+}
+
 export function resetPlayer(withReport = true) {
   if (withReport) report(false, true);
+  forgetSession();
   gen++;
   session = null;
   pendingSeek = null;

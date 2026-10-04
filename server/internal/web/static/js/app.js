@@ -2,7 +2,7 @@ import { render } from '../vendor/preact.module.js';
 import { useEffect, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
-import { player, resetPlayer } from './player.js';
+import { player, resetPlayer, restoreSession } from './player.js';
 import './scrollbars.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
@@ -65,7 +65,9 @@ function App() {
   // Leaving a page closes the full-screen player, so it never hides the page you went to.
   useEffect(() => player.set({ nowPlayingOpen: false }), [route]);
   useEffect(() => {
-    if (auth === 'in') loadFavorites();
+    if (auth !== 'in') return;
+    loadFavorites();
+    restoreSession(); // the queue this browser had, paused where it was
   }, [auth]);
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
