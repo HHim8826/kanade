@@ -70,8 +70,8 @@ export function FavoritesTab({ data }) {
         <${SelectToggle} sel=${songs} />
       </div></div>
       <${TrackList} items=${items} showAlbum sel=${songs} />`}
-    <${SelectBar} sel=${albums} noun="張" loaded=${data.albums.map((a) => a.id)}><${AlbumActions} sel=${albums} albums=${data.albums} /><//>
-    <${SelectBar} sel=${songs} noun="首" loaded=${items.map((it) => it.trackId)}><${SongActions} sel=${songs} items=${items} /><//>`;
+    <${SelectBar} sel=${albums} noun="張" loaded=${data.albums.map((a) => a.id)} items=${data.albums}><${AlbumActions} sel=${albums} /><//>
+    <${SelectBar} sel=${songs} noun="首" loaded=${items.map((it) => it.trackId)} items=${items}><${SongActions} sel=${songs} /><//>`;
 }
 
 export function Playlist({ id }) {

@@ -208,8 +208,9 @@ export function Library({ tab = 'albums', filter = '' }) {
     ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
     ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
-    ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}>
-      ${tab === 'albums' ? html`<${AlbumActions} sel=${sel} albums=${list} />` : html`<${SongActions} sel=${sel} items=${list.map(fromTrack)} />`}
+    ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}
+      items=${tab === 'albums' ? list : list.map(fromTrack)}>
+      ${tab === 'albums' ? html`<${AlbumActions} sel=${sel} />` : html`<${SongActions} sel=${sel} />`}
     <//>`}
   </section>`;
 }
@@ -275,8 +276,8 @@ export function Album({ id }) {
       <${TrackList} items=${items.filter((i) => i.disc === d)} queue=${items} showNumber sel=${sel} selKey=${(it) => it.entryId}
         menuExtra=${(it) => [{ icon: 'delete', label: '從專輯移除', onClick: () => removeFromAlbum(a, it) }]} />
     </div>`)}
-    <${SelectBar} sel=${sel} noun="首" loaded=${items.map((i) => i.entryId)}>
-      <${SongActions} sel=${sel} items=${items} album=${a} />
+    <${SelectBar} sel=${sel} noun="首" loaded=${items.map((i) => i.entryId)} items=${items}>
+      <${SongActions} sel=${sel} album=${a} />
     <//>
     ${a.sidecars.length > 0 && html`<h2 class="section-title">附屬檔案</h2>
       <ul class="items">${a.sidecars.map((c) => html`<li key=${c.id}>

@@ -39,9 +39,9 @@ async function albumItems(ids) {
   return list.flatMap((a) => a.entries.map((e) => fromEntry(e, a)));
 }
 
-export function AlbumActions({ sel, albums }) {
+export function AlbumActions({ sel }) {
   const ids = sel.keys;
-  const chosen = ids.map((id) => albums.find((a) => a.id === id)).filter(Boolean);
+  const chosen = sel.chosen();
   const songs = (f) => albumItems(ids).then(f, report);
   return html`
     <${Btn} icon="play" label="播放" onClick=${() => songs((items) => playQueue(items, 0))} />
@@ -167,10 +167,10 @@ function RemoveAlbums({ ids, close, onDone }) {
 
 // ---- songs ----
 
-// SongActions acts on selected songs (items: queue items). On an album page (album), entries can
-// be moved to another section or album, or taken off it.
-export function SongActions({ sel, items, album }) {
-  const chosen = sel.keys.map((k) => items.find((it) => (album ? it.entryId : it.trackId) === k)).filter(Boolean);
+// SongActions acts on selected songs (queue items, remembered by the selection). On an album page
+// (album), entries can be moved to another section or album, or taken off it.
+export function SongActions({ sel, album }) {
+  const chosen = sel.chosen();
   const ids = [...new Set(chosen.map((it) => it.trackId))];
   const removeFrom = () => post(`/albums/${album.id}/remove`, { entries: chosen.map((it) => it.entryId) })
     .then((res) => { if (done(res, `已從專輯移除 ${chosen.length} 首，歌曲仍在「歌曲」分頁`)) sel.stop(); }, report);

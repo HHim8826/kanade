@@ -1,4 +1,4 @@
-import { useEffect, useState } from '../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../vendor/hooks.module.js';
 import { IconButton, html } from './ui.js';
 
 // Selecting several albums or songs of a list to act on them at once (review #83). What is
@@ -6,15 +6,28 @@ import { IconButton, html } from './ui.js';
 // loading more of the list keeps it; another scope (tab, filter, search, album) starts over. In
 // selection mode a click or tap checks an item instead of opening or playing it; Ctrl or ⌘ click
 // starts selecting from anywhere, and Shift click takes the range from the item clicked last.
+// The items themselves are remembered too (SelectBar hands them over as the list shows them), so an
+// action takes every selected item even after the list was loaded again with fewer pages, and the
+// latest data of each (review #89).
 export function useSelection(scope) {
   const [s, setS] = useState({ on: false, keys: new Set(), last: -1 });
-  useEffect(() => setS({ on: false, keys: new Set(), last: -1 }), [scope]);
+  const seen = useRef(new Map()); // key -> item, as the list last showed it
+  useEffect(() => {
+    setS({ on: false, keys: new Set(), last: -1 });
+    seen.current = new Map();
+  }, [scope]);
   const update = (f) => setS((v) => ({ ...v, ...f(v) }));
   return {
     on: s.on,
     count: s.keys.size,
     keys: [...s.keys],
     has: (k) => s.keys.has(k),
+    // remember keeps the items of the list (keys[i] is items[i]'s key).
+    remember(keys, items) {
+      keys.forEach((k, i) => seen.current.set(k, items[i]));
+    },
+    // chosen is every selected item, in the order selected.
+    chosen: () => [...s.keys].map((k) => seen.current.get(k)).filter((it) => it !== undefined),
     start: () => update(() => ({ on: true })),
     stop: () => setS({ on: false, keys: new Set(), last: -1 }),
     clear: () => update(() => ({ keys: new Set(), last: -1 })),
@@ -52,14 +65,19 @@ export const SelectToggle = ({ sel }) => html`<button class=${'btn ' + (sel.on ?
   onClick=${sel.on ? sel.stop : sel.start}>${sel.on ? '完成' : '選取'}</button>`;
 
 // SelectBar stays at the bottom of the page while selecting: how many are selected, selecting all
-// that is loaded (more says the list has more not loaded yet), and the actions.
-export function SelectBar({ sel, noun, loaded, more, children }) {
+// that is loaded (more says the list has more not loaded yet), and the actions. items are the
+// loaded items (loaded holds their keys), which the selection remembers for the actions.
+export function SelectBar({ sel, noun, loaded, items, more, children }) {
+  sel.remember(loaded, items);
   if (!sel.on) return null;
   const all = loaded.length > 0 && loaded.every((k) => sel.has(k));
+  const shown = new Set(loaded);
+  const away = sel.keys.filter((k) => !shown.has(k)).length; // selected before the list was loaded again
   return html`<div class="select-bar" role="toolbar" aria-label="批次操作">
     <div class="select-info">
       <${IconButton} icon="close" label="結束選取" onClick=${sel.stop} />
-      <span class="grow"><b>已選 ${sel.count} ${noun}</b>${more ? html`<span class="sub">　還有沒載入的；全選只含已載入的</span>` : ''}</span>
+      <span class="grow"><b>已選 ${sel.count} ${noun}</b>${away ? html`<span class="sub" title=${`其中 ${away} ${noun}在清單重新載入後沒有顯示，操作仍包含它們`}>　含 ${away} ${noun}未顯示，仍會處理</span>`
+        : more ? html`<span class="sub">　還有沒載入的；全選只含已載入的</span>` : ''}</span>
       <button class="btn text" onClick=${() => sel.setMany(loaded, !all)}>${all ? '全不選' : `全選已載入的 ${loaded.length} ${noun}`}</button>
     </div>
     ${sel.count > 0 ? html`<div class="select-actions">${children}</div>` : html`<div class="sub select-hint">點選要處理的項目；按住 Shift 可以一次選一段。</div>`}
