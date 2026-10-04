@@ -4,7 +4,7 @@
 #
 # Release files, which scripts/kanade.sh downloads:
 #   kanade-linux-amd64.tar.gz, kanade-linux-arm64.tar.gz   the program
-#   SHA256SUMS                                              their checksums
+#   SHA256SUMS                                              their checksums and the script's
 #   VERSION                                                 the tag, for update checks
 #   kanade.sh                                               the install and manage script
 
@@ -52,7 +52,7 @@ jobs:
           done
           cp ../scripts/kanade.sh ../dist/
           echo "$version" > ../dist/VERSION
-          cd ../dist && sha256sum kanade-linux-*.tar.gz > SHA256SUMS && cat SHA256SUMS
+          cd ../dist && sha256sum kanade-linux-*.tar.gz kanade.sh > SHA256SUMS && cat SHA256SUMS
 
       - name: Release
         if: github.ref_type == 'tag'

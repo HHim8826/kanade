@@ -7,10 +7,12 @@
 #
 # 不帶參數時顯示選單；也可以直接下指令：
 #   install | update | uninstall | status | start | stop | restart | log |
-#   password | backup | restore | config | tools | version | help
+#   autostart | password | backup | restore | config | tools | version | help
 #
-# 需要：Linux（amd64 或 arm64）、root、curl、tar、sha256sum。服務管理用 systemd 或
-# OpenRC；兩者都沒有時（例如容器）在背景執行。安裝後可用 kanade-manager 開啟這個選單。
+# 需要：Linux（amd64 或 arm64）、root、curl、tar、sha256sum。服務管理用 systemd、OpenRC 或
+# SysV（/etc/init.d 與 rc 連結）；都沒有時（例如容器）在背景執行，有 cron 時可用 @reboot 開機
+# 啟動。安裝時會設好開機自動啟動，之後可用 kanade-manager autostart 開關。update 會一併把
+# kanade-manager 換成同一版的腳本。安裝後可用 kanade-manager 開啟這個選單。
 #
 # aria2 和 FFmpeg 先用系統的套件管理員安裝；套件庫沒有時（RHEL 系、Amazon Linux 等）改用
 # GitHub 上的靜態版，放在安裝位置的 tools/。之後補裝：kanade-manager tools。
@@ -24,7 +26,7 @@
 #   KANADE_VERSION=v1.2.3        指定版本（預設最新）
 #   KANADE_DIR=/opt/kanade       安裝位置（資料在其中的 data/）
 #   KANADE_DEPS=skip             不安裝 aria2 和 FFmpeg
-#   KANADE_INIT=systemd|openrc|none  指定服務管理方式
+#   KANADE_INIT=systemd|openrc|sysv|none  指定服務管理方式
 #   KANADE_RELEASE_URL=…         從其他位置下載（目錄內直接放 VERSION、SHA256SUMS 和壓縮檔）
 #
 ###############################################################################
@@ -36,6 +38,9 @@ MANAGER_PATH="/usr/local/bin/kanade-manager"
 STATE_FILE="/etc/kanade/manager.conf"
 SERVICE="kanade"
 RUN_USER="kanade"
+SYSTEMD_DIR="/etc/systemd/system"
+INIT_D="/etc/init.d"
+RC_ROOT="/etc" # rc0.d … rc6.d
 
 # Static aria2 and FFmpeg for systems whose packages have neither: the builds Kanade is developed
 # and tested with. aria2 publishes no Linux build; this one is pinned by checksum. FFmpeg's is the
@@ -127,13 +132,22 @@ detect_init() {
     INIT_TYPE="systemd"
   elif command -v rc-service >/dev/null 2>&1 && command -v openrc-run >/dev/null 2>&1; then
     INIT_TYPE="openrc"
+  elif sysv_available; then
+    INIT_TYPE="sysv"
   else
     INIT_TYPE="none"
   fi
   case "$INIT_TYPE" in
-  systemd | openrc | none) ;;
-  *) die "KANADE_INIT 只能是 systemd、openrc 或 none。" ;;
+  systemd | openrc | sysv | none) ;;
+  *) die "KANADE_INIT 只能是 systemd、openrc、sysv 或 none。" ;;
   esac
+}
+
+# sysv_available: the machine boots with SysV init, which runs the /etc/init.d scripts linked from
+# /etc/rc2.d … rc5.d (sysvinit; also virtual machines whose own init runs those links). A
+# container's first process is not init, so it does not count.
+sysv_available() {
+  [ "$(cat /proc/1/comm 2>/dev/null)" = "init" ] && [ -d "$INIT_D" ] && [ -d "$RC_ROOT/rc2.d" ]
 }
 
 need_tools() {
@@ -501,7 +515,7 @@ install_manager() {
 write_service() {
   case "$INIT_TYPE" in
   systemd)
-    cat >"/etc/systemd/system/$SERVICE.service" <<EOF
+    cat >"$SYSTEMD_DIR/$SERVICE.service" <<EOF
 [Unit]
 Description=Kanade music server
 Documentation=https://github.com/$REPO
@@ -532,7 +546,7 @@ EOF
     systemctl enable "$SERVICE" >/dev/null 2>&1
     ;;
   openrc)
-    cat >"/etc/init.d/$SERVICE" <<EOF
+    cat >"$INIT_D/$SERVICE" <<EOF
 #!/sbin/openrc-run
 name="kanade"
 description="Kanade music server"
@@ -551,33 +565,200 @@ depend() {
 	use dns logger
 }
 EOF
-    chmod 755 "/etc/init.d/$SERVICE"
+    chmod 755 "$INIT_D/$SERVICE"
     rc-update add "$SERVICE" default >/dev/null 2>&1
     ;;
+  sysv)
+    write_sysv_script
+    autostart_on
+    ;;
   none)
-    if command -v crontab >/dev/null 2>&1 && confirm "這台機器沒有 systemd 或 OpenRC。要加一個 @reboot 排程，開機時自動啟動嗎？" y; then
-      (crontab -l 2>/dev/null | grep -v "kanade-manager start"; echo "@reboot $MANAGER_PATH start >/dev/null 2>&1") | crontab -
+    if command -v crontab >/dev/null 2>&1 && confirm "這台機器沒有 systemd、OpenRC 或 SysV。要加一個 @reboot 排程，開機時自動啟動嗎？" y; then
+      autostart_on
     fi
     ;;
   esac
 }
 
-remove_service() {
+# write_sysv_script: /etc/init.d/kanade for SysV init. It starts the service as its account in the
+# background and keeps its process ID in /run; a process that exited but was never reaped (a
+# zombie) counts as stopped.
+write_sysv_script() {
+  local q_bin q_data q_dir q_user q_log
+  q_bin=$(printf '%q' "$BIN")
+  q_data=$(printf '%q' "$DATA_DIR")
+  q_dir=$(printf '%q' "$INSTALL_DIR")
+  q_user=$(printf '%q' "$RUN_USER")
+  q_log=$(printf '%q' "$DATA_DIR/logs/stdout.log")
+  cat >"$INIT_D/$SERVICE" <<EOF
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          $SERVICE
+# Required-Start:    \$remote_fs \$network
+# Required-Stop:     \$remote_fs \$network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Kanade music server
+### END INIT INFO
+# Written by kanade-manager (https://github.com/$REPO).
+
+BIN=$q_bin
+DATA=$q_data
+DIR=$q_dir
+RUN_USER=$q_user
+LOG=$q_log
+PIDFILE=\${KANADE_PIDFILE:-/run/$SERVICE.pid}
+
+alive() {
+	[ -r "\$PIDFILE" ] || return 1
+	pid=\$(cat "\$PIDFILE" 2>/dev/null)
+	[ -n "\$pid" ] && [ -r "/proc/\$pid/stat" ] || return 1
+	state=\$(sed 's/^.*) //' "/proc/\$pid/stat" | cut -d' ' -f1)
+	[ "\$state" != Z ] && [ "\$state" != X ]
+}
+
+start() {
+	if alive; then
+		echo "kanade is already running"
+		return 0
+	fi
+	mkdir -p "\$DATA/logs" && chown "\$RUN_USER:\$RUN_USER" "\$DATA/logs" 2>/dev/null
+	cd "\$DIR" || return 1
+	cmd='exec nohup "\$0" -data "\$1" serve >>"\$2" 2>&1 </dev/null & echo \$!'
+	if [ "\$(id -un)" = "\$RUN_USER" ]; then
+		sh -c "\$cmd" "\$BIN" "\$DATA" "\$LOG" >"\$PIDFILE"
+	elif command -v runuser >/dev/null 2>&1; then
+		runuser -u "\$RUN_USER" -- sh -c "\$cmd" "\$BIN" "\$DATA" "\$LOG" >"\$PIDFILE"
+	else
+		su -s /bin/sh "\$RUN_USER" -c "sh -c '\$cmd' \$BIN \$DATA \$LOG" >"\$PIDFILE"
+	fi
+	sleep 1
+	alive
+}
+
+stop() {
+	if alive; then
+		pid=\$(cat "\$PIDFILE")
+		kill -TERM "\$pid" 2>/dev/null
+		i=0
+		while alive && [ \$i -lt 60 ]; do
+			sleep 1
+			i=\$((i + 1))
+		done
+		if alive; then
+			kill -KILL "\$pid" 2>/dev/null
+			sleep 1
+		fi
+	fi
+	rm -f "\${PIDFILE:?}"
+}
+
+case "\$1" in
+start) start ;;
+stop) stop ;;
+restart | force-reload) stop && start ;;
+status)
+	if alive; then
+		echo "kanade is running (pid \$(cat "\$PIDFILE"))"
+	else
+		echo "kanade is not running"
+		exit 3
+	fi
+	;;
+*)
+	echo "Usage: \$0 {start|stop|restart|status}" >&2
+	exit 2
+	;;
+esac
+EOF
+  chmod 755 "$INIT_D/$SERVICE"
+}
+
+# ---- starting at boot ----
+
+autostart_enabled() {
   case "$INIT_TYPE" in
-  systemd)
-    systemctl disable "$SERVICE" >/dev/null 2>&1
-    rm -f "/etc/systemd/system/$SERVICE.service"
-    systemctl daemon-reload
+  systemd) systemctl is-enabled --quiet "$SERVICE" 2>/dev/null ;;
+  openrc) rc-update show default 2>/dev/null | grep -qw "$SERVICE" ;;
+  sysv) compgen -G "$RC_ROOT/rc[2-5].d/S[0-9][0-9]$SERVICE" >/dev/null ;;
+  none) command -v crontab >/dev/null 2>&1 && crontab -l 2>/dev/null | grep -q "kanade-manager start" ;;
+  esac
+}
+
+autostart_on() {
+  case "$INIT_TYPE" in
+  systemd) systemctl enable "$SERVICE" >/dev/null 2>&1 ;;
+  openrc) rc-update add "$SERVICE" default >/dev/null 2>&1 ;;
+  sysv)
+    if command -v update-rc.d >/dev/null 2>&1 && [ "$RC_ROOT" = /etc ]; then
+      update-rc.d "$SERVICE" defaults >/dev/null 2>&1 && return 0
+    fi
+    # The init script's rc links: S in the levels that run it, K in the others. (Written in plain
+    # loops: some machines have no /dev/fd for process substitution.)
+    local l
+    for l in 2 3 4 5; do
+      if [ -d "$RC_ROOT/rc$l.d" ]; then ln -sf "../init.d/$SERVICE" "$RC_ROOT/rc$l.d/S50$SERVICE"; fi
+    done
+    for l in 0 1 6; do
+      if [ -d "$RC_ROOT/rc$l.d" ]; then ln -sf "../init.d/$SERVICE" "$RC_ROOT/rc$l.d/K01$SERVICE"; fi
+    done
+    autostart_enabled
     ;;
-  openrc)
-    rc-update del "$SERVICE" default >/dev/null 2>&1
-    rm -f "/etc/init.d/$SERVICE"
+  none)
+    command -v crontab >/dev/null 2>&1 || return 1
+    (crontab -l 2>/dev/null | grep -v "kanade-manager start"; echo "@reboot $MANAGER_PATH start >/dev/null 2>&1") | crontab -
+    ;;
+  esac
+}
+
+autostart_off() {
+  case "$INIT_TYPE" in
+  systemd) systemctl disable "$SERVICE" >/dev/null 2>&1 ;;
+  openrc) rc-update del "$SERVICE" default >/dev/null 2>&1 ;;
+  sysv)
+    if command -v update-rc.d >/dev/null 2>&1 && [ "$RC_ROOT" = /etc ]; then
+      update-rc.d -f "$SERVICE" remove >/dev/null 2>&1
+    fi
+    local link
+    for link in "${RC_ROOT:?}"/rc[0-6].d/[SK][0-9][0-9]"${SERVICE:?}"; do
+      if [ -L "$link" ]; then rm -f "$link"; fi
+    done
     ;;
   none)
     if command -v crontab >/dev/null 2>&1; then
       crontab -l 2>/dev/null | grep -v "kanade-manager start" | crontab -
     fi
     ;;
+  esac
+  return 0
+}
+
+# service_written: the service's own file is in place (a unit, an init script).
+service_written() {
+  case "$INIT_TYPE" in
+  systemd) [ -f "$SYSTEMD_DIR/$SERVICE.service" ] ;;
+  openrc | sysv) [ -x "$INIT_D/$SERVICE" ] ;;
+  none) return 0 ;;
+  esac
+}
+
+autostart_name() {
+  case "$INIT_TYPE" in
+  systemd) echo "systemd" ;;
+  openrc) echo "OpenRC" ;;
+  sysv) echo "SysV（$INIT_D/$SERVICE）" ;;
+  none) echo "cron @reboot" ;;
+  esac
+}
+
+remove_service() {
+  autostart_off
+  case "$INIT_TYPE" in
+  systemd)
+    rm -f "${SYSTEMD_DIR:?}/${SERVICE:?}.service"
+    systemctl daemon-reload
+    ;;
+  openrc | sysv) rm -f "${INIT_D:?}/${SERVICE:?}" ;;
   esac
 }
 
@@ -599,6 +780,7 @@ running() {
   case "$INIT_TYPE" in
   systemd) systemctl is-active --quiet "$SERVICE" ;;
   openrc) rc-service "$SERVICE" status >/dev/null 2>&1 ;;
+  sysv) "$INIT_D/$SERVICE" status >/dev/null 2>&1 ;;
   none) pgrep -f "$(pattern)" >/dev/null 2>&1 ;;
   esac
 }
@@ -607,6 +789,7 @@ service_start() {
   case "$INIT_TYPE" in
   systemd) systemctl start "$SERVICE" ;;
   openrc) rc-service "$SERVICE" start >/dev/null ;;
+  sysv) "$INIT_D/$SERVICE" start >/dev/null ;;
   none)
     running && return 0
     mkdir -p "$DATA_DIR/logs"
@@ -627,6 +810,7 @@ service_stop() {
   case "$INIT_TYPE" in
   systemd) systemctl stop "$SERVICE" ;;
   openrc) rc-service "$SERVICE" stop >/dev/null ;;
+  sysv) "$INIT_D/$SERVICE" stop >/dev/null ;;
   none)
     pkill -TERM -f "$(pattern)" 2>/dev/null || return 0
     local i
@@ -727,6 +911,10 @@ do_install() {
   new_temp tmp
   download_release "$tmp"
   fetch "$(release_url kanade.sh)" "$tmp/kanade.sh" >/dev/null 2>&1 || true
+  if [ -s "$tmp/kanade.sh" ] && ! script_ok "$tmp"; then
+    warn "下載的管理腳本沒有通過檢查，kanade-manager 不更新。"
+    rm -f "${tmp:?}/kanade.sh"
+  fi
 
   # The program belongs to root; only the data directory to the service user.
   if ! id "$RUN_USER" >/dev/null 2>&1; then
@@ -777,6 +965,11 @@ do_install() {
     echo "  帳號：沿用原有的帳號（忘了密碼可以用 kanade-manager password 重設）"
   fi
   echo "  資料：$DATA_DIR"
+  if autostart_enabled; then
+    echo "  開機自動啟動：已開啟（$(autostart_name)）"
+  else
+    echo "  開機自動啟動：沒有設定（可用 kanade-manager autostart 開啟）"
+  fi
   line
   echo "下一步："
   echo "  1. 用上面的帳號登入，到「設定」照著說明在 Google Cloud 建立 OAuth 用戶端，再連線 Google Drive"
@@ -791,6 +984,37 @@ do_install() {
   echo "  之後輸入 kanade-manager 開啟管理選單。"
   [ "$mode" = "2" ] && warn "防火牆或雲端安全群組要開放連接埠 $port。"
   return 0
+}
+
+# script_ok DIR: DIR/kanade.sh, as downloaded, is a whole script: its checksum matches the release's
+# SHA256SUMS where that lists it (releases from v0.1.12 on), and bash can read it.
+script_ok() {
+  local dir="$1"
+  [ -s "$dir/SHA256SUMS" ] || fetch "$(release_url SHA256SUMS)" "$dir/SHA256SUMS" >/dev/null 2>&1 || true
+  if [ -s "$dir/SHA256SUMS" ] && grep -q ' kanade.sh$' "$dir/SHA256SUMS"; then
+    (cd "$dir" && grep ' kanade.sh$' SHA256SUMS | sha256sum -c --status) || return 1
+  fi
+  bash -n "$dir/kanade.sh" 2>/dev/null && grep -q '^main "\$@"' "$dir/kanade.sh"
+}
+
+# update_manager: kanade-manager becomes the release's script when it differs, without touching
+# Kanade (already that version) or its service.
+update_manager() {
+  local tmp
+  new_temp tmp
+  if ! fetch "$(release_url kanade.sh)" "$tmp/kanade.sh" >/dev/null 2>&1; then
+    warn "無法下載管理腳本，kanade-manager 沒有更新。"
+    return 1
+  fi
+  if ! script_ok "$tmp"; then
+    warn "下載的管理腳本沒有通過檢查，kanade-manager 沒有更新。"
+    return 1
+  fi
+  if cmp -s "$tmp/kanade.sh" "$MANAGER_PATH"; then
+    info "kanade-manager 已是這個版本的腳本。"
+    return 0
+  fi
+  install_manager "$tmp/kanade.sh" && info "已更新 kanade-manager（Kanade 沒有變動，服務沒有重新啟動）。"
 }
 
 do_update() {
@@ -810,6 +1034,7 @@ do_update() {
   fi
   info "目前版本：$current；可用版本：$latest"
   if [ "$current" = "$latest" ] && ! confirm "已是這個版本，仍要重新安裝嗎？" n; then
+    update_manager
     return 0
   fi
   warn "更新會重新啟動服務：播放中的歌會中斷；下載中的任務會在重新啟動後繼續，做種中的任務會結束。"
@@ -916,6 +1141,11 @@ do_status() {
   echo "公開網址：$(setting public_url)"
   echo "監聽：$(setting listen)"
   echo "服務管理：$INIT_TYPE"
+  if autostart_enabled; then
+    echo "開機自動啟動：已開啟（$(autostart_name)）"
+  else
+    echo "開機自動啟動：已關閉"
+  fi
   if running; then
     if [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "$(local_url)/api/v1/passkeys/available")" = "200" ]; then
       printf "狀態：${GREEN}執行中${RESET}\n"
@@ -960,6 +1190,50 @@ do_restart() {
   service_stop
   service_start
   wait_up && info "已重新啟動。" || warn "重新啟動後 30 秒內沒有回應，請查看記錄。"
+}
+
+# do_autostart [on|off]: whether the service starts when the machine boots; without an argument,
+# says how it is and offers to change it.
+do_autostart() {
+  check_root
+  require_installed
+  detect_init
+  local want="${1:-}"
+  if [ "$INIT_TYPE" = none ] && ! command -v crontab >/dev/null 2>&1; then
+    warn "這台機器沒有 systemd、OpenRC、SysV 或 cron，無法設定開機自動啟動；請用這台機器（或容器平台）的方式在開機時執行 kanade-manager start。"
+    return 1
+  fi
+  if [ -z "$want" ]; then
+    if autostart_enabled; then
+      echo "開機自動啟動：已開啟（$(autostart_name)）"
+      confirm "要關閉開機自動啟動嗎？" n && want=off
+    else
+      echo "開機自動啟動：已關閉（$(autostart_name)）"
+      confirm "要開啟開機自動啟動嗎？" y && want=on
+    fi
+    [ -n "$want" ] || return 0
+  fi
+  case "$want" in
+  on)
+    # The service's own file may be gone (removed by hand): written again first.
+    if ! service_written; then
+      write_service || die "無法建立服務。"
+    fi
+    if autostart_on && autostart_enabled; then
+      info "已開啟開機自動啟動（$(autostart_name)）。"
+    else
+      die "無法開啟開機自動啟動。"
+    fi
+    ;;
+  off)
+    autostart_off
+    if autostart_enabled; then
+      die "無法關閉開機自動啟動。"
+    fi
+    info "已關閉開機自動啟動。服務照常執行；機器重新開機後要自己啟動（kanade-manager start）。"
+    ;;
+  *) die "用法：kanade-manager autostart [on|off]" ;;
+  esac
 }
 
 do_log() {
@@ -1131,13 +1405,15 @@ Kanade 管理腳本
 用法：kanade-manager [指令]   （不帶指令時顯示選單）
 
   install     安裝
-  update      更新到最新版本
+  update      更新到最新版本（kanade-manager 一併更新）
   uninstall   解除安裝
   status      狀態
   start       啟動
   stop        停止
   restart     重新啟動
   log [-f]    查看記錄
+  autostart [on|off]
+              開機自動啟動（不帶參數時顯示目前設定並詢問）
   password    重設密碼
   config      修改網址與監聽位址
   backup      備份資料庫
@@ -1178,6 +1454,7 @@ menu() {
   12) 還原資料庫
   13) 版本
   14) 安裝 aria2 與 FFmpeg
+  15) 開機自動啟動
    0) 離開
 EOF
     line
@@ -1198,6 +1475,7 @@ EOF
     12) (do_restore) ;;
     13) (do_version) ;;
     14) (do_tools) ;;
+    15) (do_autostart) ;;
     0 | q | "") return 0 ;;
     *) warn "沒有這個選項。" ;;
     esac
@@ -1221,6 +1499,7 @@ main() {
   stop) do_stop ;;
   restart) do_restart ;;
   log | logs) do_log "${2:-}" ;;
+  autostart) do_autostart "${2:-}" ;;
   password | passwd) do_password "${2:-}" ;;
   backup) do_backup ;;
   restore) do_restore ;;
