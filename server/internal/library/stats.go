@@ -25,10 +25,12 @@ func kindCond(kind string) (string, []any) {
 	return "", nil
 }
 
-// albumRoots follows each album listened from to the album it was merged into, however many merges
-// along (review #109): roots(src, id). A loop or a merge into a missing album ends the walk.
+// albumRoots follows each album listened from in a period (its first two arguments, from and to)
+// to the album it was merged into, however many merges along (review #109): roots(src, id). A loop
+// or a merge into a missing album ends the walk. Only the period's albums are followed, found
+// through the bucket index, so a short period does not read the whole history (review #129).
 const albumRoots = `WITH RECURSIVE up(src, cur, depth) AS (
-		SELECT id, id, 0 FROM albums WHERE id IN (SELECT album_id FROM listening)
+		SELECT id, id, 0 FROM albums WHERE id IN (SELECT album_id FROM listening WHERE bucket >= ? AND bucket < ?)
 		UNION ALL
 		SELECT up.src, a.merged_into, up.depth + 1 FROM up JOIN albums a ON a.id = up.cur
 			JOIN albums t ON t.id = a.merged_into WHERE up.depth < 32
@@ -40,10 +42,11 @@ type spanRow struct {
 	counted, estimated       bool
 }
 
-func (s *Store) spans(ctx context.Context, from, to int64, kind string) ([]spanRow, error) {
-	cond, args := kindCond(kind)
-	rows, err := s.db.QueryContext(ctx, albumRoots+`SELECT l.bucket, l.track_id, coalesce(r.id, 0), l.ms, l.counted, l.estimated
-		FROM listening l LEFT JOIN roots r ON r.src = l.album_id WHERE l.bucket >= ? AND l.bucket < ?`+cond, append([]any{from, to}, args...)...)
+// spans reads a period's listening; with albums, the album each span was played from too (as it is
+// now, after merges), which only the summary needs (review #129).
+func (s *Store) spans(ctx context.Context, from, to int64, kind string, albums bool) ([]spanRow, error) {
+	q, args := spansQuery(from, to, kind, albums)
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -57,6 +60,16 @@ func (s *Store) spans(ctx context.Context, from, to int64, kind string) ([]spanR
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+func spansQuery(from, to int64, kind string, albums bool) (string, []any) {
+	cond, args := kindCond(kind)
+	args = append([]any{from, to}, args...)
+	if !albums {
+		return `SELECT l.bucket, l.track_id, 0, l.ms, l.counted, l.estimated FROM listening l WHERE l.bucket >= ? AND l.bucket < ?` + cond, args
+	}
+	return albumRoots + `SELECT l.bucket, l.track_id, coalesce(r.id, 0), l.ms, l.counted, l.estimated
+		FROM listening l LEFT JOIN roots r ON r.src = l.album_id WHERE l.bucket >= ? AND l.bucket < ?` + cond, append([]any{from, to}, args...)
 }
 
 func localDate(ms int64, loc *time.Location) string {
@@ -75,7 +88,7 @@ type DayTotal struct {
 // ListeningDays adds up each day from (inclusive) to to (exclusive), Unix ms; days without
 // listening are left out.
 func (s *Store) ListeningDays(ctx context.Context, loc *time.Location, from, to int64, kind string) ([]DayTotal, error) {
-	rows, err := s.spans(ctx, from, to, kind)
+	rows, err := s.spans(ctx, from, to, kind, false)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +130,7 @@ type Summary struct {
 }
 
 func (s *Store) ListeningSummary(ctx context.Context, loc *time.Location, from, to int64, kind string) (*Summary, error) {
-	rows, err := s.spans(ctx, from, to, kind)
+	rows, err := s.spans(ctx, from, to, kind, true)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +199,7 @@ func (s *Store) ListeningTop(ctx context.Context, from, to int64, kind, group, b
 				AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) GROUP BY t.artist
 		) ORDER BY ` + order + `, name LIMIT ?`
 	case "albums":
+		args = append([]any{from, to}, args...) // the period's albums, for albumRoots
 		q = albumRoots + `SELECT al.id, al.title, al.album_artist, coalesce(al.cover_id, 0), sum(l.ms) AS ms, sum(l.counted) AS plays,
 			count(DISTINCT l.track_id) FROM listening l
 			JOIN roots r ON r.src = l.album_id JOIN albums al ON al.id = r.id
@@ -279,7 +293,7 @@ type Trends struct {
 }
 
 func (s *Store) ListeningTrends(ctx context.Context, loc *time.Location, from, to int64, kind string, now time.Time) (*Trends, error) {
-	rows, err := s.spans(ctx, from, to, kind)
+	rows, err := s.spans(ctx, from, to, kind, false)
 	if err != nil {
 		return nil, err
 	}

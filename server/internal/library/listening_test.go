@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -318,5 +319,40 @@ func TestListeningFollowsMergeChains(t *testing.T) {
 	}
 	if sum, _ := s.ListeningSummary(ctx, time.UTC, from, to, ""); sum.Albums != 2 {
 		t.Fatalf("summary counts %d albums after undo", sum.Albums)
+	}
+
+	// History outside the period changes nothing in it, and is not read to find its albums: the
+	// period's spans come through the bucket index, the album walk included (review #129).
+	rd := f.song("d", "D", "Album D", 1, 1)
+	for i := range 50 {
+		sf.play(rd.TrackID, f.albumOf(rd.EntryID), at.AddDate(0, 0, -10-i), 60_000, true)
+	}
+	if sum, _ := s.ListeningSummary(ctx, time.UTC, from, to, ""); sum.Albums != 2 || sum.MS != 90_000 {
+		t.Fatalf("with older history, summary = %+v", sum)
+	}
+	if top, _ = s.ListeningTop(ctx, from, to, "", "albums", "time", 10); len(top) != 2 {
+		t.Fatalf("with older history, albums = %+v", top)
+	}
+	for _, albums := range []bool{false, true} {
+		q, args := spansQuery(from, to, "music", albums)
+		rows, err := s.db.QueryContext(ctx, `EXPLAIN QUERY PLAN `+q, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var plan []string
+		for rows.Next() {
+			var id, parent, unused int
+			var detail string
+			if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+				t.Fatal(err)
+			}
+			plan = append(plan, detail)
+		}
+		rows.Close()
+		for _, step := range plan {
+			if strings.HasPrefix(step, "SCAN l") || strings.HasPrefix(step, "SCAN listening") {
+				t.Fatalf("albums %v: the whole history is read: %q", albums, plan)
+			}
+		}
 	}
 }
