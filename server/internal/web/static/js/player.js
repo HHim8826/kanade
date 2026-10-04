@@ -80,8 +80,20 @@ export function setPrefs(patch) {
   if (patch.autoContinue) topUp();
 }
 
-const audio = new Audio();
-audio.preload = 'auto';
+// The audio element. The sound effects' graph takes an element for good once it feeds it, so going
+// back to the element's own sound means another element (fresh): the listeners are kept here (on) to
+// move over with the song.
+const newAudio = () => {
+  const a = new Audio();
+  a.preload = 'auto';
+  return a;
+};
+let audio = newAudio();
+const listeners = [];
+const on = (type, fn) => {
+  listeners.push([type, fn]);
+  audio.addEventListener(type, fn);
+};
 const SLEEP_FADE_MS = 20_000;
 // applyVolume sets the volume chosen, faded out over the last seconds of a sleep timer; the fade
 // never touches the setting itself.
@@ -95,7 +107,28 @@ const near = () => {
   const s = player.get();
   return s.queue.slice(Math.max(s.index - 1, 0), s.index + 4);
 };
-attach(audio, applyVolume, near);
+// fresh goes on with a new element where the old one was: same song, same place, playing or not.
+function fresh() {
+  const old = audio, src = old.getAttribute('src'), t = old.currentTime, wasPlaying = !old.paused;
+  for (const [type, fn] of listeners) old.removeEventListener(type, fn); // its teardown is no event of ours
+  old.pause();
+  old.removeAttribute('src');
+  old.load();
+  audio = newAudio();
+  for (const [type, fn] of listeners) audio.addEventListener(type, fn);
+  attach(audio, applyVolume, near, fresh);
+  applyVolume();
+  if (!src) return audio;
+  if (session) session.last = null; // the jump back to the place is not heard time
+  pendingSeek = Math.round(t * 1000);
+  audio.src = src;
+  if (wasPlaying) {
+    player.set({ buffering: true });
+    audio.play().catch(() => player.set({ playing: false, buffering: false }));
+  }
+  return audio;
+}
+attach(audio, applyVolume, near, fresh);
 applyVolume();
 // play starts the element, the sound effects ready first (a play asked for lets the browser start them).
 const play = () => {
@@ -185,20 +218,20 @@ function seekWhenReady(ms) {
   else pendingSeek = ms;
 }
 
-audio.addEventListener('loadedmetadata', () => {
+on('loadedmetadata', () => {
   if (pendingSeek !== null) {
     audio.currentTime = pendingSeek / 1000;
     pendingSeek = null;
   }
 });
-audio.addEventListener('timeupdate', () => {
+on('timeupdate', () => {
   if (!session || audio.paused) return;
   const t = audio.currentTime;
   if (session.last !== null && t > session.last && t - session.last < 2) session.heard += (t - session.last) * 1000;
   session.last = t;
 });
-audio.addEventListener('seeking', () => session && (session.last = null));
-audio.addEventListener('playing', () => { // the home page shows the latest playback from its start
+on('seeking', () => session && (session.last = null));
+on('playing', () => { // the home page shows the latest playback from its start
   if (session) session.played = true;
   report();
 });
@@ -573,7 +606,7 @@ player.subscribe((s) => { // the queue changed: saved shortly after (a burst of 
   saveTimer = setTimeout(saveSession, 300);
 });
 setInterval(() => !audio.paused && savePlace(), 5000);
-audio.addEventListener('pause', savePlace); // seek keeps the place too: not the seeks a loading song makes by itself
+on('pause', savePlace); // seek keeps the place too: not the seeks a loading song makes by itself
 const saveOnLeave = () => {
   if (!owner && !unsaved) return;
   saveSession();
@@ -727,7 +760,7 @@ function prefetchNext() {
 }
 
 let lastTick = 0;
-audio.addEventListener('timeupdate', () => {
+on('timeupdate', () => {
   const now = performance.now();
   if (now - lastTick < 250) return; // 4 updates a second is plenty
   lastTick = now;
@@ -796,20 +829,20 @@ export function playBookmark(b, anyway = false) {
   }
   playQueue([{ ...item, resumeMs: b.position_ms }], 0);
 }
-audio.addEventListener('seeked', () => player.set({ time: audio.currentTime }));
-audio.addEventListener('durationchange', () => isFinite(audio.duration) && player.set({ duration: audio.duration }));
-audio.addEventListener('play', () => player.set({ playing: true }));
-audio.addEventListener('pause', () => {
+on('seeked', () => player.set({ time: audio.currentTime }));
+on('durationchange', () => isFinite(audio.duration) && player.set({ duration: audio.duration }));
+on('play', () => player.set({ playing: true }));
+on('pause', () => {
   player.set({ playing: false });
   if (!audio.ended) report();
 });
-audio.addEventListener('waiting', () => player.set({ buffering: true }));
-audio.addEventListener('playing', () => {
+on('waiting', () => player.set({ buffering: true }));
+on('playing', () => {
   player.set({ buffering: false, playing: true });
   topUp();
   prefetchNext();
 });
-audio.addEventListener('ended', () => {
+on('ended', () => {
   report(true);
   session = null;
   const sleep = player.get().sleep;
@@ -822,7 +855,7 @@ audio.addEventListener('ended', () => {
   if (player.get().repeat === 'one') load(player.get().index, true, true);
   else next();
 });
-audio.addEventListener('error', () => {
+on('error', () => {
   if (!audio.getAttribute('src')) return; // emptied on purpose
   const item = current();
   player.set({ buffering: false, playing: false });

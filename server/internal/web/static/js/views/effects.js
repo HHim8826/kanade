@@ -48,6 +48,7 @@ export function EffectsPanel() {
   };
   const custom = e.preset.startsWith('custom:') ? e.preset.slice('custom:'.length) : '';
   const boost = boostOf(e.gains);
+  const shaped = e.eq && e.gains.some((g) => g !== 0); // the equalizer has a curve to apply
   const choice = (key, label) => html`<button key=${key} type="button" class="choice" role="radio" aria-checked=${e.preset === key}
     disabled=${!e.eq} onClick=${() => pick(key)}>${label}</button>`;
   const pickChoice = (label, list, value, set) => html`<div class="sub">${label}</div>
@@ -60,12 +61,12 @@ export function EffectsPanel() {
     ${pickChoice('音量平衡', [['off', '關閉'], ['track', '曲目平衡'], ['album', '專輯平衡']], e.balance, (k) => setEffects({ balance: k }))}
     ${e.balance !== 'off' && pickChoice('目標響度', TARGETS, e.target, (k) => setEffects({ target: k }))}
     <p class="hint tight">曲目平衡把每首歌調到差不多響，適合跨專輯隨機播放；專輯平衡讓同一張專輯用同一個音量，保留曲目之間原本的強弱。只在播放時調整，不改動音檔。</p>
-    ${e.balance !== 'off' && !e.eq && html`<p class="hint tight">沒有開均衡器時只能把較大聲的歌調小，比目標小聲的歌維持原本的音量；開了均衡器（平直也可以）才會一併調大。</p>`}
+    ${e.balance !== 'off' && !shaped && html`<p class="hint tight">只能把較大聲的歌調小，比目標小聲的歌維持原本的音量；均衡器設了曲線（不是平直）時才會一併調大。</p>`}
     <${Measured} />
     <hr class="divider" />
     <label class="toggle-row">
       <span class="grow"><span class="title">均衡器</span>
-        <span class="sub">10 段，各 ±${MAX_DB} dB。只在這台裝置播放時處理，不改動音檔。</span></span>
+        <span class="sub">10 段，各 ±${MAX_DB} dB。只在這台裝置播放時處理，不改動音檔；關閉或曲線平直時，聲音完全不經過處理。</span></span>
       <input type="checkbox" role="switch" checked=${e.eq} disabled=${e.unsupported} onChange=${(ev) => setEffects({ eq: ev.target.checked })} />
     </label>
     <div class=${'eq' + (e.eq ? '' : ' off')}>

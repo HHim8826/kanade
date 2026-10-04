@@ -2,14 +2,15 @@ import { get } from './api.js';
 import { createStore } from './store.js';
 
 // ---- sound effects: the equalizer, and the volume balance (reviews #139, #136) ----
-// Kept per device, for its own headphones or speakers. Nothing goes through Web Audio until the
-// equalizer is first turned on: the audio element plays as it is (which also keeps playing with the
-// screen locked everywhere). From then on its sound goes through one graph, built once for the page
-// (an element can feed only one); turning the equalizer off flattens it. In the graph the volume,
+// Kept per device, for its own headphones or speakers. The audio element plays as it is — the
+// browser's own way, with the phone's sound settings — unless the equalizer has a curve to apply (on,
+// and not flat): only then does its sound go through Web Audio, in a graph made for playback
+// (latencyHint 'playback'; on Android the low-latency path leaves the system's sound effects out).
+// An element that fed a graph cannot leave it, so going back to its own sound takes a fresh element
+// where the old one was (the player's fresh), and the graph is closed. In the graph the volume, mute,
 // the sleep timer's fade and the balance are applied by a gain of its own (Safari ignores an
-// element's volume there). With the equalizer on, that goes on through a pre-gain taking back the
-// curve's largest boost (as the bands add up, measured on the curve itself) and the bands; with it
-// off, straight out: nothing else touches the sound.
+// element's volume there), then a pre-gain takes back the curve's largest boost (the bands added up
+// as they overlap) before the bands, so nothing clips.
 
 const KEY = 'kanade.effects';
 export const BANDS = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -60,28 +61,34 @@ export function setEffects(patch) {
   try {
     localStorage.setItem(KEY, JSON.stringify({ eq, preset, gains, customs, balance, target }));
   } catch { /* this page only */ }
-  if (patch.eq) build();
-  tune();
+  settle();
   if ('balance' in patch || 'target' in patch) {
     learn(around());
     reapply();
   }
 }
 
-// headroom is how much the curve's largest boost takes off the level, so a boost does not clip.
+// headroom is the curve's largest band.
 export const headroom = (gains) => Math.max(0, ...gains);
+const flat = (gains) => gains.every((g) => g === 0);
+// wanted: the equalizer has something to do.
+const wanted = () => {
+  const { eq, gains, unsupported } = effects.get();
+  return eq && !flat(gains) && !unsupported;
+};
 
-let element = null, reapply = () => {}, around = () => [];
-// The graph: source → master (volume) → pre → bands → out → speakers, or with the equalizer off,
-// master → out. routed: which, once set.
-let ctx = null, master = null, pre = null, filters = [], out = null, routed = null;
+let element = null, reapply = () => {}, around = () => [], renew = null;
+// The graph, while the equalizer has a curve: source → master (volume) → pre → bands → speakers.
+let ctx = null, master = null, pre = null, filters = [];
 
 // attach gives the player's audio element, how to apply its volume again (once the graph takes the
-// volume over, or a song's loudness is known), and the queue's songs around the one playing.
-export function attach(audio, apply, near) {
+// volume over, or gives it back, or a song's loudness is known), the queue's songs around the one
+// playing, and how to go on with a fresh element.
+export function attach(audio, apply, near, fresh) {
   element = audio;
   reapply = apply;
   around = near;
+  renew = fresh;
 }
 
 function build() {
@@ -93,7 +100,7 @@ function build() {
   }
   let c;
   try {
-    c = new AC();
+    c = new AC({ latencyHint: 'playback' });
     const src = c.createMediaElementSource(element);
     master = c.createGain();
     pre = c.createGain();
@@ -101,76 +108,90 @@ function build() {
       const b = c.createBiquadFilter();
       b.type = 'peaking';
       b.frequency.value = f;
-      b.Q.value = 1.41; // about an octave each
-      b.gain.value = 0;
+      b.Q.value = Q;
       return b;
     });
-    out = c.createGain();
-    src.connect(master);
-    [pre, ...filters, out, c.destination].reduce((a, b) => (a.connect(b), b));
+    [src, master, pre, ...filters, c.destination].reduce((a, b) => (a.connect(b), b));
   } catch (e) {
     console.warn('sound effects unavailable', e);
     if (c) c.close().catch(() => {});
+    master = pre = null;
+    filters = [];
     effects.set({ unsupported: true });
     return false;
   }
   ctx = c;
-  ctx.onstatechange = () => effects.set({ suspended: ctx.state !== 'running' && !element.paused });
+  ctx.onstatechange = () => effects.set({ suspended: !!ctx && ctx.state !== 'running' && !element.paused });
+  tune(true);
   reapply(); // the volume moves into the graph
   wake();
   return true;
 }
 
-// tune sets the curve, gliding to it so a change makes no click, and routes the sound through the
-// bands or, with the equalizer off, straight out (a quick fade over the switch).
-function tune() {
+// teardown closes the graph: the song goes on in a fresh element, with its own sound.
+function teardown() {
   if (!ctx) return;
-  const { eq, gains } = effects.get();
-  const now = ctx.currentTime;
-  filters.forEach((f, i) => f.gain.setTargetAtTime(gains[i], now, 0.03));
-  pre.gain.setTargetAtTime(10 ** (-boostOf(gains) / 20), now, 0.03);
-  if (routed === eq) return;
-  const to = eq ? pre : out;
-  if (routed === null) {
-    master.connect(to);
-    routed = eq;
-    return;
-  }
-  routed = eq;
-  out.gain.setTargetAtTime(0, now, 0.004);
-  setTimeout(() => {
-    master.disconnect();
-    master.connect(to);
-    out.gain.setTargetAtTime(1, ctx.currentTime, 0.004);
-  }, 25);
+  const c = ctx;
+  ctx = master = pre = null;
+  filters = [];
+  effects.set({ suspended: false });
+  if (renew) renew(); // applies the volume there, on the element again
+  c.close().catch(() => {});
 }
 
-// boostOf is the most the curve raises any frequency, the bands added up as they overlap (from the
-// filters' own response; before the graph exists, the largest band).
+// settle builds or closes the graph as the settings need it, and sets the curve.
+function settle() {
+  if (wanted()) {
+    if (!ctx) build();
+    tune();
+  } else {
+    teardown();
+  }
+}
+
+// tune sets the curve, gliding to it so a change makes no click (at once when the graph is new).
+function tune(now = false) {
+  if (!ctx) return;
+  const { gains } = effects.get();
+  const at = ctx.currentTime, set = (p, v) => (now ? (p.value = v) : p.setTargetAtTime(v, at, 0.03));
+  filters.forEach((f, i) => set(f.gain, gains[i]));
+  set(pre.gain, 10 ** (-boostOf(gains) / 20));
+}
+
+const Q = 1.41; // about an octave each
+let probe = null; // an offline context the curve's response is worked out on
+
+// boostOf is the most the curve raises any frequency, the bands added up as they overlap, from the
+// filters' own response.
 function boostOf(gains) {
-  if (!filters.length) return headroom(gains);
-  const n = 256, hz = new Float32Array(n), mag = new Float32Array(n), phase = new Float32Array(n), total = new Float32Array(n).fill(0);
+  if (flat(gains)) return 0;
+  try {
+    probe = probe || new OfflineAudioContext(1, 1, 48000);
+  } catch {
+    return headroom(gains);
+  }
+  const n = 256, hz = new Float32Array(n), mag = new Float32Array(n), phase = new Float32Array(n), total = new Float32Array(n);
   for (let i = 0; i < n; i++) hz[i] = 20 * 1000 ** (i / (n - 1)); // 20 Hz to 20 kHz
-  filters.forEach((f, b) => {
-    const probe = ctx.createBiquadFilter(); // the response at the curve's values, not where a glide has got to
-    probe.type = 'peaking';
-    probe.frequency.value = f.frequency.value;
-    probe.Q.value = f.Q.value;
-    probe.gain.value = gains[b];
-    probe.getFrequencyResponse(hz, mag, phase);
+  BANDS.forEach((f, b) => {
+    const filter = probe.createBiquadFilter();
+    filter.type = 'peaking';
+    filter.frequency.value = f;
+    filter.Q.value = Q;
+    filter.gain.value = gains[b];
+    filter.getFrequencyResponse(hz, mag, phase);
     for (let i = 0; i < n; i++) total[i] += 20 * Math.log10(mag[i]);
   });
   return Math.max(0, ...total);
 }
 
-// The boost shown for a curve: the largest band, or as measured once the graph exists.
+// The boost a curve is taken back by, to show.
 export const boost = (gains) => Math.round(boostOf(gains) * 10) / 10;
 
-// wake gets the graph ready before playing: built if the equalizer is on, running again if the
+// wake gets the graph ready before playing: built if the equalizer has a curve, running again if the
 // browser stopped it. Called on every play; a play the listener asked for (a tap, a key) lets the
 // browser start it.
 export function wake() {
-  if (effects.get().eq && !ctx) build();
+  if (wanted() && !ctx) build();
   if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
 }
 
