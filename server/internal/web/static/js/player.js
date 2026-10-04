@@ -145,12 +145,13 @@ function load(index, autoplay = true, again = false) {
   if (!item) return;
   if (session) report(); // close out the track we are leaving
   session = { id: crypto.randomUUID(), item, heard: 0, last: null };
-  // A resume point ("continue" on the home page) is for the play it was asked for only.
-  pendingSeek = again ? null : item.resumeMs || null;
+  // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
+  // 0 is a place too, the start, which the settings' resuming does not override (review #106).
+  pendingSeek = again ? null : item.resumeMs ?? null;
   delete item.resumeMs;
   // Otherwise as the settings say for its kind: drama and radio pick up where they stopped, music
   // starts over (review #78). A loop coming round always starts over.
-  if (!again && !pendingSeek && s.resume[item.kind === 'spoken' ? 'spoken' : 'music'] === 'resume') {
+  if (!again && pendingSeek === null && s.resume[item.kind === 'spoken' ? 'spoken' : 'music'] === 'resume') {
     get(`/assets/${item.assetId}/resume`).then((r) => {
       if (session && session.item === item && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
@@ -167,7 +168,7 @@ function seekWhenReady(ms) {
 }
 
 audio.addEventListener('loadedmetadata', () => {
-  if (pendingSeek) {
+  if (pendingSeek !== null) {
     audio.currentTime = pendingSeek / 1000;
     pendingSeek = null;
   }
@@ -310,11 +311,15 @@ async function fetchMore(s, n) {
   }
 }
 
-// retryRadio picks again after a failure, and plays on when the queue had stopped at its end.
+// retryRadio picks again after a failure, and plays on when the queue had stopped at its end: only
+// the queue it was asked for, as it was, with no pause since (review #104).
 export async function retryRadio() {
   const s = player.get();
   const atEnd = s.index === s.queue.length - 1 && audio.paused;
-  if (await topUp(true) && atEnd && player.get().index + 1 < player.get().queue.length) load(player.get().index + 1);
+  const my = gen, paused = pauses, at = s.index, qid = s.queue[at] && s.queue[at].qid;
+  if (!(await topUp(true)) || !atEnd) return;
+  const q = player.get();
+  if (my === gen && pauses === paused && q.index === at && q.queue[at] && q.queue[at].qid === qid && at + 1 < q.queue.length) load(at + 1);
 }
 
 // endRadio stops going on by itself: library songs not reached yet leave the queue.
@@ -595,10 +600,10 @@ function checkSleep() {
   const s = player.get().sleep;
   if (s && s.until && Date.now() >= s.until) {
     endSleep();
-    if (!audio.paused) {
-      pauses++; // as if the listener paused: nothing goes on by itself
-      audio.pause();
-    }
+    // As if the listener paused: nothing goes on by itself, not even a song still being picked
+    // while the queue waits at its end (review #103).
+    pauses++;
+    if (!audio.paused) audio.pause();
     toast('睡眠定時到了，已暫停播放');
     return;
   }
