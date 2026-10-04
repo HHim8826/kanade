@@ -5,6 +5,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -101,13 +103,14 @@ func TestBadAnswersAreNotCached(t *testing.T) {
 		if l, err := c.Get(ctx, 7); err != nil || l.Plain != "a" {
 			t.Fatalf("%q: get after recovery: %v %v", bad, l, err)
 		}
-		if calls.Load() != before+2 {
+		asks := int32(len(queries(Song{Title: "Undine"}))) + 1 // Find's searches, then the get
+		if calls.Load() != before+asks {
 			t.Fatalf("%q: asked %d times after recovery", bad, calls.Load()-before)
 		}
 		// The good answers, the empty list too, are cached.
 		c.Find(ctx, Song{Title: "Undine"})
 		c.Get(ctx, 7)
-		if calls.Load() != before+2 {
+		if calls.Load() != before+asks {
 			t.Fatalf("%q: good answers not cached", bad)
 		}
 		srv.Close()
@@ -152,5 +155,91 @@ func TestBusyIsAskedAgain(t *testing.T) {
 			t.Errorf("%s: %v %v after %d calls", c.name, list, err, calls.Load())
 		}
 		srv.Close()
+	}
+}
+
+// fakeSearch answers searches from a table of query strings, [] for any other, and records them.
+func fakeSearch(t *testing.T, answers map[string]string) (*Client, *[]string) {
+	t.Helper()
+	var asked []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.URL.RawQuery)
+		mu.Unlock()
+		if a, ok := answers[r.URL.Query().Encode()]; ok {
+			w.Write([]byte(a))
+			return
+		}
+		w.Write([]byte(`[]`))
+	}))
+	t.Cleanup(srv.Close)
+	c := New("https://music.example/")
+	c.Base = srv.URL + "/api"
+	return c, &asked
+}
+
+func enc(kv ...string) string {
+	q := url.Values{}
+	for i := 0; i < len(kv); i += 2 {
+		q.Set(kv[i], kv[i+1])
+	}
+	return q.Encode()
+}
+
+// A title that carries its singer ("曲名 / 歌手") is also looked for as the title and singer, and by
+// keywords; what is found with the same title, singer and length is exact (review #122).
+func TestDecoratedTitleCanFindLyrics(t *testing.T) {
+	ctx := context.Background()
+	rec := `[{"id": 31, "trackName": "ユーフォリア", "artistName": "牧野由依", "duration": 250, "syncedLyrics": "[00:01.00]words"}]`
+	for _, tc := range []struct {
+		name    string
+		answers map[string]string
+		want    int // requests
+	}{
+		{"by title and singer", map[string]string{enc("track_name", "ユーフォリア", "artist_name", "牧野由依"): rec}, 3},
+		{"by keywords", map[string]string{enc("q", "ユーフォリア 牧野由依"): rec}, 5},
+	} {
+		c, asked := fakeSearch(t, tc.answers)
+		list, err := c.Find(ctx, Song{Title: "ユーフォリア / 牧野由依", Artist: "Makino Yui", DurationMS: 250_000})
+		if err != nil || len(list) != 1 || list[0].ID != 31 || !list[0].Exact {
+			t.Fatalf("%s: %+v %v", tc.name, list, err)
+		}
+		if len(*asked) != tc.want {
+			t.Fatalf("%s: asked %v", tc.name, *asked)
+		}
+	}
+	// A slash without spaces is part of the title.
+	if _, _, ok := splitSinger("Fate/stay night"); ok {
+		t.Fatal("split Fate/stay night")
+	}
+	if n, s, ok := splitSinger("髪とヘアピンと私／斎藤千和"); !ok || n != "髪とヘアピンと私" || s != "斎藤千和" {
+		t.Fatalf("full-width slash: %q %q %v", n, s, ok)
+	}
+}
+
+// A record without words found by a narrow search does not end the search, and lyrics of only
+// space are neither a candidate nor exact (review #123).
+func TestNoUsableLyricsStillFallsBack(t *testing.T) {
+	ctx := context.Background()
+	good := `{"id": 202, "trackName": "Undine", "artistName": "牧野由依", "duration": 200, "syncedLyrics": "[00:01.00]la"}`
+	for _, empty := range []string{`"plainLyrics": null`, `"plainLyrics": ""`, `"plainLyrics": " \n\t "`} {
+		narrow := `[{"id": 201, "trackName": "Undine", "artistName": "Makino Yui", "duration": 200, ` + empty + `}]`
+		c, asked := fakeSearch(t, map[string]string{
+			enc("track_name", "Undine", "artist_name", "Makino Yui"): narrow,
+			enc("track_name", "Undine"):                             "[" + good + "]",
+		})
+		list, err := c.Find(ctx, Song{Title: "Undine", Artist: "Makino Yui", DurationMS: 200_000})
+		if err != nil || len(list) != 1 || list[0].ID != 202 {
+			t.Fatalf("%s: %+v %v (asked %v)", empty, list, err, *asked)
+		}
+		if len(*asked) != 2 {
+			t.Fatalf("%s: asked %v", empty, *asked)
+		}
+	}
+	// An instrumental record stays one, never exact.
+	c, _ := fakeSearch(t, map[string]string{enc("track_name", "Undine"): `[{"id": 9, "trackName": "Undine", "duration": 200, "instrumental": true}]`})
+	if list, _ := c.Find(ctx, Song{Title: "Undine", DurationMS: 200_000}); len(list) != 1 || !list[0].Instrumental || list[0].Exact {
+		t.Fatalf("instrumental: %+v", list)
 	}
 }

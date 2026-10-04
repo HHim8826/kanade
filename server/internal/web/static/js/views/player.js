@@ -10,6 +10,7 @@ import { DragHandle, useReorder } from './common.js';
 import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { BookmarkDialog, BookmarkList } from './bookmarks.js';
+import { Field } from './organize.js';
 
 const open = (v) => player.set({ nowPlayingOpen: v });
 
@@ -286,14 +287,17 @@ function loadLyrics(trackId) {
 
 // ---- lyrics found online (LRCLIB) ----
 // Asked only for a song whose lyrics are being looked at; the answer is kept for this page.
-const foundCache = new Map(); // track ID -> candidates
+const foundCache = new Map(); // track ID and search -> candidates
 
-function findLyrics(trackId) {
-  if (foundCache.has(trackId)) return Promise.resolve(foundCache.get(trackId));
+// findLyrics asks LRCLIB for a song's lyrics; query is a search adjusted by hand ("title=…&artist=…"
+// or "q=…"; empty: the song's own title and artist), which keys its answer (review #122).
+function findLyrics(trackId, query = '') {
+  const key = trackId + '?' + query;
+  if (foundCache.has(key)) return Promise.resolve(foundCache.get(key));
   // 503 with Kanade's own answer: LRCLIB, not this server, failed.
   const said = (e) => (e.status === 503 && e.body ? new ApiError(503, 'LRCLIB 暫時沒有回應，請稍後再試。', e.body, e.retryAfter) : e);
-  return get(`/tracks/${trackId}/lyrics/online`).catch((e) => (e.status === 404 ? [] : Promise.reject(said(e)))).then((list) => {
-    foundCache.set(trackId, list);
+  return get(`/tracks/${trackId}/lyrics/online${query ? '?' + query : ''}`).catch((e) => (e.status === 404 ? [] : Promise.reject(said(e)))).then((list) => {
+    foundCache.set(key, list);
     return list;
   });
 }
@@ -307,13 +311,13 @@ async function applyFound(trackId, id, auto = false) {
 
 const fmtSec = (sec) => fmtTime(Math.round(sec) * 1000);
 
-// FoundLyrics lists what LRCLIB has for a song; choosing one stores it. With auto, an exact match
-// (same title and artist, length within two seconds) is stored right away, where the song has no
-// lyrics yet.
-function FoundLyrics({ item, auto, onChosen }) {
-  const data = useLoad(() => findLyrics(item.trackId), [item.trackId]);
+// FoundLyrics lists what LRCLIB has for a song (query: a search adjusted by hand); choosing one
+// stores it. With auto, an exact match (same title and artist, length within two seconds) is stored
+// right away, where the song has no lyrics yet. onAdjust offers to adjust the search.
+function FoundLyrics({ item, auto, onChosen, query = '', onAdjust }) {
+  const data = useLoad(() => findLyrics(item.trackId, query), [item.trackId, query]);
   const [busy, setBusy] = useState(0);
-  const retry = () => { foundCache.delete(item.trackId); data.reload(); };
+  const retry = () => { foundCache.delete(item.trackId + '?' + query); data.reload(); };
   // The server asked to wait (Retry-After): asked once more by itself after that, at most twice for
   // a song; leaving the song or the panel cancels it (review #79).
   const tries = useRef({ track: 0, n: 0 });
@@ -344,11 +348,14 @@ function FoundLyrics({ item, auto, onChosen }) {
     }
   };
   if (data.loading || (auto && busy)) return html`<div class="found-wait sub"><${Spinner} />正在 LRCLIB 尋找歌詞…</div>`;
+  const adjust = onAdjust && html`<div class="actions center"><button class="btn text" onClick=${onAdjust}><${Icon} name="search" />調整搜尋</button></div>`;
   if (data.error) {
     return html`<p class="sub found-none">線上歌詞暫時查不到，不代表 LRCLIB 沒有這首歌的歌詞。</p>
-      <${ErrorBox} error=${data.error} onRetry=${retry} />`;
+      <${ErrorBox} error=${data.error} onRetry=${retry} />${adjust}`;
   }
-  if (!list.length) return html`<p class="sub found-none">LRCLIB 也沒有找到這首歌的歌詞。</p>`;
+  if (!list.length) {
+    return html`<p class="sub found-none">${query ? '這樣搜尋沒有找到歌詞，可以換個曲名、歌手或關鍵字。' : 'LRCLIB 沒有找到吻合這首歌標題的歌詞；改用其他曲名、歌手或關鍵字也許找得到。'}</p>${adjust}`;
+  }
   return html`<div class="found">
     <p class="sub">LRCLIB 找到 ${list.length} 個可能的歌詞，選一個套用：</p>
     <ul class="found-list">${list.map((c) => html`<li key=${c.id}><button class="found-item" disabled=${busy !== 0} onClick=${() => choose(c)}>
@@ -407,7 +414,7 @@ function Lyrics({ item, time }) {
       <${Empty} icon="lyrics">這首歌沒有歌詞。<//>
       ${item.kind === 'spoken' && !lookFor.has(item.trackId)
         ? html`<div class="actions center"><button class="btn text" onClick=${() => { lookFor.add(item.trackId); lyricsRev.set((v) => ({ n: v.n + 1 })); }}>在 LRCLIB 尋找</button></div>`
-        : html`<${FoundLyrics} item=${item} auto=${item.kind !== 'spoken'} />`}
+        : html`<${FoundLyrics} item=${item} auto=${item.kind !== 'spoken'} onAdjust=${() => editLyrics(item, true)} />`}
       <div class="actions center"><button class="btn tonal" onClick=${() => editLyrics(item)}>自己輸入歌詞</button></div>
     </div>`;
   }
@@ -428,6 +435,32 @@ function Lyrics({ item, time }) {
   </div>`;
 }
 
+// AdjustSearch changes what LRCLIB is asked: another title and artist, or keywords, which LRCLIB
+// matches across title, artist and album (review #122). The song itself is not changed.
+function AdjustSearch({ item, onSearch }) {
+  const [title, setTitle] = useState(item.title || '');
+  const [artist, setArtist] = useState(item.artist || '');
+  const [q, setQ] = useState('');
+  const search = (e) => {
+    e.preventDefault();
+    const p = new URLSearchParams();
+    if (q.trim()) p.set('q', q.trim());
+    else if (title.trim() !== (item.title || '').trim() || artist.trim() !== (item.artist || '').trim()) {
+      p.set('title', title.trim());
+      p.set('artist', artist.trim());
+    }
+    onSearch(p.toString());
+  };
+  return html`<form class="adjust-search" onSubmit=${search}>
+    <div class="form-grid">
+      <${Field} label="曲名" value=${title} onInput=${setTitle} />
+      <${Field} label="歌手" value=${artist} onInput=${setArtist} />
+    </div>
+    <${Field} label="或用關鍵字（填了就只用關鍵字搜尋）" value=${q} onInput=${setQ} placeholder="例如：ユーフォリア 牧野由依" />
+    <div class="actions"><button class="btn tonal" type="submit" disabled=${!q.trim() && !title.trim()}><${Icon} name="search" />搜尋</button></div>
+  </form>`;
+}
+
 function editLyrics(item, online = false) {
   showDialog((close) => html`<${LyricsEditor} item=${item} close=${close} online=${online} />`);
 }
@@ -435,6 +468,7 @@ function editLyrics(item, online = false) {
 function LyricsEditor({ item, close, online: startOnline }) {
   const data = useLoad(() => loadLyrics(item.trackId), [item.trackId]);
   const [online, setOnline] = useState(!!startOnline);
+  const [query, setQuery] = useState('');
   const [text, setText] = useState(null);
   const [busy, setBusy] = useState(false);
   const value = text ?? (data.data ? data.data.text : '');
@@ -457,8 +491,9 @@ function LyricsEditor({ item, close, online: startOnline }) {
         <button class="btn text" onClick=${() => setOnline(false)}>自己輸入</button>
         <span class="grow"></span>
         <button class="btn text" onClick=${close}>取消</button>`}>
-      <p class="hint">只會把這首歌的標題和歌手送到 LRCLIB（lrclib.net）查詢。選擇的歌詞會取代目前的歌詞。</p>
-      <${FoundLyrics} item=${item} onChosen=${close} />
+      <p class="hint">只會把下面的曲名和歌手（或關鍵字）送到 LRCLIB（lrclib.net）查詢。選擇的歌詞會取代目前的歌詞。</p>
+      <${AdjustSearch} item=${item} onSearch=${setQuery} />
+      <${FoundLyrics} item=${item} onChosen=${close} query=${query} />
     <//>`;
   }
   return html`<${Dialog} title=${`歌詞：${item.title}`} onClose=${close} actions=${html`

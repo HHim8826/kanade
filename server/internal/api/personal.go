@@ -279,13 +279,32 @@ func (s *Server) topTracks(w http.ResponseWriter, r *http.Request) {
 }
 
 // findLyrics looks the track's lyrics up in LRCLIB (on request: only this song's title and artist
-// are sent; its length ranks the answers) and lists what fits, best first.
+// are sent; its length ranks the answers) and lists what fits, best first. A search adjusted by
+// hand gives the title and artist to look for (title, artist), or keywords (q) (review #122).
 func (s *Server) findLyrics(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.lyricsTrack(w, r)
 	if !ok {
 		return
 	}
-	list, err := s.lrclib.Find(r.Context(), lrclib.Song{Title: t.Title, Artist: t.Artist, Album: t.Album, DurationMS: t.Asset.DurationMS})
+	song := lrclib.Song{Title: t.Title, Artist: t.Artist, Album: t.Album, DurationMS: t.Asset.DurationMS}
+	q := r.URL.Query()
+	if q.Has("title") {
+		song.Title, song.Artist = strings.TrimSpace(q.Get("title")), strings.TrimSpace(q.Get("artist"))
+	}
+	if len(song.Title) > 500 || len(song.Artist) > 500 || len(q.Get("q")) > 500 {
+		writeError(w, http.StatusBadRequest, errors.New("search too long"))
+		return
+	}
+	var list []lrclib.Candidate
+	var err error
+	if keywords := strings.TrimSpace(q.Get("q")); keywords != "" {
+		list, err = s.lrclib.Keywords(r.Context(), song, keywords)
+	} else if song.Title == "" {
+		writeError(w, http.StatusBadRequest, errors.New("a title or keywords to look for"))
+		return
+	} else {
+		list, err = s.lrclib.Find(r.Context(), song)
+	}
 	if err != nil {
 		s.lrclibError(w, r, err)
 		return

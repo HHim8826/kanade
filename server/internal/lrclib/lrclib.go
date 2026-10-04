@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -234,32 +235,104 @@ type Candidate struct {
 	off   float64
 }
 
-// Find searches by title and artist (then title alone when that finds nothing), and ranks what it
-// finds: records with words before instrumental ones, exact matches first, then synced lyrics,
-// then the closest length. At most ten.
+// Find looks for the song's lyrics in a few searches, stopping at the first that finds lyrics with
+// words (reviews #122, #123): by title and artist, by title alone; for a title that carries its
+// singer ("曲名 / 歌手"), by that title and singer, then that title alone; last by keywords, which
+// LRCLIB matches across title, artist and album. A record without words does not end the search.
+// What is found is ranked (see rank).
 func (c *Client) Find(ctx context.Context, s Song) ([]Candidate, error) {
 	if strings.TrimSpace(s.Title) == "" {
 		return nil, errors.New("the song has no title")
 	}
-	q := url.Values{"track_name": {s.Title}}
-	if s.Artist != "" {
-		q.Set("artist_name", s.Artist)
+	var all []Lyrics
+	for _, q := range queries(s) {
+		list, err := c.search(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, list...)
+		if slices.ContainsFunc(list, func(l Lyrics) bool { return hasWords(&l) }) {
+			break
+		}
 	}
-	list, err := c.search(ctx, q)
-	if err == nil && len(list) == 0 && s.Artist != "" {
-		list, err = c.search(ctx, url.Values{"track_name": {s.Title}})
+	return rank(s, all), nil
+}
+
+// Keywords searches LRCLIB by keywords alone, as someone adjusting a search types them, and ranks
+// what it finds for the song.
+func (c *Client) Keywords(ctx context.Context, s Song, keywords string) ([]Candidate, error) {
+	if strings.TrimSpace(keywords) == "" {
+		return nil, errors.New("no keywords")
 	}
+	list, err := c.search(ctx, url.Values{"q": {strings.TrimSpace(keywords)}})
 	if err != nil {
 		return nil, err
 	}
 	return rank(s, list), nil
 }
 
+// queries are Find's searches, in order, each once.
+func queries(s Song) []url.Values {
+	var out []url.Values
+	seen := map[string]bool{}
+	add := func(q url.Values) {
+		if k := q.Encode(); !seen[k] {
+			seen[k] = true
+			out = append(out, q)
+		}
+	}
+	named := func(title, artist string) url.Values {
+		q := url.Values{"track_name": {title}}
+		if artist != "" {
+			q.Set("artist_name", artist)
+		}
+		return q
+	}
+	add(named(s.Title, s.Artist))
+	add(named(s.Title, ""))
+	keywords := s.Title
+	if title, singer, ok := splitSinger(s.Title); ok {
+		add(named(title, singer))
+		add(named(title, ""))
+		keywords = title + " " + singer
+	}
+	add(url.Values{"q": {keywords}})
+	return out
+}
+
+// splitSinger splits a title that carries its singer after a slash ("ユーフォリア / 牧野由依"):
+// a spaced or full-width slash only, the last one, so "Fate/stay night" stays whole.
+func splitSinger(title string) (name, singer string, ok bool) {
+	i, n := strings.LastIndex(title, " / "), 3
+	if j := strings.LastIndex(title, "／"); j > i {
+		i, n = j, len("／")
+	}
+	if i < 0 {
+		return "", "", false
+	}
+	name, singer = strings.TrimSpace(title[:i]), strings.TrimSpace(title[i+n:])
+	return name, singer, name != "" && singer != ""
+}
+
+// hasWords: the record has lyrics to show, not only space; an instrumental record has none.
+func hasWords(l *Lyrics) bool { return strings.TrimSpace(l.Text()) != "" }
+
+// rank keeps the records with words or marked instrumental, once each, and orders them: records
+// with words before instrumental ones, exact matches first, then synced lyrics, then the closest
+// length. At most ten.
 func rank(s Song, list []Lyrics) []Candidate {
+	titles, artists := []string{s.Title}, []string{s.Artist}
+	if title, singer, ok := splitSinger(s.Title); ok {
+		titles, artists = append(titles, title), append(artists, singer)
+	}
+	anyOf := func(name string, names []string) bool {
+		return slices.ContainsFunc(names, func(n string) bool { return same(name, n) })
+	}
 	out := make([]Candidate, 0, len(list))
 	seen := map[int64]bool{}
 	for _, l := range list {
-		if seen[l.ID] || (l.Text() == "" && !l.Instrumental) {
+		words := hasWords(&l)
+		if seen[l.ID] || (!words && !l.Instrumental) {
 			continue
 		}
 		seen[l.ID] = true
@@ -269,7 +342,7 @@ func rank(s Song, list []Lyrics) []Candidate {
 		}
 		c := Candidate{ID: l.ID, Title: l.Title, Artist: l.Artist, Album: l.Album, Duration: l.Duration,
 			Synced: strings.TrimSpace(l.Synced) != "", Instrumental: l.Instrumental, Preview: preview(l.Text()), off: off}
-		c.Exact = off <= 2 && same(l.Title, s.Title) && (s.Artist == "" || same(l.Artist, s.Artist))
+		c.Exact = words && !l.Instrumental && off <= 2 && anyOf(l.Title, titles) && (s.Artist == "" || anyOf(l.Artist, artists))
 		out = append(out, c)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
