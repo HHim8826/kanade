@@ -257,7 +257,9 @@ func TestHeardTimeIsBounded(t *testing.T) {
 	if err := report("first", 1, 20*60*60_000); err != nil {
 		t.Fatal(err)
 	}
-	if heard, spans, rows := totals("first"); heard != 60_000+heardSlackMS || spans != heard || rows > 1 {
+	// The three minutes are spread back from now, over two 15-minute spans when they cross one's
+	// start (a run at 18:32 did).
+	if heard, spans, rows := totals("first"); heard != 60_000+heardSlackMS || spans != heard || rows > 2 {
 		t.Fatalf("first report: heard %d, spans %d in %d rows", heard, spans, rows)
 	}
 	if err := report("first", 2, 20*60*60_000); err != nil {
