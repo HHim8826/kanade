@@ -1,5 +1,5 @@
 import { useState } from '../../vendor/hooks.module.js';
-import { BANDS, MAX_DB, PRESETS, effects, headroom, presetOf, setEffects } from '../effects.js';
+import { BANDS, MAX_DB, PRESETS, boost as boostOf, effects, presetOf, setEffects } from '../effects.js';
 import { useStore } from '../store.js';
 import { Dialog, html, showDialog, toast } from '../ui.js';
 
@@ -46,7 +46,7 @@ export function EffectsPanel() {
     setEffects({ customs, preset: presetOf(e.gains, customs) });
   };
   const custom = e.preset.startsWith('custom:') ? e.preset.slice('custom:'.length) : '';
-  const boost = headroom(e.gains);
+  const boost = boostOf(e.gains);
   const choice = (key, label) => html`<button key=${key} type="button" class="choice" role="radio" aria-checked=${e.preset === key}
     disabled=${!e.eq} onClick=${() => pick(key)}>${label}</button>`;
   return html`<div class="effects">
@@ -71,7 +71,7 @@ export function EffectsPanel() {
           <span class="eq-hz">${fmtHz(f)}</span>
         </label>`)}
       </div>
-      <p class="hint tight">${boost > 0 ? `最大增強 +${boost} dB，已自動把整體降低 ${boost} dB，避免破音。` : '頻率（Hz）在下，增益（dB）在上。'}</p>
+      <p class="hint tight">${boost > 0 ? `曲線最多增強 ${boost} dB（相鄰頻段會疊加），已把整體降低同樣多，避免破音。` : '頻率（Hz）在下，增益（dB）在上。'}</p>
       ${naming === null
         ? html`<div class="actions">
             <button class="btn text" disabled=${!e.eq || e.gains.every((g) => g === 0)} onClick=${() => setEffects({ gains: PRESETS[0][2].slice(), preset: 'flat' })}>歸零</button>
