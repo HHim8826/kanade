@@ -260,7 +260,13 @@ export async function playSmart(id, name) {
 }
 
 const autoItem = (it) => ({ ...it, auto: true });
-const recentIds = (s) => [...new Set(s.queue.slice(Math.max(s.index - 49, 0), s.index + 1).map((q) => q.trackId).filter(Boolean))];
+// recentIds are the songs not to pick again, the latest first: those queued to come, the one
+// playing, then the last ones played. With nothing else left the server goes round again from the
+// end of the list, so what is queued is not added twice (review #105).
+const recentIds = (s) => {
+  const ahead = s.queue.slice(s.index + 1), played = s.queue.slice(Math.max(s.index - 49, 0), s.index + 1).reverse();
+  return [...new Set([...ahead, ...played].map((q) => q.trackId).filter(Boolean))].slice(0, 200);
+};
 
 // topUp keeps library songs ahead while the queue goes on by itself: two ahead with preloading
 // (so the next one can be warmed), else one when the queue reaches its end (now), which needs one

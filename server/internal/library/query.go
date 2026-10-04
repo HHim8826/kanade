@@ -461,17 +461,23 @@ func (s *Store) TrackBySameAudio(ctx context.Context, audioMD5 string) (string, 
 // file; of kind (music or spoken, "" both); leaving out not (the songs just played) unless that
 // leaves nothing to play.
 func (s *Store) RandomTracks(ctx context.Context, n int, kind string, not []int64) ([]TrackItem, error) {
-	pick := func(not []int64) ([]any, error) {
+	// pick picks songs at random, leaving out those of not, or only among those of only.
+	pick := func(not, only []int64) ([]any, error) {
 		args := []any{kind, kind}
 		q := `SELECT t.id FROM tracks t WHERE (? = '' OR t.kind = ?) AND EXISTS (SELECT 1 FROM track_assets ta
 			JOIN assets a ON a.id = ta.asset_id WHERE ta.track_id = t.id AND a.state = 'verified')`
-		if len(not) > 0 {
-			q += ` AND t.id NOT IN (` + strings.Repeat("?, ", len(not)-1) + `?)`
-			for _, id := range not {
-				args = append(args, id)
+		for _, set := range []struct {
+			op  string
+			ids []int64
+		}{{"NOT IN", not}, {"IN", only}} {
+			if len(set.ids) > 0 {
+				q += ` AND t.id ` + set.op + ` (` + strings.Repeat("?, ", len(set.ids)-1) + `?)`
+				for _, id := range set.ids {
+					args = append(args, id)
+				}
 			}
 		}
-		rows, err := s.db.QueryContext(ctx, q+` ORDER BY random() LIMIT ?`, append(args, n)...)
+		rows, err := s.db.QueryContext(ctx, q+` ORDER BY random() LIMIT ?`, append(args, n+len(only))...)
 		if err != nil {
 			return nil, err
 		}
@@ -486,11 +492,16 @@ func (s *Store) RandomTracks(ctx context.Context, n int, kind string, not []int6
 		}
 		return ids, rows.Err()
 	}
-	ids, err := pick(not)
+	ids, err := pick(not, nil)
 	if err == nil && len(ids) == 0 && len(not) > 0 {
-		ids, err = pick(not[len(not)-1:]) // a small library: anything but the song just played
-		if err == nil && len(ids) == 0 {
-			ids, err = pick(nil) // a library of one song
+		// A small library: round again (review #105).
+		var left []any
+		if left, err = pick(nil, not); err == nil {
+			ids = nil
+			for _, id := range roundAgain(int64s(left), not) {
+				ids = append(ids, id)
+			}
+			ids = ids[:min(len(ids), n)]
 		}
 	}
 	if err != nil || len(ids) == 0 {

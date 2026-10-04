@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -213,6 +214,69 @@ func (s *Store) SmartTracks(ctx context.Context, r Rules, exclude []int64, upTo 
 		}
 	}
 	return tracks, matches, nil
+}
+
+// SmartNext picks the next n songs of rules played on and on, leaving out the songs of not (the
+// latest first: those queued to come, the one playing, then those played). When the rules match
+// only songs of not, it goes round again rather than stop (review #105).
+func (s *Store) SmartNext(ctx context.Context, r Rules, not []int64, n int) ([]TrackItem, error) {
+	r.Limit, r.Minutes = 0, 0 // going on: the limits are for the list
+	tracks, matches, err := s.SmartTracks(ctx, r, not, n)
+	if err != nil || len(tracks) > 0 || matches == 0 || len(not) == 0 {
+		return tracks, err
+	}
+	all, _, err := s.SmartTracks(ctx, r, nil, 0) // the rules match no more songs than not has
+	if err != nil {
+		return nil, err
+	}
+	byID := map[int64]TrackItem{}
+	var left []int64
+	for _, t := range all {
+		byID[t.ID] = t
+		left = append(left, t.ID)
+	}
+	for _, id := range roundAgain(left, not) {
+		if len(tracks) == n {
+			break
+		}
+		tracks = append(tracks, byID[id])
+	}
+	return tracks, nil
+}
+
+// roundAgain orders the songs of ids that are in not for going round again: not lists the latest
+// first, so those played longest ago come first, and the latest one (queued to come, or playing)
+// only when it is all there is (reviews #72, #105).
+func roundAgain(ids, not []int64) []int64 {
+	pos := map[int64]int{}
+	for i, id := range not {
+		if _, ok := pos[id]; !ok {
+			pos[id] = i
+		}
+	}
+	var out []int64
+	latest := false
+	for _, id := range ids {
+		switch i, ok := pos[id]; {
+		case ok && i == 0:
+			latest = true
+		case ok:
+			out = append(out, id)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return pos[out[i]] > pos[out[j]] })
+	if len(out) == 0 && latest {
+		out = []int64{not[0]}
+	}
+	return out
+}
+
+func int64s(ids []any) []int64 {
+	out := make([]int64, len(ids))
+	for i, id := range ids {
+		out[i] = id.(int64)
+	}
+	return out
 }
 
 func encodeRules(r Rules) (string, error) {

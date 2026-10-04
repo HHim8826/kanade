@@ -144,3 +144,47 @@ func TestSmartRules(t *testing.T) {
 		t.Fatalf("rules on an ordinary playlist: %v", err)
 	}
 }
+
+// Played on and on, a smart playlist whose rules match only songs just played or queued goes round
+// again, those played longest ago first and never the song queued or playing last, unless it is the
+// only one; rules that match nothing give nothing (review #105).
+func TestSmartNextGoesRoundAgain(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	f := fixture{t, s}
+	a := f.song("a", "A", "Album", 1, 1)
+	b := f.song("b", "B", "Album", 1, 2)
+	c := f.song("c", "C", "Album", 1, 3)
+	album := Rules{Conditions: []Condition{{Field: "album", Op: "is", IDs: []int64{f.albumOf(a.EntryID)}}}, Sort: "album"}
+	titles := func(r Rules, n int, not ...int64) string {
+		t.Helper()
+		list, err := s.SmartNext(ctx, r, not, n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := ""
+		for _, x := range list {
+			out += x.Title
+		}
+		return out
+	}
+	for _, tc := range []struct {
+		name string
+		r    Rules
+		n    int
+		not  []int64
+		want string
+	}{
+		{"first pick", album, 3, nil, "ABC"},
+		{"songs left", album, 3, []int64{a.TrackID}, "BC"},
+		{"C playing, all played: round again", album, 3, []int64{c.TrackID, b.TrackID, a.TrackID}, "AB"},
+		{"C queued, B playing", album, 2, []int64{c.TrackID, b.TrackID, a.TrackID}, "AB"},
+		{"played more than once", album, 3, []int64{a.TrackID, c.TrackID, b.TrackID, a.TrackID}, "BC"},
+		{"only the song playing", Rules{Conditions: []Condition{{Field: "artist", Op: "contains", Value: "xa"}}}, 2, []int64{a.TrackID, b.TrackID}, "A"},
+		{"rules match nothing", Rules{Conditions: []Condition{{Field: "artist", Op: "contains", Value: "nobody"}}}, 2, []int64{a.TrackID}, ""},
+	} {
+		if got := titles(tc.r, tc.n, tc.not...); got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}

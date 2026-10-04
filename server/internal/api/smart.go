@@ -61,7 +61,8 @@ func (s *Server) setPlaylistRules(w http.ResponseWriter, r *http.Request) {
 }
 
 // smartNext picks the next songs of a smart playlist played on and on: n songs by its rules and
-// order, leaving out those just played (not).
+// order, leaving out those queued and just played (not, the latest first), round again when only
+// those are left.
 func (s *Server) smartNext(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -85,9 +86,7 @@ func (s *Server) smartNext(w http.ResponseWriter, r *http.Request) {
 			not = append(not, id)
 		}
 	}
-	rule := *rules
-	rule.Limit, rule.Minutes = 0, 0 // going on: the limits are for the list
-	tracks, _, err := s.lib.SmartTracks(r.Context(), rule, not, n)
+	tracks, err := s.lib.SmartNext(r.Context(), *rules, not, n)
 	if err != nil {
 		s.libError(w, r, err)
 		return

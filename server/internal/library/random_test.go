@@ -49,8 +49,9 @@ func TestRandomTracks(t *testing.T) {
 	if list, _ := s.RandomTracks(ctx, 5, "music", []int64{a, b.TrackID}); len(list) != 1 || list[0].ID != e.TrackID {
 		t.Fatalf("leaving out the ones just played: %+v", list)
 	}
-	// Everything was just played: anything but the very last one.
-	if list, _ := s.RandomTracks(ctx, 5, "music", []int64{a, b.TrackID, e.TrackID}); len(list) != 2 || list[0].ID == e.TrackID || list[1].ID == e.TrackID {
+	// Everything was just played (the latest first): round again, those played longest ago first,
+	// never the very last one (review #105).
+	if list, _ := s.RandomTracks(ctx, 5, "music", []int64{e.TrackID, b.TrackID, a}); len(list) != 2 || list[0].ID != a || list[1].ID != b.TrackID {
 		t.Fatalf("all just played: %+v", list)
 	}
 	if list, _ := s.RandomTracks(ctx, 5, "spoken", []int64{c.TrackID}); len(list) != 1 || list[0].ID != c.TrackID {
