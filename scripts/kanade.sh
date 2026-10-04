@@ -583,6 +583,18 @@ remove_service() {
 
 pattern() { printf '^%s -data %s serve' "$BIN" "$DATA_DIR"; }
 
+# serving: the program answering is the file at $BIN now (review #91): every running Kanade process
+# runs that very file, not one replaced since, which the process still holds (its /proc exe).
+serving() {
+  local pid ino none=1
+  ino=$(stat -L -c %i "$BIN" 2>/dev/null) || return 1
+  for pid in $(pgrep -f "$(pattern)"); do
+    [ "$(stat -L -c %i "/proc/$pid/exe" 2>/dev/null)" = "$ino" ] || return 1
+    none=0
+  done
+  return $none
+}
+
 running() {
   case "$INIT_TYPE" in
   systemd) systemctl is-active --quiet "$SERVICE" ;;
@@ -841,22 +853,27 @@ do_update() {
     service_start
     die "無法替換程式（磁碟空間不足？），沒有更新；服務已用 $current 重新啟動。"
   fi
-  if service_start && wait_up && [ "$(installed_version)" = "$latest" ]; then
+  if service_start && wait_up && serving && [ "$(installed_version)" = "$latest" ]; then
     rm -f "$BIN.old"
     install_manager "$tmp/kanade.sh"
     info "已更新到 $latest。"
     return 0
   fi
   error "新版本沒有正常啟動，退回 $current。"
-  stop_service
+  # Rolling back is checked like updating (review #91): the new program must have stopped before
+  # the old one goes back, and what answers afterwards must be the old one.
+  if ! stop_service; then
+    error "無法停止服務，沒有退回：$BIN 仍是 $latest，舊的程式在 $BIN.old。請先執行 kanade-manager stop，再執行 mv -f $BIN.old $BIN 並啟動。資料庫更新前的備份在 $backup。"
+    return 1
+  fi
   if ! mv -f "$BIN.old" "$BIN"; then
     error "無法放回舊的程式（$BIN.old），請手動處理。資料庫更新前的備份在 $backup。"
     return 1
   fi
-  if service_start && wait_up; then
+  if service_start && wait_up && serving && [ "$(installed_version)" = "$current" ]; then
     warn "已退回 $current 並重新啟動。資料庫更新前的備份在 $backup。"
   else
-    error "退回後仍無法啟動，請用 kanade-manager log 查看記錄。"
+    error "放回 $current 後，無法確認服務正以它運行，請用 kanade-manager log 查看記錄。資料庫更新前的備份在 $backup。"
   fi
   return 1
 }
