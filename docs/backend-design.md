@@ -51,6 +51,12 @@ DIR/
 | `diskguard` | 低磁碟監控：清快取、暫停下載、拒絕新上傳／下載（P2-6） |
 | `logfile` | 日誌檔輪替（P2-6） |
 | `proc` | 讓 aria2、FFmpeg 子程序隨主程序結束（P2-6） |
+| `settings` | 網頁設定頁可改的服務設定（資源、下載、Drive 同步），存在 settings 表、立即套用（#74、#75、#77） |
+| `staging` | 匯入暫存的容量預算：上傳、下載與匯入共用，放不下時排隊 |
+| `uploads` | 客戶端分塊上傳（B4） |
+| `lrclib` | LRCLIB 線上歌詞：搜尋、排序、快取、忙碌時重試 |
+| `webauthn` | passkey 註冊與登入 |
+| `web` | 內嵌的網頁端（`static/`，Preact＋htm，不需建置），於 `/app/` 提供 |
 | `api` | HTTP 路由、驗證中介層、頁面 |
 
 ## 資料模型（計畫書 §4 三層）
@@ -71,13 +77,21 @@ DIR/
 | `users`、`sessions`、`settings`、`credentials` | 帳號、登入 token（只存雜湊）、設定、OAuth token |
 | `plays` | 播放紀錄（D9）：session、音檔、歌曲、從哪張專輯播放、位置、實際聽的時間、是否計次、是否聽完 |
 | `favorite_tracks`、`favorite_albums` | 收藏 |
-| `playlists`、`playlist_items` | 歌單；條目有獨立 ID、歌曲、可選專輯與音檔版本、位置，允許重複 |
+| `playlists`、`playlist_items` | 歌單；條目有獨立 ID、歌曲、可選專輯與音檔版本、位置，允許重複。智慧歌單的 `rules`（JSON）不為空，內容由規則即時挑選（#96） |
 | `lyrics` | 每首歌曲一份歌詞：來源（內嵌／LRC／手動）、是否有時間軸 |
 | `aliases` | 歌手、專輯、歌曲的其他名稱，建入搜尋索引 |
 | `edit_groups`、`edits` | 修改紀錄：每個操作一組，逐欄記舊值與新值，供撤回 |
 | `sidecars` | 與專輯一起保存的 CUE、LOG：Drive file ID、SHA-256、所屬專輯 |
 | `import_sources` | 轉換或分軌的來源檔（SHA-256＋大小）與由它產生的音檔，用於再次匯入時略過 |
 | `rss_sources`、`rss_items` | RSS 來源（網址、間隔、規則、自動下載、認證、輪詢狀態）與條目（GUID、下載連結、info hash、大小、做種數、對應的下載） |
+| `passkeys`、`oauth_states` | passkey（公開金鑰、名稱、最後使用）；OAuth 授權進行中的 state |
+| `uploads` | 客戶端上傳：群組、路徑、大小、已收到的位元組、SHA-256、狀態 |
+| `drive_trash` | 移到 Drive 垃圾桶的檔案，供撤回時找回 |
+| `album_sections` | 專輯的命名區段（例如合集裡的 Episode 1），依碟號（#82） |
+| `album_scopes` | 下載的「專輯資料夾＋專輯標籤」對應的專輯，跨批次維持同一張；`derived` 表示專輯歌手是推導的（#81、#85、#86、#88） |
+| `categories`、`album_categories` | 分類（作品、系列或任何分組）與專輯的多對多（#92） |
+| `listening` | 實際聽的時間，每次播放依 15 分鐘分桶：歌曲、從哪張專輯、類型、毫秒、該桶是否計次、是否為舊紀錄推算（#93） |
+| `bookmarks` | 書籤：音檔、位置、名稱、備註；音檔換版本時標示 `moved`（#98） |
 
 精確去重鍵是 `sha256`＋`size`（唯一約束），上傳完成以 Drive 回傳的 `sha256Checksum` 驗證（P0 第 1 節）。
 
@@ -91,7 +105,7 @@ DIR/
 
 ## API（`/api/v1`，JSON，`Authorization: Bearer <token>`）
 
-以下為已實作的端點（2026-10-02）。
+以下為已實作的端點（2026-10-04 更新）。
 
 | 方法與路徑 | 用途 |
 |---|---|
@@ -153,6 +167,24 @@ DIR/
 | `POST /drive/reconcile` | 在背景開始完整對帳（202；已在進行時 409） |
 | `POST /drive/inbox` | 立即檢查收件匣：`{"files": 排入匯入的數量, "waiting": 剛放進來、等下次的數量}` |
 | `GET /library/missing` | 音檔在 Drive 遺失的歌曲 |
+| `POST /account/password` | `{"current", "password"}` 改自己的密碼：結束所有登入、保留 passkey（#76） |
+| `GET /sessions`、`DELETE /sessions/{id}`、`POST /sessions/end-others` | 自己的登入（裝置、最後使用）；結束一個；結束其他全部 |
+| `GET /settings`、`PUT /settings/resources`、`/settings/downloads`、`/settings/drive` | 服務設定：播放快取與暫存容量、磁碟保留空間；下載與上傳限速、同時下載數、每個種子的連線數、是否做種與分享率、時數；收件匣自動匯入、檢查間隔、資料夾靜置時間。儲存時檢查並立即套用 |
+| `POST /cache/trim` | 清空播放快取（播放中的檔案保留） |
+| `GET /tracks/random?n&kind&not` | 從全曲庫隨機挑歌（以歌曲為單位、只挑可播放的；`kind` 為 `music`、`spoken` 或 `all`）；`not` 由新到舊列出不要再挑的歌，全部挑過時從最久以前的再繞一輪（#72、#105） |
+| `GET /tasks/older?kind&before` | 更早的已結束任務，一次一頁（#68） |
+| `POST /albums/merge` | 合併多張專輯到 `into` 或新專輯（`title`、`album_artist`），`sections` 讓每張成為一個區段；`"preview": true` 只回傳計畫 |
+| `POST /albums/edit`、`/albums/remove`、`/tracks/edit`、`/tracks/place`、`/tracks/delete`、`/favorites/batch` | 批次操作（#83）：先檢查所有 ID，一次一筆修改紀錄 |
+| `PUT /albums/{id}/sections` | `{"sections": {"碟號": "名稱"}}` 命名區段 |
+| `PUT /downloads/{id}/grouping`、`GET`／`POST /downloads/{id}/collection` | 下載的專輯分組（依標籤、每個資料夾、合集）；已入庫的下載整理成合集：預覽計畫、套用（#82、#87） |
+| `GET /categories[?albums=]`、`POST /categories`、`PATCH`／`DELETE /categories/{id}` | 分類與各自的專輯數、封面；帶 `albums` 時另回每個分類含其中幾張（批次分類用）；新增、改名、刪除（專輯不受影響，可撤回） |
+| `POST /albums/categorize` | `{"albums", "add", "remove", "create"}` 一次把專輯放入、移出分類並可新增一個；同一分類不能同時放入與移出（#92、#114） |
+| `GET /albums?category=N\|none&q&sort` | 某分類（或未分類）的專輯，可搜尋、依名稱或最近入庫排序 |
+| `GET /stats/summary`、`/stats/days?year`、`/stats/day?date`、`/stats/top?from&to&group&by&limit`、`/stats/trends?from&to` | 我的聆聽（#93）：今天／本週／本月／今年；一年的每日時間（熱力圖）；某天聽了什麼；歌曲、歌手、專輯排行（依次數或時間）；期間的每日、時段、星期分布與連續天數。都帶 `tz`（IANA 時區）與可選的 `kind` |
+| `GET /stats/export?format=csv\|json`、`DELETE /stats` | 匯出聆聽紀錄；清除（播放紀錄保留） |
+| `GET /bookmarks?track`、`POST /bookmarks`、`PATCH`／`DELETE /bookmarks/{id}` | 書籤（#98）：全部或某首歌的；`{"asset_id", "position_ms", "name", "note"}` 新增；改名與備註；刪除 |
+| `POST /playlists/preview`、`PUT /playlists/{id}/rules`、`GET /playlists/{id}/next?n&not` | 智慧歌單（#96）：預覽規則挑出的歌；修改規則；依規則一直播時的下一批（`not` 同 `/tracks/random`，只剩排除的歌時繞一輪） |
+| `GET /tracks/{id}/lyrics/online?title&artist`、`?q` | 線上歌詞：預設用歌曲自己的標題與歌手，依序試標題＋歌手、只用標題、「曲名 / 歌手」拆開、關鍵字；也可手動指定標題與歌手，或只用關鍵字（#122、#123） |
 
 ## 階段
 
@@ -438,6 +470,32 @@ DIR/
 - 播放（#72、#73、#78）：`GET /tracks/random` 以歌曲為單位從全曲庫隨機挑選（只挑可播放的、音樂與廣播劇分開、避開剛播的）。佇列可以「自己往下接」（`radio`）：全曲庫隨機，或播完後自動接續；挑來的歌標示 `auto`，使用者加入的排在前面，晚到的回應以世代號丟棄。播放設定（模式、隨機範圍、自動接續、各類型點歌是否續播、預載）存在瀏覽器。
 - 曲庫整理（#82、#83）：專輯可命名區段（`album_sections`，遷移 0025；修改紀錄欄位 `sections`）。批次操作（合併、批次修改、移除、放進專輯、收藏、永久刪除）在 `library/batch.go`，先檢查所有 ID、一次一筆修改紀錄；計畫（`Plan`：搬移、新增、分區、清空的專輯）先預覽再套用。下載可選分組（`downloads.grouping`：依標籤、每個資料夾、合集）；合集的分區與曲序由整個選取清單算出（`CollectionLayout`），每一批帶著自己檔案的位置入庫；已入庫的下載用 `CollectionPlan` 整理成合集。網頁端：`selection.js`（選取、Ctrl／Shift、全選已載入）、`views/batch.js`。
 - 驗證：每項都有以真實 SQLite、Importer、aria2、FFmpeg 的測試（修正前的程式會失敗的都確認過），完整測試含 `-race` 通過；網頁端以 headless Chromium 在正式曲庫的複本上走過（桌面與 390px），包括把 Umineko 這個下載整理成 208 首、9 個分區的合集。遷移 0023 也在正式資料庫的複本上跑過。
+
+### 分類、我的聆聽、智慧歌單、書籤與睡眠定時（2026-10-04，#84–#98）
+
+- Bug（#84–#91）：做種中的任務不佔下載名額（aria2 `bt-detach-seed-only`）；舊的 `album_scopes` 補上 `derived`（遷移 0026）；「每個資料夾一張專輯」不受分批影響（遷移 0027）；分組與合集設定進修改紀錄、可撤回（遷移 0028，`album_scopes` 改用 AUTOINCREMENT 以免撤回後 ID 重用）；批次操作記住選取時的項目；補歌等待時暫停不被蓋掉；安裝腳本的更新與退回確認是新程式在回應。
+- 分類（#92，遷移 0029）：`categories`、`album_categories`；曲庫「分類」分頁、分類頁（搜尋、排序、選取、移出）、專輯頁的分類標籤、批次分類。
+- 我的聆聽（#93，遷移 0030）：每次播放回報增加的聆聽時間，往回分到它所在的 15 分鐘區間（`listening`），所以任何時區的「一天」都能正確加總；舊的播放紀錄啟動時回填一次，標為推算。頁面：概覽、年度熱力圖（單色色階，經過對比與色覺檢查）、期間排行與趨勢、每天明細、匯出與清除；每張圖都有表格檢視。
+- 書籤與睡眠定時（#98，遷移 0031）：書籤記在音檔與位置上，音檔換版本時提示；睡眠定時（分鐘或播完這首），最後 20 秒漸弱，只在這台裝置有效。
+- 智慧歌單（#96，遷移 0032）：規則（分類、專輯、歌手、類型、收藏、播放次數、最近播過、從沒播過、聽完過；全部或任一符合）、排序、首數或分鐘上限；可照目前結果播，或依規則一直播。
+- 驗證：每項都有真實 SQLite 的測試（含遷移在 v22 資料庫上升級），`-race` 通過；網頁端以 headless Chromium 在正式曲庫的複本上走過桌面與手機寬度。依序部署為 v0.1.5–v0.1.9。
+
+### 審查修正（2026-10-04，#101–#124）
+
+- 聆聽回報（#102）：單次回報超過 24 小時直接拒絕；同一次播放的聆聽時間不超過開始播放以來的實際時間（容許 2 分鐘時鐘誤差），首次回報不超過音檔長度，播放紀錄與分桶總和保持一致。
+- 統計（#108、#109）：歌手排行依歌曲連結的歌手身分分組，可開歌手頁；專輯排行用遞迴查詢解完整合併鏈（有循環與缺失防護），撤回合併後恢復。
+- 續播（#105）：`/playlists/{id}/next` 與 `/tracks/random` 的 `not` 改為由新到舊（排隊中、正在播、最近播過）；規則只符合排除的歌時繞一輪，最近那首只在唯一時重複。
+- 播放器（#103、#104、#106、#110）：睡眠定時到期會讓等待中的補歌不開播；舊的重試只對同一個佇列、沒有暫停過時接著播；`resumeMs: 0` 是明確的開頭，不被自動續播覆蓋；手機播放欄的定時只顯示圖示或短倒數。
+- 線上歌詞（#122、#123）：依序查詢、找到有文字的歌詞才停；拆「曲名 / 歌手」與關鍵字查詢；只有空白的記錄不算候選也不算吻合；對話框可調整搜尋。
+- 介面（#101、#107、#111–#121、#124）：選取按鈕與分類頁首預留位置；預覽只接受目前條件的回應；分類載入失敗有錯誤與重試；批次分類改為「原樣 → 全部放入 → 全部移出」並列出差異；核取框跟隨主題；熱力圖依寬度調整格子、提示移到不捲動的外層、換年保留鍵盤入口；時區改在設定頁（跟隨瀏覽器或手動）；選檔按鈕改用可聚焦的 button（`FilePick`）；placeholder 用主題色；上傳中每個檔名只出現一次。
+- 驗證：新增的單元測試與修正前會失敗的確認；瀏覽器照各 issue 的重現步驟實測。部署為 v0.1.10；因 v0.1.10 標籤的 CI 格式檢查失敗，release 由 v0.1.11 發佈（程式相同）。
+
+### 安裝腳本：SysV、開機自動啟動、管理腳本更新（2026-10-04）
+
+- 服務管理多了 SysV：PID 1 是 init、有 `/etc/init.d` 與 `rc2.d` 的機器（sysvinit，或開機時執行 rc 連結的虛擬機）寫入 `/etc/init.d/kanade` 與 rc 連結；腳本以服務帳號在背景啟動、pid 存在 `/run`，沒有被回收的殭屍程序算已停止。
+- `kanade-manager autostart [on|off]`（選單 15）：顯示並開關開機自動啟動（systemd enable、OpenRC rc-update、SysV rc 連結、cron @reboot）；服務檔被刪掉時重新寫入。安裝與狀態會顯示是否已開啟。
+- `update` 會一併更新 kanade-manager：先比對 release 的 `SHA256SUMS`（從 v0.1.12 起列入 `kanade.sh`）並確認 bash 能完整讀取；Kanade 已是同一版時只更新腳本、不重新啟動服務。
+- 驗證：以腳本自己的函式在暫存目錄測試（SysV 啟動、停止、重複啟動、殭屍、rc 連結、autostart 開關與重寫服務檔、管理腳本的校驗與截斷），以 root 實測 runuser 與 su 兩種啟動方式；原有的更新與退回測試照樣通過。
 
 ## 使用方式（開發環境）
 
