@@ -55,6 +55,7 @@ export const player = createStore({
   // library or "keep playing" once the queue's own songs ran out; songs it adds are marked auto.
   radio: null,
   radioError: null, // why the last pick from the library failed
+  sleep: null, // the sleep timer (review #98): { until } (a time, ms) or { endOfTrack: true }; this device only
   ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
 
@@ -80,9 +81,13 @@ export function setPrefs(patch) {
 
 const audio = new Audio();
 audio.preload = 'auto';
+const SLEEP_FADE_MS = 20_000;
+// applyVolume sets the volume chosen, faded out over the last seconds of a sleep timer; the fade
+// never touches the setting itself.
 const applyVolume = () => {
   const s = player.get();
-  audio.volume = s.volume;
+  const fade = s.sleep && s.sleep.until ? Math.min(1, Math.max(0, (s.sleep.until - Date.now()) / SLEEP_FADE_MS)) : 1;
+  audio.volume = s.volume * fade;
   audio.muted = s.muted;
 };
 applyVolume();
@@ -538,7 +543,70 @@ audio.addEventListener('timeupdate', () => {
   if (now - lastTick < 250) return; // 4 updates a second is plenty
   lastTick = now;
   player.set({ time: audio.currentTime });
+  if (player.get().sleep) checkSleep();
 });
+
+// ---- sleep timer (review #98) ----
+// On this device only: playback pauses at a time (its last 20 s fading out) or when the playing song
+// ends. The time is a deadline, checked as the song plays, on a timer and when the page shows again,
+// so a page left in the background is not late; changing songs does not reset it. Closing the page
+// ends it with the playback.
+let sleepTick = 0;
+function armSleep() {
+  clearInterval(sleepTick);
+  sleepTick = setInterval(checkSleep, 1000);
+  checkSleep();
+}
+function endSleep() {
+  clearInterval(sleepTick);
+  sleepTick = 0;
+  player.set({ sleep: null });
+  applyVolume();
+}
+function checkSleep() {
+  const s = player.get().sleep;
+  if (s && s.until && Date.now() >= s.until) {
+    endSleep();
+    if (!audio.paused) {
+      pauses++; // as if the listener paused: nothing goes on by itself
+      audio.pause();
+    }
+    toast('睡眠定時到了，已暫停播放');
+    return;
+  }
+  applyVolume();
+}
+export function setSleep(minutes) {
+  player.set({ sleep: { until: Date.now() + minutes * 60_000 } });
+  armSleep();
+}
+export function sleepAfterTrack() {
+  player.set({ sleep: { endOfTrack: true } });
+  armSleep();
+}
+export function extendSleep(minutes) {
+  const s = player.get().sleep;
+  if (!s || !s.until) return;
+  player.set({ sleep: { until: Math.max(s.until, Date.now()) + minutes * 60_000 } });
+  applyVolume();
+}
+export const cancelSleep = endSleep;
+document.addEventListener('visibilitychange', () => player.get().sleep && checkSleep());
+
+// playBookmark plays a bookmark's place on the file it was made on (its asset); one whose file
+// changed since plays only when asked (anyway), on the song's file now.
+export function playBookmark(b, anyway = false) {
+  if (!b.track || (!b.asset && !anyway)) return;
+  const item = fromTrack(b.track);
+  if (b.asset) Object.assign(item, { asset: b.asset, assetId: b.asset.id, durationMs: b.asset.duration_ms });
+  const cur = current();
+  if (cur && cur.assetId === item.assetId) {
+    seek(b.position_ms / 1000);
+    if (audio.paused) audio.play().catch(() => {});
+    return;
+  }
+  playQueue([{ ...item, resumeMs: b.position_ms }], 0);
+}
 audio.addEventListener('seeked', () => player.set({ time: audio.currentTime }));
 audio.addEventListener('durationchange', () => isFinite(audio.duration) && player.set({ duration: audio.duration }));
 audio.addEventListener('play', () => player.set({ playing: true }));
@@ -555,6 +623,13 @@ audio.addEventListener('playing', () => {
 audio.addEventListener('ended', () => {
   report(true);
   session = null;
+  const sleep = player.get().sleep;
+  if (sleep && sleep.endOfTrack) { // before looping the song or the queue, before going on by itself
+    endSleep();
+    stopAtEnd();
+    toast('這首播完了，已依睡眠定時停止');
+    return;
+  }
   if (player.get().repeat === 'one') load(player.get().index, true, true);
   else next();
 });

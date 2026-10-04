@@ -2,13 +2,14 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import { ApiError, api, get, post } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
-  clearUpcoming, current, cycleMode, endScrub, moveItem, next, playAfterCurrent, playAt, player, prev, removeAt, resetPlayer, retryRadio,
-  scrubTo, seek, setPrefs, setVolume, toggle, toggleMute,
+  cancelSleep, clearUpcoming, current, cycleMode, endScrub, extendSleep, moveItem, next, playAfterCurrent, playAt, player, prev,
+  removeAt, resetPlayer, retryRadio, scrubTo, seek, setPrefs, setSleep, setVolume, sleepAfterTrack, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
 import { DragHandle, useReorder } from './common.js';
 import { createStore, useStore } from '../store.js';
-import { Cover, Dialog, Empty, ErrorBox, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
+import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
+import { BookmarkDialog, BookmarkList } from './bookmarks.js';
 
 const open = (v) => player.set({ nowPlayingOpen: v });
 
@@ -77,6 +78,7 @@ export function PlayerBar() {
       <${IconButton} icon="next" label="下一首" onClick=${next} />
     </div>
     <div class="bar-extra">
+      ${s.sleep && html`<${SleepButton} s=${s} compact />`}
       <span class="bar-time wide-only">${fmtTime(shownTime(s) * 1000)} / ${fmtTime(s.duration * 1000)}</span>
       <span class="wide-only">${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}</span>
       <span class="wide-only"><${IconButton} icon="lyrics" label="歌詞" onClick=${() => openTab('lyrics')} /></span>
@@ -138,15 +140,90 @@ export function NowPlaying() {
           <${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} />
         </div>
         <${Volume} s=${s} />
+        <div class="np-tools">
+          <${SleepButton} s=${s} />
+          ${item.trackId && html`<button class="btn text" onClick=${() => addBookmark(item)}><${Icon} name="bookmarkAdd" />在 ${fmtTime(shownTime(s) * 1000)} 加書籤</button>`}
+        </div>
       </div>
     </div>
     <div class="np-panel">
       <nav class="tabs" role="tablist">
-        ${[['queue', '播放佇列'], ['lyrics', '歌詞']].map(([k, label]) => html`<button role="tab" aria-selected=${k === tab}
+        ${[['queue', '播放佇列'], ['lyrics', '歌詞'], ['bookmarks', '書籤']].map(([k, label]) => html`<button role="tab" aria-selected=${k === tab}
           class=${k === tab ? 'active' : ''} onClick=${() => panel.set({ tab: k })}>${label}</button>`)}
       </nav>
-      ${tab === 'queue' ? html`<${Queue} s=${s} />` : html`<${Lyrics} item=${item} time=${s.time} />`}
+      ${tab === 'queue' ? html`<${Queue} s=${s} />` : tab === 'lyrics' ? html`<${Lyrics} item=${item} time=${s.time} />`
+        : html`<${TrackBookmarks} item=${item} />`}
     </div>
+  </div>`;
+}
+
+// ---- sleep timer and bookmarks (review #98) ----
+
+// useNow is the time, a second at a time, for a countdown that runs while nothing plays.
+function useNow(on) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!on) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [on]);
+  return now;
+}
+
+const fmtLeft = (ms) => {
+  const sec = Math.max(0, Math.ceil(ms / 1000));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), x = sec % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(x).padStart(2, '0')}` : `${m}:${String(x).padStart(2, '0')}`;
+};
+
+// SleepButton sets, extends or cancels the sleep timer, and shows what is left (compact: in the
+// player bar, only while it is on).
+function SleepButton({ s, compact }) {
+  const now = useNow(!!(s.sleep && s.sleep.until));
+  const label = !s.sleep ? '睡眠定時' : s.sleep.endOfTrack ? '播完這首停止' : `${fmtLeft(s.sleep.until - now)} 後停止`;
+  const menu = (e) => openMenu(e, s.sleep ? [
+    s.sleep.until && { icon: 'add', label: '延長 15 分鐘', onClick: () => extendSleep(15) },
+    { icon: 'close', label: '取消睡眠定時', onClick: () => { cancelSleep(); toast('已取消睡眠定時'); } },
+  ] : [
+    ...[15, 30, 60, 90].map((m) => ({ icon: 'bedtime', label: `${m} 分鐘後停止`, onClick: () => setSleep(m) })),
+    { icon: 'edit', label: '自訂時間…', onClick: () => showDialog((close) => html`<${SleepDialog} close=${close} />`) },
+    { icon: 'next', label: '播完這首後停止', onClick: sleepAfterTrack },
+  ]);
+  return html`<button class=${'btn ' + (s.sleep ? 'tonal' : 'text') + (compact ? ' sleep-chip' : '')} onClick=${menu}
+    aria-label=${s.sleep ? `睡眠定時：${label}` : '睡眠定時'}><${Icon} name="bedtime" />${!compact || s.sleep ? label : ''}</button>`;
+}
+
+function SleepDialog({ close }) {
+  const [min, setMin] = useState('45');
+  const n = Number(min);
+  const ok = Number.isFinite(n) && n >= 1 && n <= 720;
+  const submit = () => { setSleep(n); close(); };
+  return html`<${Dialog} title="睡眠定時" onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${!ok} onClick=${submit}>開始</button>`}>
+    <label class="field">幾分鐘後停止<input type="number" min="1" max="720" value=${min} onInput=${(e) => setMin(e.target.value)} /></label>
+    <p class="hint">時間到會暫停並記住播放位置，最後 20 秒音量會漸弱（不改你的音量設定）。定時只在這台裝置有效，關閉網頁就取消。</p>
+  <//>`;
+}
+
+const bookmarksRev = createStore({ n: 0 });
+
+function addBookmark(item) {
+  const at = Math.round((player.get().scrub ?? player.get().time) * 1000);
+  showDialog((close) => html`<${BookmarkDialog} close=${close} item=${item} at=${at}
+    onSaved=${() => { bookmarksRev.set((v) => ({ n: v.n + 1 })); panel.set({ tab: 'bookmarks' }); }} />`);
+}
+
+// TrackBookmarks lists the playing song's bookmarks.
+function TrackBookmarks({ item }) {
+  const { n } = useStore(bookmarksRev);
+  const data = useLoad(() => (item.trackId ? get('/bookmarks?track=' + item.trackId) : Promise.resolve([])), [item.trackId], n);
+  if (data.loading && !data.data) return html`<${Spinner} />`;
+  if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`;
+  return html`<div class="np-bookmarks">
+    ${data.data.length ? html`<${BookmarkList} items=${data.data} onChanged=${data.reload} />`
+      : html`<${Empty} icon="bookmark">這首還沒有書籤。播放到想記住的地方，按「加書籤」。<//>`}
+    <a class="btn text" href=${href('bookmarks')} onClick=${() => open(false)}>所有書籤 ›</a>
   </div>`;
 }
 

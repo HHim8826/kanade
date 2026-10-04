@@ -750,3 +750,14 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .rank-value { display: flex; flex-direction: column; align-items: flex-end; flex: none; font-variant-numeric: tabular-nums; }
 .data-tools select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s);
   padding: 8px; max-width: 100%; }
+
+/* Sleep timer and bookmarks (review #98) */
+.np-tools { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 8px; margin-top: 8px; }
+.sleep-chip { padding: 4px 10px; min-height: 32px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bookmark-row { display: flex; align-items: center; gap: 4px; }
+.bookmark-row .row { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 8px; border: 0; background: none; text-align: left;
+  font: inherit; color: inherit; border-radius: var(--radius-s); cursor: pointer; }
+.bookmark-row .row:hover { background: var(--surface-container); }
+.bookmark-row .row:disabled { cursor: default; opacity: .6; }
+.bm-time { flex: none; min-width: 52px; font-variant-numeric: tabular-nums; color: var(--primary); font-weight: 600; }
+.np-bookmarks { padding: 8px 0; }
