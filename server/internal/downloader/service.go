@@ -1182,7 +1182,7 @@ func aria2Options(p settings.Downloads) map[string]string {
 		"max-overall-download-limit": kib(p.DownKiB),
 		"max-overall-upload-limit":   kib(p.UpKiB),
 		"bt-max-peers":               strconv.Itoa(p.MaxPeers),
-		// Slots for seeding tasks and metadata fetches beside the downloads.
+		// Slots for metadata fetches beside the downloads (seeding tasks take none: writeConfig).
 		"max-concurrent-downloads": strconv.Itoa(p.Concurrent + 4),
 		"seed-ratio":               ratio,
 		"seed-time":                minutes,

@@ -499,3 +499,64 @@ func TestConfigCarriesSettings(t *testing.T) {
 		}
 	}
 }
+
+// Seeding tasks do not count against aria2's download slots: five torrents seeding without end and
+// one download at a time still let the next download run, also after aria2 starts again and the
+// seeds are added back (review #84).
+func TestSeedersCannotBlockNextDownload(t *testing.T) {
+	r := newRig(t, 10<<20)
+	ctx := r.ctx
+	r.svc.SetPolicy(ctx, settings.Downloads{Concurrent: 1, MaxPeers: 30, Seed: true}) // seed without end
+	content := filepath.Join(r.tmp, "many")
+	web := httptest.NewServer(http.FileServer(http.Dir(content)))
+	defer web.Close()
+	torrent := func(i int) []byte {
+		name := fmt.Sprintf("Seed%d", i)
+		os.MkdirAll(filepath.Join(content, name), 0o755)
+		os.WriteFile(filepath.Join(content, name, "notes.txt"), []byte(strings.Repeat(name, 4000)), 0o644)
+		return makeTorrent(t, content, name, web.URL+"/", []string{"notes.txt"})
+	}
+	state := func(id int64) string { v, _ := r.svc.Get(ctx, id); return v.State }
+	start := func(i int) int64 {
+		id, err := r.svc.Add(ctx, "", torrent(i), false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "file list", 20*time.Second, func() bool { return state(id) == StateSelecting })
+		if err := r.svc.Select(ctx, id, []int{1}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	seeding := func(ids ...int64) func() bool {
+		return func() bool {
+			for _, id := range ids {
+				row, _ := r.svc.load(ctx, id)
+				var st struct {
+					Status string `json:"status"`
+					Seeder string `json:"seeder"`
+				}
+				if row.State != StateSeeding || r.svc.aria.RPC.Call(ctx, "tellStatus", &st, row.gid, []string{"status", "seeder"}) != nil ||
+					st.Status != "active" || st.Seeder != "true" {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	var seeds []int64
+	for i := 1; i <= 5; i++ {
+		seeds = append(seeds, start(i))
+		waitFor(t, fmt.Sprintf("seed %d seeding", i), 30*time.Second, seeding(seeds[len(seeds)-1]))
+	}
+	next := start(6)
+	waitFor(t, "the next download beside five seeds", 30*time.Second, seeding(append(seeds, next)...))
+
+	// aria2 starts again without the finished tasks: they come back as seeds, and still leave room.
+	r.svc.aria.RPC.Call(ctx, "shutdown", nil)
+	waitFor(t, "seeds back after aria2 restarted", 60*time.Second, func() bool {
+		return r.svc.aria.Ready() && seeding(append(seeds, next)...)()
+	})
+	last := start(7)
+	waitFor(t, "a download after the restart", 30*time.Second, seeding(last))
+}

@@ -183,9 +183,11 @@ func (a *Aria2) writeConfig(port int) (string, error) {
 		"save-session=" + session,
 		"save-session-interval=30",
 		"auto-save-interval=60",
-		// The service keeps only one task downloading at a time (plan §6); aria2 needs more slots
-		// so that seeding tasks and metadata fetches do not block a new download.
+		// The service decides how many tasks download at once (settings); aria2 needs more slots
+		// so that metadata fetches do not block a new download. Seeding tasks take none: there is
+		// no limit on how many seed, and five of them held every slot (review #84).
 		"max-concurrent-downloads=5",
+		"bt-detach-seed-only=true",
 		// BitTorrent tasks are always added from a .torrent (addTorrent, paused) so that the
 		// session file stores the torrent itself and the task keeps its GID and file selection
 		// across restarts. Never let aria2 start downloading from a link on its own.
