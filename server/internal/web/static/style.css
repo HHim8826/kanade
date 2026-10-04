@@ -420,6 +420,9 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .eq-save input { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s);
   padding: 8px 10px; min-width: 0; flex: 1 1 10em; max-width: 16em; }
 @media (max-width: 559px) { .eq-bands { grid-template-columns: repeat(5, minmax(0, 1fr)); row-gap: 20px; } .eq-band input { height: 120px; } }
+/* The volume balance's measured songs, and the line between it and the equalizer. */
+.measured { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin: 4px 0 8px; }
+.effects .divider { border: 0; border-top: 1px solid var(--outline-variant); margin: 16px 0 8px; }
 /* Keyboard shortcuts. */
 .shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 10px 24px; align-items: center; margin: 0; }
 .shortcuts > div { display: contents; } /* one grid: the descriptions line up */

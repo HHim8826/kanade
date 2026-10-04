@@ -51,6 +51,10 @@ type Cache struct {
 	log    *slog.Logger
 	Stats  Stats
 
+	// OnWhole, when set, is told of a file once it is wholly cached (its id), from a goroutine of
+	// its own: a copy that can be read through (Hold) without fetching it again.
+	OnWhole func(id string)
+
 	mu      sync.Mutex
 	files   map[string]*file
 	retired map[*file]bool // forgotten while being read; still counted until the last reader leaves
@@ -84,6 +88,7 @@ type file struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
 	have     []bool
+	missing  int // blocks not cached yet
 	fillers  []*filler
 	failures int
 	lastErr  error
@@ -124,10 +129,29 @@ func (c *Cache) acquire(id string, size int64) (*file, error) {
 		f.Close()
 		return nil, err
 	}
-	cf := &file{c: c, id: id, size: size, f: f, have: make([]bool, (size+blockSize-1)/blockSize), lastUse: time.Now(), readers: 1}
+	blocks := int((size + blockSize - 1) / blockSize)
+	cf := &file{c: c, id: id, size: size, f: f, have: make([]bool, blocks), missing: blocks, lastUse: time.Now(), readers: 1}
 	cf.cond = sync.NewCond(&cf.mu)
 	c.files[id] = cf
 	return cf, nil
+}
+
+// Hold returns the path of id's cached copy when the whole file is there, kept (not dropped or
+// evicted) until release is called.
+func (c *Cache) Hold(id string) (path string, release func(), ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cf, found := c.files[id]
+	if !found {
+		return "", nil, false
+	}
+	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	if cf.missing > 0 || cf.stale {
+		return "", nil, false
+	}
+	cf.readers++
+	return cf.f.Name(), func() { c.release(cf) }, true
 }
 
 func (c *Cache) path(id string) string {
@@ -358,7 +382,12 @@ func (cf *file) fill(ctx context.Context, fl *filler) {
 		}
 		pos += n
 		cf.mu.Lock()
-		cf.have[blk] = true
+		if !cf.have[blk] {
+			cf.have[blk] = true
+			if cf.missing--; cf.missing == 0 && cf.c.OnWhole != nil {
+				go cf.c.OnWhole(cf.id)
+			}
+		}
 		cf.failures = 0
 		fl.pos = pos
 		cf.cond.Broadcast()

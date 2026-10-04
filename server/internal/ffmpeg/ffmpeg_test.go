@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -101,5 +102,34 @@ func TestSplitIsSampleExact(t *testing.T) {
 	}
 	if _, err := os.Stat(cuts[2].Dst); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Loudness is measured from a file or from a stream that cannot seek, alike; silence gives the
+// stand-in values (review #136).
+func TestLoudness(t *testing.T) {
+	tl := tool(t)
+	ctx := context.Background()
+	src := filepath.Join("..", "media", "testdata", "tone.flac")
+	lufs, peak, err := tl.Loudness(ctx, src, nil)
+	if err != nil || lufs > -10 || lufs < -40 || peak > 0 || peak < -40 {
+		t.Fatalf("file: %v LUFS, %v dBFS, %v", lufs, peak, err)
+	}
+	f, err := os.Open(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	l2, p2, err := tl.Loudness(ctx, "", f)
+	if err != nil || l2 != lufs || p2 != peak {
+		t.Fatalf("stream: %v LUFS, %v dBFS, %v; file gave %v, %v", l2, p2, err, lufs, peak)
+	}
+	if _, _, err := tl.Loudness(ctx, "", strings.NewReader("not audio")); err == nil {
+		t.Fatal("garbage measured")
+	}
+	l, p, err := parseLoudness("[Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -70.0 LUFS\n" +
+		"    Threshold:   -inf LUFS\n\n  Sample peak:\n    Peak:       -inf dBFS\n")
+	if err != nil || l != SilentLUFS || p != SilentPeak {
+		t.Fatalf("silence: %v %v %v", l, p, err)
 	}
 }

@@ -1,3 +1,4 @@
+import { get } from './api.js';
 import { createStore } from './store.js';
 
 // ---- sound effects: the equalizer, and the volume balance (reviews #139, #136) ----
@@ -23,6 +24,9 @@ export const PRESETS = [
   ['loud', '響度', [4, 3, 1, 0, -1, -1, 0, 1, 3, 4]],
 ];
 
+// Loudness the volume balance brings every song to (LUFS): ReplayGain's, or louder.
+export const TARGETS = [[-18, '標準（−18 LUFS）'], [-14, '較大聲（−14 LUFS）']];
+
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 const curve = (g) => (Array.isArray(g) && g.length === BANDS.length && g.every((x) => typeof x === 'number' && isFinite(x))
   ? g.map((x) => clamp(Math.round(x * 2) / 2, -MAX_DB, MAX_DB)) : null);
@@ -42,6 +46,7 @@ function load() {
     gains: curve(p.gains) || PRESETS[0][2].slice(),
     customs,
     balance: ['track', 'album'].includes(p.balance) ? p.balance : 'off',
+    target: TARGETS.some(([t]) => t === p.target) ? p.target : TARGETS[0][0],
   };
 }
 
@@ -51,27 +56,32 @@ export const effects = createStore({ ...load(), unsupported: false, suspended: f
 
 export function setEffects(patch) {
   effects.set(patch);
-  const { eq, preset, gains, customs, balance } = effects.get();
+  const { eq, preset, gains, customs, balance, target } = effects.get();
   try {
-    localStorage.setItem(KEY, JSON.stringify({ eq, preset, gains, customs, balance }));
+    localStorage.setItem(KEY, JSON.stringify({ eq, preset, gains, customs, balance, target }));
   } catch { /* this page only */ }
   if (patch.eq) build();
   tune();
+  if ('balance' in patch || 'target' in patch) {
+    learn(around());
+    reapply();
+  }
 }
 
 // headroom is how much the curve's largest boost takes off the level, so a boost does not clip.
 export const headroom = (gains) => Math.max(0, ...gains);
 
-let element = null, reapply = () => {};
+let element = null, reapply = () => {}, around = () => [];
 // The graph: source → master (volume) → pre → bands → out → speakers, or with the equalizer off,
 // master → out. routed: which, once set.
 let ctx = null, master = null, pre = null, filters = [], out = null, routed = null;
 
-// attach gives the player's audio element, and how to apply its volume again (once the graph
-// takes the volume over).
-export function attach(audio, apply) {
+// attach gives the player's audio element, how to apply its volume again (once the graph takes the
+// volume over, or a song's loudness is known), and the queue's songs around the one playing.
+export function attach(audio, apply, near) {
   element = audio;
   reapply = apply;
+  around = near;
 }
 
 function build() {
@@ -192,4 +202,56 @@ export function presetOf(gains, customs) {
   if (built) return built[0];
   const name = Object.keys(customs).find((n) => same(customs[n]));
   return name ? 'custom:' + name : '';
+}
+
+// ---- the volume balance (review #136) ----
+// Every song (with 'album', every album) brought to the target loudness: the target less how loud
+// the server measured it, never so far up that its peaks pass −1 dBFS. Through the graph a quiet
+// song is raised too; without it only the louder ones are brought down (an element's volume stops at
+// 1). A song not measured yet is taken to be as loud as the library's median.
+
+const ASK_AGAIN = 5 * 60_000; // a song not measured is asked about again after this (a scan may be on it)
+const known = { assets: new Map(), albums: new Map(), median: null }; // id -> { v: loudness or null, t }
+const asking = { assets: new Set(), albums: new Set() };
+
+const stale = (map, id) => {
+  const k = map.get(id);
+  return !k || (k.v === null && Date.now() - k.t > ASK_AGAIN);
+};
+
+// learn asks the server how loud the songs (and their albums) are, those it was not asked about;
+// the volume is applied again once it answers.
+export function learn(items) {
+  const { balance } = effects.get();
+  if (balance === 'off') return;
+  const pick = (kind, key) => [...new Set(items.map((q) => q && q[key]))].filter((id) => id > 0 && !asking[kind].has(id) && stale(known[kind], id));
+  const assets = pick('assets', 'assetId'), albums = balance === 'album' ? pick('albums', 'albumId') : [];
+  if (!assets.length && !albums.length && known.median !== null) return;
+  assets.forEach((id) => asking.assets.add(id));
+  albums.forEach((id) => asking.albums.add(id));
+  get(`/loudness?assets=${assets.join(',')}&albums=${albums.join(',')}`).then((r) => {
+    const t = Date.now();
+    assets.forEach((id) => known.assets.set(id, { v: r.assets[id] || null, t }));
+    albums.forEach((id) => known.albums.set(id, { v: r.albums[id] || null, t }));
+    known.median = r.median ?? null;
+    reapply();
+  }, () => {}).finally(() => {
+    assets.forEach((id) => asking.assets.delete(id));
+    albums.forEach((id) => asking.albums.delete(id));
+  });
+}
+
+// balanceGain is the linear gain that brings item to the target loudness (1 with the balance off,
+// or with nothing known yet).
+export function balanceGain(item) {
+  const { balance, target } = effects.get();
+  if (balance === 'off' || !item) return 1;
+  const album = balance === 'album' && item.albumId ? known.albums.get(item.albumId) : null;
+  const own = known.assets.get(item.assetId);
+  const l = (album && album.v) || (own && own.v);
+  const lufs = l ? l.lufs : known.median;
+  if (lufs === null || lufs === undefined) return 1;
+  let db = target - lufs;
+  if (l) db = Math.min(db, -1 - l.peak); // its peaks stay under −1 dBFS
+  return 10 ** (db / 20);
 }

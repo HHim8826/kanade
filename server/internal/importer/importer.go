@@ -73,6 +73,9 @@ type Importer struct {
 	// after they were lost, and to retry the batch once it has them: Retry uses it for files that
 	// are gone (review #57). An error says why it cannot.
 	Refetch func(ctx context.Context, batchID int64, paths []string) error
+	// Measure, when set, measures a song's loudness from its local file as it is imported (review
+	// #136); it records a failure itself and never fails the import.
+	Measure func(ctx context.Context, assetID int64, path string)
 	// Budget is the staging budget shared with downloads and uploads (plan §6); data about to be
 	// written to the work folder (unpacked archives, FFmpeg output, inbox fetches) is held on it
 	// first. nil means no limit.
@@ -865,6 +868,9 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		if err := im.lib.MarkVerified(ctx, asset.ID, file.ID); err != nil {
 			return out, err
 		}
+	}
+	if im.Measure != nil { // while the file is here (one measured already is left as it is)
+		im.Measure(ctx, asset.ID, it.path)
 	}
 
 	// Covers and lyrics lie next to the original, not next to a converted or cut copy.

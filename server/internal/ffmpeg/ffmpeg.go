@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -306,4 +307,59 @@ func (t *Tool) PCMMD5(ctx context.Context, bits int, files ...string) (string, e
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+var (
+	integrated = regexp.MustCompile(`Integrated loudness:\s+I:\s+(-?[0-9.]+|-inf) LUFS`)
+	samplePeak = regexp.MustCompile(`Sample peak:\s+Peak:\s+(-?[0-9.]+|-inf) dBFS`)
+)
+
+// Silence has no loudness or peak FFmpeg can put a number on; these stand for it.
+const (
+	SilentLUFS = -70.0
+	SilentPeak = -120.0
+)
+
+// Loudness measures a song's integrated loudness (EBU R128, LUFS) and sample peak (dBFS) with
+// FFmpeg's ebur128 filter, from the file at path or, when in is given, from in (a format that can be
+// read without seeking: FLAC, MP3, Ogg). It runs beside the other jobs, at the same low priority:
+// most of the time it waits for the file to arrive.
+func (t *Tool) Loudness(ctx context.Context, path string, in io.Reader) (lufs, peak float64, err error) {
+	src := path
+	if in != nil {
+		src = "pipe:0"
+	}
+	var stderr bytes.Buffer
+	cmd := t.command(ctx, t.ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-v", "info", "-i", src, "-map", "0:a:0",
+		"-af", "ebur128=peak=sample:framelog=quiet", "-f", "null", "-")
+	cmd.Stdin = in
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return 0, 0, ctx.Err()
+		}
+		return 0, 0, fmt.Errorf("measuring loudness: %v: %s", err, lastLine(stderr.String()))
+	}
+	return parseLoudness(stderr.String())
+}
+
+func parseLoudness(log string) (lufs, peak float64, err error) {
+	num := func(re *regexp.Regexp, silent float64) (float64, bool) {
+		m := re.FindAllStringSubmatch(log, -1)
+		if m == nil {
+			return 0, false
+		}
+		v := m[len(m)-1][1] // the summary, at the end
+		if v == "-inf" {
+			return silent, true
+		}
+		f, err := strconv.ParseFloat(v, 64)
+		return max(f, silent), err == nil
+	}
+	l, ok1 := num(integrated, SilentLUFS)
+	p, ok2 := num(samplePeak, SilentPeak)
+	if !ok1 || !ok2 {
+		return 0, 0, errors.New("measuring loudness: FFmpeg gave no summary")
+	}
+	return l, p, nil
 }

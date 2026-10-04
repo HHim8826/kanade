@@ -272,3 +272,50 @@ func TestConcurrentUseKeepsBudget(t *testing.T) {
 		t.Fatal("went over the budget")
 	}
 }
+
+// A file wholly cached is told of once, and can be held to read its copy: a held copy is not
+// evicted, and a partial one cannot be held (review #136).
+func TestWholeFilesCanBeHeld(t *testing.T) {
+	const size = 3*blockSize + 100
+	c, src := newCache(t, 2*size, size+blockSize, 0)
+	whole := make(chan string, 4)
+	c.OnWhole = func(id string) { whole <- id }
+	get(c, "a", size, "bytes=0-99")
+	if _, _, ok := c.Hold("b"); ok {
+		t.Fatal("held a file never cached")
+	}
+	select {
+	case id := <-whole:
+		if id != "a" {
+			t.Fatalf("whole: %q", id)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("not told the file is whole")
+	}
+	path, release, ok := c.Hold("a")
+	if !ok {
+		t.Fatal("cannot hold a whole file")
+	}
+	if b, err := os.ReadFile(path); err != nil || !bytes.Equal(b, src.data[:size]) {
+		t.Fatalf("held copy: %d bytes, %v", len(b), err)
+	}
+	// Held, it stays while another file wants the room; once released it can go.
+	c.mu.Lock()
+	c.files["a"].lastUse = time.Now().Add(-time.Hour)
+	c.mu.Unlock()
+	if rec := get(c, "b", size, "bytes=0-9"); rec.Code != http.StatusPartialContent {
+		t.Fatalf("b: %d", rec.Code)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("held copy gone: %v", err)
+	}
+	release()
+	select {
+	case id := <-whole:
+		if id != "a" {
+			t.Fatalf("told twice, or of %q", id)
+		}
+		t.Fatal("told of a again")
+	case <-time.After(200 * time.Millisecond):
+	}
+}

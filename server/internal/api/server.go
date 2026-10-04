@@ -29,6 +29,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
@@ -58,6 +59,7 @@ type Deps struct {
 	RSS       *rss.Service
 	Disk      *diskguard.Guard
 	Sync      *drivesync.Syncer
+	Loudness  *loudness.Service
 	Settings  *settings.Store // the service settings the settings page changes
 	Staging   *staging.Budget // shared by downloads, uploads and the importer
 	Pinned    map[string]bool // resources given as serve flags: they win until the next start
@@ -85,6 +87,7 @@ type Server struct {
 	rss       *rss.Service
 	disk      *diskguard.Guard
 	sync      *drivesync.Syncer
+	loudness  *loudness.Service
 	streamKey []byte
 	log       *slog.Logger
 	version   string
@@ -94,7 +97,7 @@ type Server struct {
 func New(d Deps) *Server {
 	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
-		settings: d.Settings, staging: d.Staging, pinned: d.Pinned}
+		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
 
 type ctxKey int
@@ -171,6 +174,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/tracks/{id}/lyrics", s.authed(s.lyrics))
 	mux.Handle("PUT /api/v1/tracks/{id}/lyrics", s.authed(s.setLyrics))
 	mux.Handle("DELETE /api/v1/tracks/{id}/lyrics", s.authed(s.setLyrics))
+	mux.Handle("GET /api/v1/loudness", s.authed(s.getLoudness))
+	mux.Handle("GET /api/v1/loudness/scan", s.authed(s.loudnessScan))
+	mux.Handle("POST /api/v1/loudness/scan", s.authed(s.runLoudnessScan))
 	mux.Handle("GET /api/v1/tracks/{id}/lyrics/online", s.authed(s.findLyrics))
 	mux.Handle("POST /api/v1/tracks/{id}/lyrics/online", s.authed(s.useFoundLyrics))
 	mux.Handle("GET /api/v1/history", s.authed(s.history))

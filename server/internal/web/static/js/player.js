@@ -1,5 +1,5 @@
 import { coverURL, get, post, streamURL } from './api.js';
-import { attach, output, wake } from './effects.js';
+import { attach, balanceGain, learn, output, wake } from './effects.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
@@ -88,9 +88,14 @@ const SLEEP_FADE_MS = 20_000;
 const applyVolume = () => {
   const s = player.get();
   const fade = s.sleep && s.sleep.until ? Math.min(1, Math.max(0, (s.sleep.until - Date.now()) / SLEEP_FADE_MS)) : 1;
-  output(s.volume * fade, s.muted); // through the sound effects' graph once there is one
+  output(s.volume * fade, s.muted, balanceGain(s.queue[s.index])); // through the sound effects' graph once there is one
 };
-attach(audio, applyVolume);
+// near are the songs around the one playing: the volume balance learns how loud they are ahead.
+const near = () => {
+  const s = player.get();
+  return s.queue.slice(Math.max(s.index - 1, 0), s.index + 4);
+};
+attach(audio, applyVolume, near);
 applyVolume();
 // play starts the element, the sound effects ready first (a play asked for lets the browser start them).
 const play = () => {
@@ -167,6 +172,8 @@ function load(index, autoplay = true, again = false) {
     }, () => {});
   }
   player.set({ index, time: (pendingSeek || 0) / 1000, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay });
+  applyVolume(); // this song's balance
+  learn(near());
   audio.src = streamURL(item.assetId);
   if (autoplay) play().catch(() => player.set({ playing: false, buffering: false }));
   updateMediaSession(item);
