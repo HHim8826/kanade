@@ -149,8 +149,18 @@ func TestListeningStatistics(t *testing.T) {
 	if albums, _ := s.ListeningTop(ctx, from, to, "", "albums", "time", 10); len(albums) != 2 || albums[0].ID != drama || albums[1].Tracks != 2 {
 		t.Fatalf("top albums %+v", albums)
 	}
-	if artists, _ := s.ListeningTop(ctx, from, to, "music", "artists", "plays", 10); len(artists) != 2 || artists[0].Name != "xSong A" {
+	artists, _ := s.ListeningTop(ctx, from, to, "music", "artists", "plays", 10)
+	if len(artists) != 2 || artists[0].Name != "xSong A" || artists[0].ID == 0 {
 		t.Fatalf("top artists %+v", artists)
+	}
+	// The ranking opens the artist's page, with the songs heard (review #108).
+	if d, _ := s.ArtistDetail(ctx, artists[0].ID); d == nil || d.Name != "xSong A" || len(d.Items) == 0 {
+		t.Fatalf("artist page of the top artist: %+v", d)
+	}
+	// A song named with an artist but linked to none still ranks, under the name and with no page.
+	s.db.Exec(`DELETE FROM track_artists WHERE track_id IN (SELECT id FROM tracks WHERE artist = 'xSong A')`)
+	if artists, _ := s.ListeningTop(ctx, from, to, "music", "artists", "plays", 10); len(artists) != 2 || artists[0].Name != "xSong A" || artists[0].ID != 0 {
+		t.Fatalf("top artists without a link %+v", artists)
 	}
 
 	tr, err := s.ListeningTrends(ctx, taipei, at(1, 0, 0).UnixMilli(), at(8, 0, 0).UnixMilli(), "", at(6, 12, 0))
@@ -262,5 +272,51 @@ func TestHeardTimeIsBounded(t *testing.T) {
 	}
 	if heard, spans, _ := totals("first"); heard != 7*60_000 || spans != heard {
 		t.Fatalf("heard again: heard %d, spans %d", heard, spans)
+	}
+}
+
+// An album merged into one that was merged in turn ranks as the album it ended up in, through the
+// whole chain, and undoing the last merge gives it back to the middle one (review #109).
+func TestListeningFollowsMergeChains(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	f := fixture{t, s}
+	ra, rb, rc := f.song("a", "A", "Album A", 1, 1), f.song("b", "B", "Album B", 1, 1), f.song("c", "C", "Album C", 1, 1)
+	A, B, C := f.albumOf(ra.EntryID), f.albumOf(rb.EntryID), f.albumOf(rc.EntryID)
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	sf := &statsFixture{t: t, s: s}
+	sf.play(ra.TrackID, A, at, 60_000, true)
+	sf.play(rc.TrackID, C, at, 30_000, true)
+	if _, _, err := s.MergeAlbums(ctx, MergeRequest{Albums: []int64{A, B}, Into: B}); err != nil {
+		t.Fatal(err)
+	}
+	_, last, err := s.MergeAlbums(ctx, MergeRequest{Albums: []int64{B, C}, Into: C})
+	if err != nil {
+		t.Fatal(err)
+	}
+	from, to := at.Add(-time.Hour).UnixMilli(), at.Add(time.Hour).UnixMilli()
+	top, err := s.ListeningTop(ctx, from, to, "", "albums", "time", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 1 || top[0].ID != C || top[0].MS != 90_000 || top[0].Plays != 2 {
+		t.Fatalf("after A→B→C, albums = %+v (want C with all of it)", top)
+	}
+	if sum, _ := s.ListeningSummary(ctx, time.UTC, from, to, ""); sum.Albums != 1 {
+		t.Fatalf("summary counts %d albums", sum.Albums)
+	}
+	if _, _, err := s.Undo(ctx, last); err != nil {
+		t.Fatal(err)
+	}
+	top, _ = s.ListeningTop(ctx, from, to, "", "albums", "time", 10)
+	got := map[int64]int64{}
+	for _, it := range top {
+		got[it.ID] = it.MS
+	}
+	if len(got) != 2 || got[B] != 60_000 || got[C] != 30_000 {
+		t.Fatalf("after undoing B→C, albums = %+v", top)
+	}
+	if sum, _ := s.ListeningSummary(ctx, time.UTC, from, to, ""); sum.Albums != 2 {
+		t.Fatalf("summary counts %d albums after undo", sum.Albums)
 	}
 }

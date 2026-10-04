@@ -25,6 +25,16 @@ func kindCond(kind string) (string, []any) {
 	return "", nil
 }
 
+// albumRoots follows each album listened from to the album it was merged into, however many merges
+// along (review #109): roots(src, id). A loop or a merge into a missing album ends the walk.
+const albumRoots = `WITH RECURSIVE up(src, cur, depth) AS (
+		SELECT id, id, 0 FROM albums WHERE id IN (SELECT album_id FROM listening)
+		UNION ALL
+		SELECT up.src, a.merged_into, up.depth + 1 FROM up JOIN albums a ON a.id = up.cur
+			JOIN albums t ON t.id = a.merged_into WHERE up.depth < 32
+	), roots(src, id) AS (SELECT src, cur FROM (SELECT src, cur, max(depth) FROM up GROUP BY src))
+	`
+
 type spanRow struct {
 	bucket, track, album, ms int64
 	counted, estimated       bool
@@ -32,8 +42,8 @@ type spanRow struct {
 
 func (s *Store) spans(ctx context.Context, from, to int64, kind string) ([]spanRow, error) {
 	cond, args := kindCond(kind)
-	rows, err := s.db.QueryContext(ctx, `SELECT l.bucket, l.track_id, coalesce(l.album_id, 0), l.ms, l.counted, l.estimated
-		FROM listening l WHERE l.bucket >= ? AND l.bucket < ?`+cond, append([]any{from, to}, args...)...)
+	rows, err := s.db.QueryContext(ctx, albumRoots+`SELECT l.bucket, l.track_id, coalesce(r.id, 0), l.ms, l.counted, l.estimated
+		FROM listening l LEFT JOIN roots r ON r.src = l.album_id WHERE l.bucket >= ? AND l.bucket < ?`+cond, append([]any{from, to}, args...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +148,7 @@ func (s *Store) ListeningSummary(ctx context.Context, loc *time.Location, from, 
 
 // TopItem is a song, an artist or an album in a ranking.
 type TopItem struct {
-	ID      int64      `json:"id,omitempty"` // the song or album
+	ID      int64      `json:"id,omitempty"` // the song, album or artist (0: an artist named on songs only)
 	Name    string     `json:"name"`         // its title, or the artist
 	Artist  string     `json:"artist,omitempty"`
 	CoverID int64      `json:"cover_id,omitempty"`
@@ -151,25 +161,34 @@ type TopItem struct {
 
 // ListeningTop ranks songs, artists or albums (group) of a period by plays or by time heard (by).
 // A song is one song whatever file of it was played; an album is the one it was played from
-// (followed to where it was merged).
+// (followed to where it was merged, through every merge).
 func (s *Store) ListeningTop(ctx context.Context, from, to int64, kind, group, by string, limit int) ([]TopItem, error) {
 	cond, args := kindCond(kind)
 	order := `ms DESC, plays DESC`
 	if by == "plays" {
 		order = `plays DESC, ms DESC`
 	}
-	args = append([]any{from, to}, args...)
-	args = append(args, limit)
+	period := append([]any{from, to}, args...)
+	args = append(period, limit)
 	var q string
 	switch group {
 	case "artists":
-		q = `SELECT 0, t.artist, '', 0, sum(l.ms) AS ms, sum(l.counted) AS plays, count(DISTINCT l.track_id) FROM listening l
-			JOIN tracks t ON t.id = l.track_id WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` AND t.artist != ''
-			GROUP BY t.artist ORDER BY ` + order + ` LIMIT ?`
+		// An artist is the one the song is linked to, so the ranking opens its page (review #108); a
+		// song with an artist but no link to one ranks under the name, with no page (ID 0).
+		args = append(append(append([]any{}, period...), period...), limit)
+		q = `SELECT id, name, '', 0, ms, plays, n FROM (
+			SELECT ar.id AS id, ar.name AS name, sum(l.ms) AS ms, sum(l.counted) AS plays, count(DISTINCT l.track_id) AS n
+				FROM listening l JOIN track_artists ta ON ta.track_id = l.track_id JOIN artists ar ON ar.id = ta.artist_id
+				WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` GROUP BY ar.id
+			UNION ALL
+			SELECT 0, t.artist, sum(l.ms), sum(l.counted), count(DISTINCT l.track_id) FROM listening l JOIN tracks t ON t.id = l.track_id
+				WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` AND t.artist != ''
+				AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) GROUP BY t.artist
+		) ORDER BY ` + order + `, name LIMIT ?`
 	case "albums":
-		q = `SELECT al.id, al.title, al.album_artist, coalesce(al.cover_id, 0), sum(l.ms) AS ms, sum(l.counted) AS plays,
+		q = albumRoots + `SELECT al.id, al.title, al.album_artist, coalesce(al.cover_id, 0), sum(l.ms) AS ms, sum(l.counted) AS plays,
 			count(DISTINCT l.track_id) FROM listening l
-			JOIN albums src ON src.id = l.album_id JOIN albums al ON al.id = coalesce(src.merged_into, src.id)
+			JOIN roots r ON r.src = l.album_id JOIN albums al ON al.id = r.id
 			WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` GROUP BY al.id ORDER BY ` + order + ` LIMIT ?`
 	default:
 		q = `SELECT l.track_id, coalesce(t.title, ''), coalesce(t.artist, ''), 0, sum(l.ms) AS ms, sum(l.counted) AS plays, 0

@@ -329,7 +329,7 @@ function RankList({ items, group, by, plain }) {
     return html`<li key=${(it.id || it.name) + ':' + i}>${group === 'albums'
       ? html`<a class="row" href=${href('album/' + it.id)}>${inner}</a>`
       : group === 'artists'
-        ? html`<a class="row" href=${href(`artist/0?name=${encodeURIComponent(it.name)}`)}>${inner}</a>`
+        ? it.id ? html`<a class="row" href=${href(`artist/${it.id}?name=${encodeURIComponent(it.name)}`)}>${inner}</a>` : html`<div class="row">${inner}</div>`
         : html`<button class="row" disabled=${!it.track} onClick=${() => open(it)} aria-label=${it.track ? `播放「${name}」` : name}>${inner}</button>`}</li>`;
   })}</ol>`;
 }
