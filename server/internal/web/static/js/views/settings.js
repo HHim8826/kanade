@@ -1,6 +1,7 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
+import { showShortcuts } from '../shortcuts.js';
 import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
@@ -269,6 +270,10 @@ function PlaybackSettings() {
       <p class="hint tight">首頁的「繼續播放／繼續收聽」一定從記錄的位置開始；單曲與列表循環再播一次時一定從頭開始。</p>
       <${Toggle} label="預先載入下一首" sub="播放時先讓伺服器從 Drive 讀好下一首的開頭，切歌較快；網路流量有限時可以關閉。"
         checked=${s.preload} onChange=${(on) => setPrefs({ preload: on })} />
+      <div class="toggle-row">
+        <span class="grow"><span class="title">鍵盤快捷鍵</span><span class="sub">空白鍵播放／暫停、← → 倒退快轉、↑ ↓ 調音量；隨時按 ? 查看全部。</span></span>
+        <button class="btn tonal" onClick=${showShortcuts}>查看</button>
+      </div>
       <p class="hint tight">這些設定存在這個瀏覽器。</p>
     </div>`;
 }

@@ -400,6 +400,14 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .found-item .title, .found-item .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .found-preview { white-space: pre-line; color: var(--on-surface-variant); font-size: 13px; line-height: 1.5;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+/* Keyboard shortcuts. */
+.shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 10px 24px; align-items: center; margin: 0; }
+.shortcuts > div { display: contents; } /* one grid: the descriptions line up */
+.shortcuts dt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.shortcuts dd { margin: 0; }
+kbd { display: inline-block; min-width: 1.9em; padding: 1px 7px; border: 1px solid var(--outline-variant); border-bottom-width: 2px;
+  border-radius: 6px; background: var(--surface-container); font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1.5; text-align: center; }
+@media (max-width: 479px) { .shortcuts { grid-template-columns: 1fr; gap: 4px; } .shortcuts dd { margin-bottom: 8px; } }
 /* ---- a cover, whole (review #134) ---- */
 .cover-open { display: block; padding: 0; border: 0; background: none; border-radius: var(--radius-l); cursor: zoom-in; }
 .cover-open.add { cursor: pointer; }
@@ -639,6 +647,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .card .settings-form { border-top: 1px solid var(--outline-variant); padding-top: 12px; }
 .card.settings-form { border-top: 0; padding-top: 16px; margin-top: 0; }
 .toggle-row { display: flex; align-items: center; gap: 16px; padding: 8px 0 16px; cursor: pointer; }
+.toggle-row:not(label) { cursor: auto; } /* a row with a button, not a switch */
 .toggle-row .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .toggle-row input[type=checkbox] { appearance: none; flex: none; width: 44px; height: 24px; border-radius: 12px; margin: 0;
   background: var(--surface-container-highest, var(--surface-container)); border: 2px solid var(--outline); position: relative; cursor: pointer; transition: background .15s; }

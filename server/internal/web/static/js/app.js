@@ -4,6 +4,7 @@ import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
 import { player, resetPlayer, restoreSession } from './player.js';
 import './scrollbars.js';
+import './shortcuts.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
 import { History, Playlist } from './views/collections.js';
