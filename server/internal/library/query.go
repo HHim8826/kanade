@@ -64,11 +64,43 @@ func scanAlbums(rows *sql.Rows, err error) ([]AlbumSummary, error) {
 
 // Albums lists albums by album artist and title, or newest first when recent is set.
 func (s *Store) Albums(ctx context.Context, limit, offset int, recent bool) ([]AlbumSummary, error) {
+	return s.AlbumsBy(ctx, AlbumQuery{Limit: limit, Offset: offset, Recent: recent})
+}
+
+// AlbumQuery picks albums of the lists: all, a category's or those in none (review #92), whose title
+// or album artist contains Search.
+type AlbumQuery struct {
+	Limit, Offset int
+	Recent        bool  // the latest made first, else by album artist and title
+	Category      int64 // > 0: in this category; -1: in no category
+	Search        string
+}
+
+func (s *Store) AlbumsBy(ctx context.Context, q AlbumQuery) ([]AlbumSummary, error) {
 	order := `al.album_artist, al.title, al.id`
-	if recent {
+	if q.Recent {
 		order = `al.id DESC`
 	}
-	return scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` GROUP BY al.id `+listed+` ORDER BY `+order+` LIMIT ? OFFSET ?`, limit, offset))
+	var where []string
+	var args []any
+	switch {
+	case q.Category > 0:
+		where = append(where, `al.id IN (SELECT album_id FROM album_categories WHERE category_id = ?)`)
+		args = append(args, q.Category)
+	case q.Category < 0:
+		where = append(where, `al.id NOT IN (SELECT album_id FROM album_categories)`)
+	}
+	if t := strings.TrimSpace(q.Search); t != "" {
+		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(t) + "%"
+		where = append(where, `(al.title LIKE ? ESCAPE '\' OR al.album_artist LIKE ? ESCAPE '\')`)
+		args = append(args, like, like)
+	}
+	cond := ""
+	if len(where) > 0 {
+		cond = ` WHERE ` + strings.Join(where, " AND ")
+	}
+	args = append(args, q.Limit, q.Offset)
+	return scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+cond+` GROUP BY al.id `+listed+` ORDER BY `+order+` LIMIT ? OFFSET ?`, args...))
 }
 
 type Entry struct {
@@ -95,6 +127,8 @@ type AlbumDetail struct {
 	Entries    []Entry   `json:"entries"`
 	// Sections are the names of its discs that have one (review #82).
 	Sections map[int]string `json:"sections"`
+	// Categories are the user's folders it is in (review #92).
+	Categories []CategoryBrief `json:"categories"`
 }
 
 func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
@@ -113,6 +147,9 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		return nil, err
 	}
 	if d.Sidecars, err = s.albumSidecars(ctx, id); err != nil {
+		return nil, err
+	}
+	if d.Categories, err = s.AlbumCategories(ctx, id); err != nil {
 		return nil, err
 	}
 	if d.Sections, err = sectionNames(ctx, s.db, id); err != nil {

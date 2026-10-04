@@ -40,7 +40,7 @@ const fieldNames = {
   artist: '歌手', version: '版本說明', kind: '類型', aliases: '別名', mb_recording: 'MusicBrainz 錄音', album_artist: '專輯歌手',
   date: '日期', catalog: '型號', edition: '版本', cover_id: '封面', merged_into: '合併到', mb_release: 'MusicBrainz 發行',
   album_id: '所屬專輯', disc_no: '碟號', track_no: '曲序', row: '收錄', sections: '區段名稱', grouping: '下載的分組方式',
-  source: '之後批次歸入',
+  source: '之後批次歸入', categories: '分類',
 };
 const fieldName = (target, field) => (field === 'title' ? (target === 'album' ? '專輯名稱' : '曲名') : fieldNames[field] || field);
 
@@ -803,7 +803,7 @@ function EditDetails({ id }) {
   return html`<ul class="edit-details">${g.data.edits.map((e, i) => html`<li key=${i}>
     <span class="diff-field">${e.name || '（已刪除）'} · ${fieldName(e.target, e.field)}</span>
     ${e.field === 'row'
-      ? html`<span>${e.new ? '加入專輯' : '從專輯移除'}</span>`
+      ? html`<span>${e.target === 'category' ? (e.new ? '建立分類' : '刪除分類') : e.new ? '加入專輯' : '從專輯移除'}</span>`
       : html`<span class="diff-values"><span class="old">${shown(e.old, e.field, e.old_label)}</span><span class="arrow">→</span><span class="new">${shown(e.new, e.field, e.new_label)}</span></span>`}
   </li>`)}</ul>`;
 }

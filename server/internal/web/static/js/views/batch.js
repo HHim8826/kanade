@@ -50,6 +50,7 @@ export function AlbumActions({ sel }) {
     <${Btn} icon="playlistAdd" label="加入歌單…" onClick=${() => songs(addToPlaylist)} />
     <${Btn} icon="favorite" label="收藏" onClick=${() => setFavorites('album', ids, true)} />
     <${Btn} icon="favoriteOff" label="取消收藏" onClick=${() => setFavorites('album', ids, false)} />
+    <${Btn} icon="folder" label="分類…" onClick=${() => showDialog((close) => html`<${Categorize} ids=${ids} close=${close} />`)} />
     <${Btn} icon="merge" label="合併…" onClick=${() => showDialog((close) => html`<${MergeAlbums} albums=${chosen} close=${close} onDone=${sel.stop} />`)} />
     <${Btn} icon="edit" label="修改資訊…" onClick=${() => showDialog((close) => html`<${EditAlbums} ids=${ids} close=${close} />`)} />
     <${Btn} icon="delete" label="移除…" danger onClick=${() => showDialog((close) => html`<${RemoveAlbums} ids=${ids} close=${close} onDone=${sel.stop} />`)} />`;
@@ -326,5 +327,49 @@ function EditSections({ album, close }) {
     <p class="hint">每個碟號可以取名字（例如 Episode 1），專輯頁會顯示這個名字；留空則顯示 Disc N。</p>
     ${discs.map((d) => html`<${Field} key=${d} label=${`Disc ${d}（${album.entries.filter((e) => e.disc_no === d).length} 首）`}
       value=${names[d]} onInput=${(v) => setNames({ ...names, [d]: v })} />`)}
+  <//>`;
+}
+
+// ---- categories (review #92) ----
+
+// Categorize puts albums (ids) into categories and takes them out of others in one edit: a box per
+// category, checked when every album is in it and half-checked when some are; a new category can be
+// made in the same edit.
+export function Categorize({ ids, close, onDone }) {
+  const cats = useLoad(() => get('/categories?albums=' + ids.join(',')), [ids.join(',')]);
+  const [want, setWant] = useState({}); // category ID -> true (all in) / false (none in); missing: as it is
+  const [fresh, setFresh] = useState('');
+  const [busy, run] = useRunner();
+  if (cats.loading) return html`<${Dialog} title="分類" onClose=${close}><${Spinner} /><//>`;
+  if (cats.error) return html`<${Dialog} title="分類" onClose=${close}><${ErrorBox} error=${cats.error} onRetry=${cats.reload} /><//>`;
+  const list = cats.data.categories;
+  const n = ids.length;
+  const stateOf = (c) => (c.id in want ? (want[c.id] ? 'all' : 'none') : c.selected === n ? 'all' : c.selected === 0 ? 'none' : 'some');
+  const toggle = (c) => setWant({ ...want, [c.id]: stateOf(c) !== 'all' });
+  const name = fresh.trim().replace(/\s+/g, ' ');
+  const existing = name && list.find((c) => c.name.toLowerCase() === name.toLowerCase());
+  const add = list.filter((c) => want[c.id] === true && c.selected < n).map((c) => c.id);
+  const remove = list.filter((c) => want[c.id] === false && c.selected > 0).map((c) => c.id);
+  if (existing && stateOf(existing) !== 'all' && !add.includes(existing.id)) add.push(existing.id);
+  const create = name && !existing ? name : '';
+  const submit = () => run(async () => {
+    const res = await post('/albums/categorize', { albums: ids, add, remove, create });
+    if (done(res, n === 1 ? '已更新專輯的分類' : `已更新 ${n} 張專輯的分類`)) {
+      close();
+      onDone && onDone();
+    }
+  });
+  return html`<${Dialog} title=${n === 1 ? '分類' : `${n} 張專輯的分類`} onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${busy || (!add.length && !remove.length && !create)} onClick=${submit}>儲存</button>`}>
+    <p class="hint">勾選要放入的分類，取消勾選就移出；半勾表示只有部分專輯在裡面，不動它就維持原樣。分類只影響瀏覽，不會改動專輯、歌曲或音檔，可在修改紀錄撤回。</p>
+    ${list.length ? html`<ul class="plain-list category-picks">${list.map((c) => {
+      const st = stateOf(c);
+      return html`<li key=${c.id}><label class="check">
+        <input type="checkbox" checked=${st === 'all'} ref=${(el) => el && (el.indeterminate = st === 'some')} onChange=${() => toggle(c)} />
+        <span class="grow">${c.name}</span><span class="sub">${c.albums} 張</span></label></li>`;
+    })}</ul>` : html`<p class="sub">還沒有分類，在下面輸入名稱新增一個。</p>`}
+    <${Field} label="新增分類並放入" value=${fresh} onInput=${setFresh} placeholder="例如：狼と香辛料" />
+    ${existing && html`<p class="hint">已有「${existing.name}」，會放進這個分類。</p>`}
   <//>`;
 }

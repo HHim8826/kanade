@@ -38,20 +38,22 @@ func Str(s string) *string { return &s }
 func num(n int64) *string  { return Str(strconv.FormatInt(n, 10)) }
 
 var tables = map[string]string{"track": "tracks", "album": "albums", "entry": "album_entries", "artist": "artists",
-	"download": "downloads", "scope": "album_scopes"}
+	"download": "downloads", "scope": "album_scopes", "category": "categories"}
 
 // fields maps each editable field to its column; "aliases" and "row" are handled separately.
 var fields = map[string]map[string]string{
 	"track": {"title": "title", "artist": "artist", "version": "version", "kind": "kind", "mb_recording": "mb_recording",
 		"aliases": ""},
 	"album": {"title": "title", "album_artist": "album_artist", "date": "date", "catalog": "catalog", "edition": "edition",
-		"cover_id": "cover_id", "merged_into": "merged_into", "mb_release": "mb_release", "aliases": "", "sections": ""},
+		"cover_id": "cover_id", "merged_into": "merged_into", "mb_release": "mb_release", "aliases": "", "sections": "",
+		"categories": ""}, // review #92: the categories it is in, by number
 	"entry":  {"album_id": "album_id", "disc_no": "disc_no", "track_no": "track_no", "row": ""},
 	"artist": {"aliases": ""},
 	// How a download imports, changed with the library by an arrangement (review #87, #88), never
 	// by a user's change: its grouping, and the album a scope of it goes to ("source").
 	"download": {"grouping": "grouping"},
 	"scope":    {"source": ""},
+	"category": {"row": ""}, // a category made or deleted, with the albums it held
 }
 
 // scopeSource is an album_scopes row as a "source" edit stores it: the scope and its album. What
@@ -165,7 +167,20 @@ func (e *editor) current(target string, id int64, field string) (v *string, ok b
 		}
 		b, _ := json.Marshal(r)
 		return Str(string(b)), true, nil
+	case "categories":
+		var one int
+		if err := e.tx.QueryRowContext(e.ctx, `SELECT 1 FROM albums WHERE id = ?`, id).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		} else if err != nil {
+			return nil, false, err
+		}
+		ids, err := e.albumCategories(id)
+		return Str(encodeIDs(ids)), true, err
 	case "row":
+		if target == "category" {
+			v, err := e.categoryRowNow(id)
+			return v, err == nil, err
+		}
 		var r entryRow
 		err := e.tx.QueryRowContext(e.ctx, `SELECT id, album_id, track_id, asset_id, disc_no, track_no, created_at, origin
 			FROM album_entries WHERE id = ?`, id).Scan(&r.ID, &r.AlbumID, &r.TrackID, &r.AssetID, &r.DiscNo, &r.TrackNo, &r.CreatedAt, &r.Origin)
@@ -215,7 +230,8 @@ func invalid(format string, args ...any) error {
 
 // check validates a value from a user or a lookup and puts it in stored form.
 func (e *editor) check(c Change) (*string, error) {
-	if _, ok := fields[c.Target][c.Field]; !ok || c.Field == "row" || c.Target == "download" || c.Target == "scope" {
+	if _, ok := fields[c.Target][c.Field]; !ok || c.Field == "row" || c.Field == "categories" || c.Target == "download" ||
+		c.Target == "scope" || c.Target == "category" {
 		return nil, invalid("cannot change %s.%s", c.Target, c.Field)
 	}
 	v := ""
@@ -365,7 +381,12 @@ func (e *editor) write(target string, id int64, field string, v *string) error {
 			ON CONFLICT (id) DO UPDATE SET album_id = excluded.album_id, artist = excluded.artist, derived = 0, title = excluded.title`,
 			id, r.Scope, db.Now(), r.AlbumID)
 		return err
+	case "categories":
+		return e.writeCategories(id, v)
 	case "row":
+		if target == "category" {
+			return e.writeCategoryRow(id, v)
+		}
 		if v == nil {
 			if _, err := tx.ExecContext(ctx, `UPDATE import_items SET entry_id = NULL WHERE entry_id = ?`, id); err != nil {
 				return err
@@ -487,7 +508,7 @@ func reindex(ctx context.Context, tx *sql.Tx, kind string, id int64) error {
 
 // name is an object's title or name, for summaries.
 func (s *Store) name(ctx context.Context, target string, id int64) (string, error) {
-	col := map[string]string{"track": "title", "album": "title", "artist": "name", "download": "name"}[target]
+	col := map[string]string{"track": "title", "album": "title", "artist": "name", "download": "name", "category": "name"}[target]
 	var n string
 	err := s.db.QueryRowContext(ctx, `SELECT `+col+` FROM `+tables[target]+` WHERE id = ?`, id).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1204,6 +1225,8 @@ func (s *Store) EditGroup(ctx context.Context, id int64) (*EditGroup, error) {
 			ed.OldLabel, ed.NewLabel = albumTitle(ed.Old), albumTitle(ed.New)
 		case "grouping":
 			ed.OldLabel, ed.NewLabel = groupingLabel(ed.Old), groupingLabel(ed.New)
+		case "categories":
+			ed.OldLabel, ed.NewLabel = s.categoryNames(ctx, ed.Old), s.categoryNames(ctx, ed.New)
 		case "source":
 			source := func(v *string) string {
 				var r scopeSource
@@ -1260,6 +1283,15 @@ func (s *Store) groupEdits(ctx context.Context, id int64) ([]Edit, error) {
 // targetName names an object for the edit log: an entry by its track's title, which a removed
 // entry still carries in its stored row.
 func (s *Store) targetName(ctx context.Context, target string, id int64, row *string) string {
+	if target == "category" && row != nil { // a deleted one by the name it had
+		var r categoryRow
+		if n, err := s.name(ctx, target, id); err == nil {
+			return n
+		}
+		if json.Unmarshal([]byte(*row), &r) == nil {
+			return r.Name
+		}
+	}
 	if target == "scope" { // by its album
 		var r scopeSource
 		if row == nil || json.Unmarshal([]byte(*row), &r) != nil {

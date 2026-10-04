@@ -4,9 +4,10 @@ import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
 import { go, href } from '../router.js';
 import { useStore } from '../store.js';
-import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, toast, useLoad } from '../ui.js';
+import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { FavoritesTab, PlaylistsTab } from './collections.js';
-import { AlbumActions, SongActions, editSections } from './batch.js';
+import { AlbumActions, Categorize, SongActions, editSections } from './batch.js';
+import { CategoriesTab } from './categories.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
@@ -129,8 +130,8 @@ export function Home() {
   </section>`;
 }
 
-const tabs = [['albums', '專輯'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏']];
-const tabURL = { playlists: '/playlists', favorites: '/favorites' };
+const tabs = [['albums', '專輯'], ['categories', '分類'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏']];
+const tabURL = { playlists: '/playlists', favorites: '/favorites', categories: '/categories' };
 
 const PAGE = 200;
 
@@ -208,6 +209,7 @@ export function Library({ tab = 'albums', filter = '' }) {
     ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
     ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
+    ${data.data && tab === 'categories' && html`<${CategoriesTab} data=${data.data} />`}
     ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}
       items=${tab === 'albums' ? list : list.map(fromTrack)}>
       ${tab === 'albums' ? html`<${AlbumActions} sel=${sel} />` : html`<${SongActions} sel=${sel} />`}
@@ -262,6 +264,11 @@ export function Album({ id }) {
         <h1>${a.title}</h1>
         <div class="sub">${[a.album_artist, a.date, a.catalog].filter(Boolean).join(' · ')}</div>
         <div class="sub">${a.tracks} 首 · ${fmtTime(a.duration_ms)}</div>
+        <div class="chips album-categories">
+          ${(a.categories || []).map((c) => html`<a key=${c.id} class="chip" href=${href('category/' + c.id)}><${Icon} name="folder" size=${16} />${c.name}</a>`)}
+          <button class="chip ghost" onClick=${() => showDialog((close) => html`<${Categorize} ids=${[a.id]} close=${close} />`)}>
+            <${Icon} name=${a.categories && a.categories.length ? 'edit' : 'add'} size=${16} />${a.categories && a.categories.length ? '分類' : '加入分類'}</button>
+        </div>
         <div class="actions">
           <button class="btn filled" onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放</button>
           <button class="btn tonal" onClick=${() => playQueue(shuffled(items), 0)}><${Icon} name="shuffle" />隨機播放</button>

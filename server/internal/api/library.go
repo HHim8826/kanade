@@ -24,6 +24,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/importer"
+	"github.com/HHim8826/kanade/server/internal/library"
 )
 
 func pageArgs(r *http.Request) (limit, offset int) {
@@ -45,7 +46,20 @@ func pathID(r *http.Request) (int64, error) {
 
 func (s *Server) albums(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageArgs(r)
-	list, err := s.lib.Albums(r.Context(), limit, offset, r.URL.Query().Get("sort") == "recent")
+	q := library.AlbumQuery{Limit: limit, Offset: offset, Recent: r.URL.Query().Get("sort") == "recent", Search: r.URL.Query().Get("q")}
+	switch c := r.URL.Query().Get("category"); c {
+	case "":
+	case "none": // in no category (review #92)
+		q.Category = -1
+	default:
+		id, err := strconv.ParseInt(c, 10, 64)
+		if err != nil || id <= 0 {
+			writeError(w, http.StatusBadRequest, errors.New("category is a number or none"))
+			return
+		}
+		q.Category = id
+	}
+	list, err := s.lib.AlbumsBy(r.Context(), q)
 	if err != nil {
 		s.internal(w, r, err)
 		return

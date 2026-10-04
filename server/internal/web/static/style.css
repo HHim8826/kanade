@@ -652,3 +652,26 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 }
 .grouping { margin: 8px 0 12px; }
 .grouping > .sub { margin-bottom: 6px; }
+
+/* Album categories (review #92) */
+.cover.mosaic { display: grid; gap: 2px; overflow: hidden; aspect-ratio: 1; }
+.cover.mosaic .cover { width: 100%; height: 100%; border-radius: 0; aspect-ratio: auto; min-height: 0; }
+.cover.mosaic.n1 { grid-template: 1fr / 1fr; }
+.cover.mosaic.n2 { grid-template: 1fr / 1fr 1fr; }
+.cover.mosaic.n3, .cover.mosaic.n4 { grid-template: 1fr 1fr / 1fr 1fr; }
+.cover.mosaic.n3 > :first-child { grid-row: span 2; }
+.cover.mosaic.empty { place-items: center; color: var(--outline); }
+.category-card.uncategorized .title { color: var(--on-surface-variant); }
+.list-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 4px 0 16px; }
+.list-tools input[type="search"] { min-width: 0; flex: 1 1 240px; font: inherit; color: var(--on-surface); padding: 0 12px; height: 40px;
+  border-radius: var(--radius-s); border: 1px solid var(--outline); background: var(--surface); }
+.seg button { display: flex; align-items: center; padding: 8px 16px; border: 0; background: none; color: var(--on-surface); font: inherit; font-size: 14px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--outline); }
+.seg button.on { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 600; }
+.album-categories { margin: 8px 0 0; gap: 6px; }
+.album-categories .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 13px; text-decoration: none; color: var(--on-surface); border: 0; cursor: pointer; }
+.album-categories .chip.ghost { background: none; border: 1px dashed var(--outline); color: var(--on-surface-variant); font: inherit; font-size: 13px; }
+.category-picks { list-style: none; padding: 0; margin: 8px 0; }
+.category-picks li { padding: 2px 0; }
+.category-picks label.check { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-radius: var(--radius-s); cursor: pointer; }
+.category-picks label.check:hover { background: var(--surface-container); }

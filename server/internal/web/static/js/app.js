@@ -8,6 +8,7 @@ import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
 import { History, Playlist } from './views/collections.js';
 import { Album, Artist, Home, Library, Search } from './views/library.js';
+import { CategoryPage } from './views/categories.js';
 import { Login } from './views/login.js';
 import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
@@ -32,6 +33,7 @@ function Page({ route, onLogout }) {
     case 'search': return html`<${Search} />`;
     case 'library': return html`<${Library} tab=${arg || 'albums'} filter=${route.query.get('filter') || ''} />`;
     case 'album': return html`<${Album} id=${arg} />`;
+    case 'category': return html`<${CategoryPage} id=${arg} />`;
     case 'artist': return html`<${Artist} id=${arg} name=${route.query.get('name')} />`;
     case 'playlist': return html`<${Playlist} id=${arg} />`;
     case 'history': return html`<${History} />`;
@@ -64,7 +66,7 @@ function App() {
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist', 'edits'].includes(section))
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist', 'edits', 'category'].includes(section))
     || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section)) || (key === '' && section === 'history');
   // The page scrolls on its own above the player bar and the navigation, which keep their room
   // (review #48).
