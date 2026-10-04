@@ -334,24 +334,46 @@ function EditSections({ album, close }) {
 
 // Categorize puts albums (ids) into categories and takes them out of others in one edit: a box per
 // category, checked when every album is in it and half-checked when some are; a new category can be
-// made in the same edit.
+// made in the same edit. Each box goes round what it can do and back to how it was, and the change
+// to be made is listed before it is saved: what is shown is what is sent (reviews #114, #115).
 export function Categorize({ ids, close, onDone }) {
   const cats = useLoad(() => get('/categories?albums=' + ids.join(',')), [ids.join(',')]);
-  const [want, setWant] = useState({}); // category ID -> true (all in) / false (none in); missing: as it is
+  const [want, setWant] = useState({}); // category ID -> 'all' (put all in) / 'none' (take all out); missing: as it is
   const [fresh, setFresh] = useState('');
   const [busy, run] = useRunner();
   if (cats.loading) return html`<${Dialog} title="分類" onClose=${close}><${Spinner} /><//>`;
   if (cats.error) return html`<${Dialog} title="分類" onClose=${close}><${ErrorBox} error=${cats.error} onRetry=${cats.reload} /><//>`;
   const list = cats.data.categories;
   const n = ids.length;
-  const stateOf = (c) => (c.id in want ? (want[c.id] ? 'all' : 'none') : c.selected === n ? 'all' : c.selected === 0 ? 'none' : 'some');
-  const toggle = (c) => setWant({ ...want, [c.id]: stateOf(c) !== 'all' });
+  const was = (c) => (c.selected === n ? 'all' : c.selected === 0 ? 'none' : 'some');
+  const stateOf = (c) => want[c.id] || was(c);
+  // as it is → all in → all out → as it is; a state that is how it was is no change.
+  const toggle = (c) => {
+    const order = was(c) === 'some' ? ['some', 'all', 'none'] : was(c) === 'all' ? ['all', 'none'] : ['none', 'all'];
+    const next = order[(order.indexOf(stateOf(c)) + 1) % order.length];
+    const w = { ...want };
+    if (next === was(c)) delete w[c.id];
+    else w[c.id] = next;
+    setWant(w);
+  };
   const name = fresh.trim().replace(/\s+/g, ' ');
   const existing = name && list.find((c) => c.name.toLowerCase() === name.toLowerCase());
-  const add = list.filter((c) => want[c.id] === true && c.selected < n).map((c) => c.id);
-  const remove = list.filter((c) => want[c.id] === false && c.selected > 0).map((c) => c.id);
-  if (existing && stateOf(existing) !== 'all' && !add.includes(existing.id)) add.push(existing.id);
+  const useExisting = () => {
+    const w = { ...want };
+    if (was(existing) === 'all') delete w[existing.id];
+    else w[existing.id] = 'all';
+    setWant(w);
+    setFresh('');
+  };
+  const add = list.filter((c) => want[c.id] === 'all').map((c) => c.id);
+  const remove = list.filter((c) => want[c.id] === 'none').map((c) => c.id);
   const create = name && !existing ? name : '';
+  const changes = [
+    ...list.filter((c) => want[c.id]).map((c) => (want[c.id] === 'all'
+      ? `放入「${c.name}」：${n - c.selected} 張${c.selected ? `（另 ${c.selected} 張已在裡面）` : ''}`
+      : `移出「${c.name}」：${c.selected} 張`)),
+    create && `新增「${create}」並放入 ${n} 張`,
+  ].filter(Boolean);
   const submit = () => run(async () => {
     const res = await post('/albums/categorize', { albums: ids, add, remove, create });
     if (done(res, n === 1 ? '已更新專輯的分類' : `已更新 ${n} 張專輯的分類`)) {
@@ -359,17 +381,26 @@ export function Categorize({ ids, close, onDone }) {
       onDone && onDone();
     }
   });
+  const status = (c) => {
+    const st = stateOf(c);
+    if (want[c.id]) return st === 'all' ? `→ 全部放入（${n === 1 ? '這張' : `${n} 張`}）` : `→ 全部移出（${c.selected} 張）`;
+    if (n === 1) return st === 'all' ? '在這個分類' : '不在這個分類';
+    return st === 'all' ? `所選 ${n} 張都在` : st === 'none' ? `所選 ${n} 張都不在` : `所選 ${n} 張中有 ${c.selected} 張在，維持原樣`;
+  };
   return html`<${Dialog} title=${n === 1 ? '分類' : `${n} 張專輯的分類`} onClose=${close} actions=${html`
       <button class="btn text" onClick=${close}>取消</button>
-      <button class="btn filled" disabled=${busy || (!add.length && !remove.length && !create)} onClick=${submit}>儲存</button>`}>
-    <p class="hint">勾選要放入的分類，取消勾選就移出；半勾表示只有部分專輯在裡面，不動它就維持原樣。分類只影響瀏覽，不會改動專輯、歌曲或音檔，可在修改紀錄撤回。</p>
-    ${list.length ? html`<ul class="plain-list category-picks">${list.map((c) => {
+      <button class="btn filled" disabled=${busy || !changes.length || !!existing} onClick=${submit}>儲存</button>`}>
+    <p class="hint">點分類切換：全部放入、全部移出，再點一次回到原樣。分類只影響瀏覽，不會改動專輯、歌曲或音檔，可在修改紀錄撤回。</p>
+    ${list.length ? html`<ul class="category-picks">${list.map((c) => {
       const st = stateOf(c);
-      return html`<li key=${c.id}><label class="check">
+      return html`<li key=${c.id}><label class=${'check' + (want[c.id] ? ' changed' : '')}>
         <input type="checkbox" checked=${st === 'all'} ref=${(el) => el && (el.indeterminate = st === 'some')} onChange=${() => toggle(c)} />
-        <span class="grow">${c.name}</span><span class="sub">${c.albums} 張</span></label></li>`;
+        <span class="grow"><span>${c.name}</span><span class="sub">${status(c)}</span></span><span class="sub">共 ${c.albums} 張</span></label></li>`;
     })}</ul>` : html`<p class="sub">還沒有分類，在下面輸入名稱新增一個。</p>`}
     <${Field} label="新增分類並放入" value=${fresh} onInput=${setFresh} placeholder="例如：狼と香辛料" />
-    ${existing && html`<p class="hint">已有「${existing.name}」，會放進這個分類。</p>`}
+    ${existing && html`<div class="hint-row"><span class="hint">已有「${existing.name}」，不會再新增一個。</span>
+      <button class="btn tonal" onClick=${useExisting}>放入這個分類</button></div>`}
+    ${changes.length > 0 && html`<div class="change-summary" aria-live="polite"><b>儲存後會：</b>
+      <ul>${changes.map((t) => html`<li key=${t}>${t}</li>`)}</ul></div>`}
   <//>`;
 }

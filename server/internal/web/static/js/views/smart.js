@@ -56,10 +56,12 @@ export function SmartEditor({ playlist, close }) {
   const key = JSON.stringify(rules);
   const [preview, setPreview] = useState({ key: null });
   const incomplete = r.conditions.some((c) => ((c.field === 'category' || c.field === 'album') && !c.ids.length) || (c.field === 'artist' && !c.value.trim()));
-  useEffect(() => {
+  useEffect(() => { // only the preview of the rules shown now lands, not a late one (review #107)
     if (incomplete) return;
-    const t = setTimeout(() => post('/playlists/preview', { rules }).then((p) => setPreview({ key, p }), (error) => setPreview({ key, error })), 300);
-    return () => clearTimeout(t);
+    let alive = true;
+    const t = setTimeout(() => post('/playlists/preview', { rules })
+      .then((p) => alive && setPreview({ key, p }), (error) => alive && setPreview({ key, error })), 300);
+    return () => { alive = false; clearTimeout(t); };
   }, [key, incomplete]);
   const set = (i, patch) => setR({ ...r, conditions: r.conditions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
   const submit = () => run(async () => {
@@ -85,12 +87,12 @@ export function SmartEditor({ playlist, close }) {
       <nav class="seg">${[['all', '全部條件'], ['any', '任一條件']].map(([k, label]) => html`<button key=${k} class=${r.match === k ? 'on' : ''}
         aria-pressed=${r.match === k} onClick=${() => setR({ ...r, match: k })}>${label}</button>`)}</nav>
     </div>
-    <ul class="plain-list rules">${r.conditions.map((c, i) => html`<li key=${i} class="rule">
+    <ul class="rules">${r.conditions.map((c, i) => html`<li key=${i} class="rule">
       <select value=${c.field} aria-label="條件" onChange=${(e) => set(i, blank(e.target.value))}>
         ${fields.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}</select>
       ${ops[c.field].length > 1 && html`<select value=${c.op} aria-label="比較" onChange=${(e) => set(i, { op: e.target.value })}>
         ${ops[c.field].map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}</select>`}
-      ${c.field === 'category' && html`<span class="rule-picks">${cats.data ? cats.data.categories.length
+      ${c.field === 'category' && html`<span class="rule-picks">${cats.error ? html`<${ErrorBox} error=${cats.error} onRetry=${cats.reload} />` : cats.data ? cats.data.categories.length
         ? cats.data.categories.map((x) => html`<label key=${x.id} class="chip-check"><input type="checkbox" checked=${c.ids.includes(x.id)}
             onChange=${(e) => set(i, { ids: e.target.checked ? [...c.ids, x.id] : c.ids.filter((y) => y !== x.id) })} />${x.name}</label>`)
         : html`<span class="sub">還沒有分類，先到曲庫的「分類」建立。</span>` : html`<${Spinner} />`}</span>`}

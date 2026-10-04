@@ -100,7 +100,8 @@ export function CategoryPage({ id }) {
   const sel = useSelection('category:' + id + '?' + term + sort);
   const c = !none && cats.data ? cats.data.categories.find((x) => String(x.id) === String(id)) : null;
   if (!none && cats.data && !c) return html`<${Empty} icon="folder">這個分類已經刪除了。<a href=${href('library/categories')}>回到分類</a><//>`;
-  const title = none ? '未分類' : c ? c.name : '';
+  // The head keeps its shape while the categories load or fail (reviews #101, #111).
+  const title = none ? '未分類' : c ? c.name : cats.error ? '分類' : '載入中…';
   const count = none ? cats.data && cats.data.uncategorized : c && c.albums;
   const menu = (e) => openMenu(e, [
     { icon: 'edit', label: '改名…', onClick: () => showDialog((close) => html`<${NameCategory} close=${close} category=${c}
@@ -112,14 +113,16 @@ export function CategoryPage({ id }) {
   return html`<section>
     <div class="page-head">
       <div><div class="overline"><a href=${href('library/categories')}>分類</a></div>
-        <h1 class="page-title">${title}</h1>${count !== null && count !== undefined && html`<div class="sub">${count} 張專輯</div>`}</div>
+        <h1 class=${'page-title' + (c || none ? '' : ' muted')}>${title}</h1>
+        <div class="sub">${count !== null && count !== undefined ? `${count} 張專輯` : '\u00a0'}</div></div>
       <div class="actions">
-        ${list && list.length > 0 && html`<${SelectToggle} sel=${sel} />`}
-        ${c && html`<${IconButton} icon="more" label="分類選項" onClick=${menu} />`}
+        <${SelectToggle} sel=${sel} disabled=${!list || !list.length} />
+        ${!none && html`<${IconButton} icon="more" label="分類選項" onClick=${menu} disabled=${!c} />`}
       </div>
     </div>
+    ${cats.error && html`<${ErrorBox} error=${cats.error} onRetry=${cats.reload} />`}
     <div class="list-tools">
-      <input type="search" class="grow" placeholder=${`在「${title}」中搜尋專輯或歌手`} value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="搜尋" />
+      <input type="search" class="grow" placeholder=${c || none ? `在「${title}」中搜尋專輯或歌手` : '搜尋專輯或歌手'} value=${q} onInput=${(e) => setQ(e.target.value)} aria-label="搜尋" />
       <nav class="seg" aria-label="排序">${[['', '名稱'], ['recent', '最近入庫']].map(([k, label]) => html`<button key=${k}
         class=${k === sort ? 'on' : ''} aria-pressed=${k === sort} onClick=${() => setSort(k)}>${label}</button>`)}</nav>
     </div>

@@ -61,8 +61,10 @@ export function useSelection(scope) {
 }
 
 // SelectToggle starts or ends selecting (the way in on a phone, where there are no modifier keys).
-export const SelectToggle = ({ sel }) => html`<button class=${'btn ' + (sel.on ? 'tonal' : 'text')} aria-pressed=${sel.on}
-  onClick=${sel.on ? sel.stop : sel.start}>${sel.on ? '完成' : '選取'}</button>`;
+// It keeps its place while the list loads, fails or is empty (disabled then), and ending a
+// selection is always possible (review #101).
+export const SelectToggle = ({ sel, disabled }) => html`<button class=${'btn ' + (sel.on ? 'tonal' : 'text')} aria-pressed=${sel.on}
+  disabled=${!sel.on && disabled} onClick=${sel.on ? sel.stop : sel.start}>${sel.on ? '完成' : '選取'}</button>`;
 
 // SelectBar stays at the bottom of the page while selecting: how many are selected, selecting all
 // that is loaded (more says the list has more not loaded yet), and the actions. items are the

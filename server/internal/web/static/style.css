@@ -478,6 +478,8 @@ body.locked .content { overflow: hidden; }
   .entry-row > :nth-child(4) { grid-column: 1 / -1; }
   .entry-row.head > :nth-child(4) { display: none; }
 }
+input[type=checkbox], input[type=radio] { accent-color: var(--primary); }
+input[type=checkbox]:focus-visible, input[type=radio]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
 .check-list, .plain-list { list-style: none; margin: 8px 0; padding: 0; }
 .plain-list li { padding: 4px 0; }
 .plain-list li::before { content: '・'; color: var(--on-surface-variant); }
@@ -671,10 +673,19 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .album-categories { margin: 8px 0 0; gap: 6px; }
 .album-categories .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 13px; text-decoration: none; color: var(--on-surface); border: 0; cursor: pointer; }
 .album-categories .chip.ghost { background: none; border: 1px dashed var(--outline); color: var(--on-surface-variant); font: inherit; font-size: 13px; }
+.page-title.muted { color: var(--on-surface-variant); }
 .category-picks { list-style: none; padding: 0; margin: 8px 0; }
 .category-picks li { padding: 2px 0; }
-.category-picks label.check { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-radius: var(--radius-s); cursor: pointer; }
+.category-picks label.check { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: var(--radius-s); cursor: pointer; }
 .category-picks label.check:hover { background: var(--surface-container); }
+.category-picks label.check.changed { background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.category-picks input { width: 18px; height: 18px; flex: none; margin: 0; }
+.category-picks .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.category-picks label.changed .grow .sub { color: var(--primary); }
+.hint-row { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; margin: 4px 0 8px; }
+.hint-row .hint { margin: 0; }
+.change-summary { margin-top: 12px; padding: 10px 12px; border-radius: var(--radius-m); background: var(--surface-container); font-size: 14px; }
+.change-summary ul { margin: 4px 0 0; padding-left: 20px; }
 
 /* My listening (review #93). Heat map steps: the theme's primary mixed into the surface (validated:
    monotone lightness, steps >= 0.06 apart, the lightest >= 2:1 on the surface, every theme and mode). */
@@ -769,7 +780,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .rule-match { display: flex; align-items: center; gap: 12px; margin: 12px 0 8px; }
 .rules { list-style: none; padding: 0; margin: 4px 0; }
 .rules .rule { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--outline-variant); }
-.rules select, .rules input, .smart-editor select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline);
+.rules select, .rules input:not([type=checkbox]), .smart-editor select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline);
   border-radius: var(--radius-s); padding: 6px 8px; }
 .rule-n { display: inline-flex; align-items: center; gap: 6px; }
 .rule-n input { width: 80px; }
@@ -777,7 +788,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .chip-check { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 16px; font-size: 13px; cursor: pointer;
   background: var(--surface-container-high); border: 0; color: var(--on-surface); font-family: inherit; }
 .chip-check.on, .chip-check:has(input:checked) { background: var(--secondary-container); color: var(--on-secondary-container); }
-.chip-check input { margin: 0; }
+.chip-check input { margin: 0; width: 16px; height: 16px; }
 .album-pick { position: relative; }
 .pick-list { position: absolute; z-index: 5; top: 100%; left: 0; min-width: 240px; display: flex; flex-direction: column; background: var(--surface-container);
   border-radius: var(--radius-s); box-shadow: 0 4px 12px rgb(0 0 0 / .2); }

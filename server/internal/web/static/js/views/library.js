@@ -182,14 +182,15 @@ export function Library({ tab = 'albums', filter = '' }) {
   // Albums and songs can be selected to act on them at once (review #83); another tab or filter
   // starts over.
   const sel = useSelection(tab + '?' + filter);
-  const selectable = list && (tab === 'albums' || tab === 'tracks');
+  const canSelect = tab === 'albums' || tab === 'tracks';
+  const selectable = canSelect && list;
   const keys = selectable ? list.map((x) => x.id) : [];
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">曲庫</h1>
       <div class="actions">
         <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
-        ${selectable && list.length > 0 && html`<${SelectToggle} sel=${sel} />`}
+        ${canSelect && html`<${SelectToggle} sel=${sel} disabled=${!list || !list.length} />`}
         <a class="btn text" href=${href('edits')}><${Icon} name="history" />修改紀錄</a>
       </div>
     </div>
