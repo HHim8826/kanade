@@ -66,6 +66,9 @@ type Plan struct {
 	DerivedArtist bool `json:"derived_artist,omitempty"`
 	// Section names the disc in a collection (review #82): "Episode 1".
 	Section string `json:"section,omitempty"`
+	// Folders: the album is its folder's (a download grouped by folders, review #86): later rounds
+	// find it by the folder alone, whatever album tags their songs carry.
+	Folders bool `json:"folders,omitempty"`
 
 	// Tagged is what the file's own tags (and folder and file name) said, kept through preview edits:
 	// later imports of the same file are matched by it.
@@ -719,8 +722,15 @@ func (im *Importer) scopeOf(ctx context.Context, it *item) string {
 	if im.db.QueryRowContext(ctx, `SELECT root FROM import_batches WHERE id = ?`, it.batchID).Scan(&root) != nil || root == "" {
 		return ""
 	}
+	if p.Folders {
+		return folderScope(root, p.Folder)
+	}
 	return root + "\x1f" + p.Folder + "\x1f" + cmp.Or(p.Anchor.Album, p.Album)
 }
+
+// folderScope names an album folder of a download grouped by folders in album_scopes: the download's
+// folder and the album folder, with no album tag.
+func folderScope(root, folder string) string { return root + "\x1f" + folder + "\x1f" }
 
 // sourceAlbum is the album an earlier round of the same download made for the file's album folder
 // and album tag, for the first file of a group (review #81): a download's rounds are imported apart,
@@ -735,9 +745,9 @@ func (im *Importer) sourceAlbum(ctx context.Context, it *item) int64 {
 		return 0
 	}
 	var id int64
-	var artist string
+	var artist, title string
 	var derived bool
-	err := im.db.QueryRowContext(ctx, `SELECT album_id, artist, derived FROM album_scopes WHERE scope = ?`, scope).Scan(&id, &artist, &derived)
+	err := im.db.QueryRowContext(ctx, `SELECT album_id, artist, derived, title FROM album_scopes WHERE scope = ?`, scope).Scan(&id, &artist, &derived, &title)
 	if err != nil {
 		if !errors.Is(err, sql.ErrNoRows) {
 			im.log.Warn("album of the download folder", "item", it.id, "err", err)
@@ -749,6 +759,22 @@ func (im *Importer) sourceAlbum(ctx context.Context, it *item) int64 {
 		return 0
 	}
 	p := it.plan
+	if p.Folders { // joinFolders worked out the title and album artist of the whole folder so far
+		if p.Album != title && title != "" {
+			if err := im.lib.ReplaceAlbumTitle(ctx, album, title, p.Album); err != nil {
+				im.log.Warn("album title", "album", album, "err", err)
+				return album
+			}
+		}
+		if p.AlbumArtist != artist && now == artist {
+			if err := im.lib.ReplaceAlbumArtist(ctx, album, artist, p.AlbumArtist); err != nil {
+				im.log.Warn("album artist", "album", album, "err", err)
+				return album
+			}
+		}
+		im.db.ExecContext(ctx, `UPDATE album_scopes SET title = ?, artist = ? WHERE scope = ?`, p.Album, p.AlbumArtist, scope)
+		return album
+	}
 	next, nextDerived := artist, derived
 	switch {
 	case !p.DerivedArtist && !derived && p.AlbumArtist != artist:
@@ -780,8 +806,9 @@ func (im *Importer) rememberSourceAlbum(ctx context.Context, it *item, entryID i
 	if scope == "" || entryID == 0 {
 		return
 	}
-	if _, err := im.db.ExecContext(ctx, `INSERT OR IGNORE INTO album_scopes (scope, album_id, artist, derived, created_at)
-		SELECT ?, album_id, ?, ?, ? FROM album_entries WHERE id = ?`, scope, it.plan.AlbumArtist, it.plan.DerivedArtist, db.Now(), entryID); err != nil {
+	if _, err := im.db.ExecContext(ctx, `INSERT OR IGNORE INTO album_scopes (scope, album_id, artist, derived, title, created_at)
+		SELECT ?, album_id, ?, ?, ?, ? FROM album_entries WHERE id = ?`, scope, it.plan.AlbumArtist, it.plan.DerivedArtist, it.plan.Album,
+		db.Now(), entryID); err != nil {
 		im.log.Warn("remember the album of the download folder", "item", it.id, "err", err)
 	}
 }

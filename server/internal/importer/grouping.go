@@ -94,6 +94,9 @@ func (im *Importer) group(ctx context.Context, batchID int64, plans []planned) e
 		if err := im.byFolder(ctx, batchID, plans); err != nil {
 			return err
 		}
+		if err := im.joinFolders(ctx, batchID, plans); err != nil {
+			return err
+		}
 		settle(plans)
 	case GroupCollection:
 		artist := strings.TrimSpace(g.Artist)
@@ -126,6 +129,54 @@ func (im *Importer) group(ctx context.Context, batchID int64, plans []planned) e
 					p.Section = g.Sections[disc-1]
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// joinFolders marks the plans byFolder grouped as their folder's album, and takes in what earlier
+// rounds of the download made of the same folders (review #86): the title of a tag all the folder's
+// songs share holds only while every round's songs share it, else the folder names the album; album
+// artists that differ between rounds make Various Artists. One import of the whole folder decides
+// the same, so the album does not depend on which round brought which song.
+func (im *Importer) joinFolders(ctx context.Context, batchID int64, plans []planned) error {
+	var root string
+	if err := im.db.QueryRowContext(ctx, `SELECT root FROM import_batches WHERE id = ?`, batchID).Scan(&root); err != nil {
+		return err
+	}
+	type earlier struct {
+		title, artist string
+		found         bool
+	}
+	seen := map[string]earlier{}
+	for i := range plans {
+		p := &plans[i].plan
+		if p.Group == "" || p.Folder == "" || p.Folder == "." {
+			continue
+		}
+		p.Folders = true
+		e, ok := seen[p.Folder]
+		if !ok && root != "" {
+			err := im.db.QueryRowContext(ctx, `SELECT title, artist FROM album_scopes WHERE scope = ?`, folderScope(root, p.Folder)).
+				Scan(&e.title, &e.artist)
+			if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			e.found = err == nil
+			seen[p.Folder] = e
+		}
+		if !e.found {
+			continue
+		}
+		if e.title != "" && e.title != p.Album {
+			p.Album = path.Base(p.Folder)
+		}
+		switch {
+		case e.artist == "" || e.artist == p.AlbumArtist:
+		case p.AlbumArtist == "":
+			p.AlbumArtist = e.artist
+		default:
+			p.AlbumArtist = "Various Artists"
 		}
 	}
 	return nil

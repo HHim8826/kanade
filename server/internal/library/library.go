@@ -479,12 +479,22 @@ func (s *Store) AlbumNow(ctx context.Context, id int64) (int64, string, error) {
 // ReplaceAlbumArtist changes an album's artist from one an import worked out to another, unless it
 // was changed since (review #81).
 func (s *Store) ReplaceAlbumArtist(ctx context.Context, id int64, from, to string) error {
+	return s.replaceAlbum(ctx, id, "album_artist", from, to)
+}
+
+// ReplaceAlbumTitle changes an album's title from one an import gave it to another, unless it was
+// changed since (review #86).
+func (s *Store) ReplaceAlbumTitle(ctx context.Context, id int64, from, to string) error {
+	return s.replaceAlbum(ctx, id, "title", from, to)
+}
+
+func (s *Store) replaceAlbum(ctx context.Context, id int64, column, from, to string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	r, err := tx.ExecContext(ctx, `UPDATE albums SET album_artist = ?, updated_at = ? WHERE id = ? AND album_artist = ?`, to, db.Now(), id, from)
+	r, err := tx.ExecContext(ctx, `UPDATE albums SET `+column+` = ?, updated_at = ? WHERE id = ? AND `+column+` = ?`, to, db.Now(), id, from)
 	if err != nil {
 		return err
 	}

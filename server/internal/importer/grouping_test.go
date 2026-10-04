@@ -76,3 +76,65 @@ func TestCollectionInRounds(t *testing.T) {
 		t.Fatalf("entries %v", got)
 	}
 }
+
+// A download grouped by folders makes one album of a folder whichever rounds bring its songs, the
+// same album one import of the whole folder makes (review #86); an album renamed since keeps its name.
+func TestFolderGroupingIndependentOfRounds(t *testing.T) {
+	type song struct{ album, artist, albumArtist string }
+	for _, tc := range []struct {
+		name   string
+		songs  []song
+		rename string // the album's title is changed after the first round
+		want   string
+	}{
+		{"different album tags", []song{{"Original Red", "A", "Ensemble"}, {"Original Blue", "B", "Ensemble"}}, "",
+			"Episode 1 | Ensemble | 2"},
+		{"one album tag", []song{{"Same", "A", "Ensemble"}, {"Same", "B", "Ensemble"}}, "", "Same | Ensemble | 2"},
+		{"different artists", []song{{"Same", "A", ""}, {"Same", "B", ""}}, "", "Same | Various Artists | 2"},
+		{"renamed between rounds", []song{{"Original Red", "A", "Ensemble"}, {"Original Blue", "B", "Ensemble"}}, "Mine",
+			"Mine | Ensemble | 2"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			for _, split := range []bool{false, true} {
+				if tc.rename != "" && !split {
+					continue
+				}
+				im, lib, _ := setup(t)
+				root := t.TempDir()
+				var paths []string
+				for i, s := range tc.songs {
+					frames := map[string]string{"TIT2": fmt.Sprint("Song ", i), "TPE1": s.artist, "TALB": s.album, "TRCK": fmt.Sprint(i + 1)}
+					if s.albumArtist != "" {
+						frames["TPE2"] = s.albumArtist
+					}
+					p := filepath.Join(root, "Box", "Episode 1", fmt.Sprintf("%02d.mp3", i+1))
+					taggedMP3(t, p, frames)
+					paths = append(paths, p)
+				}
+				rounds := [][]string{paths}
+				if split {
+					rounds = [][]string{paths[:1], paths[1:]}
+				}
+				for n, these := range rounds {
+					b, _, err := im.CreateBatchFiles(ctx, "download", "Box", root, these, false)
+					if err != nil {
+						t.Fatal(err)
+					}
+					opts, _ := json.Marshal(map[string]any{"grouping": Grouping{Mode: GroupFolders}})
+					im.db.Exec(`UPDATE import_batches SET options = ? WHERE id = ?`, string(opts), b)
+					runUntilDone(t, im, b)
+					if n == 0 && tc.rename != "" {
+						albums, _ := lib.Albums(ctx, 10, 0, false)
+						if _, err := im.db.Exec(`UPDATE albums SET title = ? WHERE id = ?`, tc.rename, albums[0].ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if got := albumsNow(t, im); len(got) != 1 || got[0] != tc.want {
+					t.Fatalf("in rounds %v: %v, want %s", split, got, tc.want)
+				}
+			}
+		})
+	}
+}
