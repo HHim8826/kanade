@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { href } from '../router.js';
-import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast } from '../ui.js';
+import { Dialog, Empty, ErrorBox, FilePick, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast } from '../ui.js';
 import { Field, confirmDialog, done } from './organize.js';
 import { go } from '../router.js';
 
@@ -204,9 +204,13 @@ function AddDownload({ onClose, onAdded }) {
     <label class="field"><span>magnet 連結或 .torrent 網址</span>
       <textarea rows="3" value=${uri} onInput=${(e) => setUri(e.target.value)} placeholder="magnet:?xt=urn:btih:… 或 https://nyaa.si/download/….torrent" disabled=${!!file}></textarea>
     </label>
-    <label class="field"><span>或選擇 .torrent 檔</span>
-      <input type="file" accept=".torrent,application/x-bittorrent" onChange=${(e) => setFile(e.target.files[0] || null)} />
-    </label>
+    <div class="field"><span>或選擇 .torrent 檔</span>
+      <span class="file-pick">
+        <${FilePick} label="選擇 .torrent 檔" icon="upload" accept=".torrent,application/x-bittorrent" chosen=${file ? file.name : ''}
+          onPick=${(e) => { setFile(e.target.files[0] || null); e.target.value = ''; }} />
+        ${file && html`<${IconButton} icon="close" label="不用這個檔案" onClick=${() => setFile(null)} />`}
+      </span>
+    </div>
     <p class="hint">加入後會先取得檔案清單，選好要下載的檔案才開始下載。</p>
     <${ErrorBox} error=${error} />
   <//>`;

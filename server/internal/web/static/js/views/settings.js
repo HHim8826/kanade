@@ -5,7 +5,8 @@ import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
-import { Dialog, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
+import { StatsTimeZone } from './stats.js';
+import { Dialog, ErrorBox, FilePick, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
 
@@ -544,9 +545,12 @@ function ClientSetup({ status, close, onSaved }) {
   const [secret, setSecret] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [jsonName, setJsonName] = useState('');
   const pick = async (e) => {
     const f = e.target.files[0];
+    e.target.value = ''; // the same file can be chosen again
     if (!f) return;
+    setJsonName(f.name);
     try {
       const j = JSON.parse(await f.text());
       const c = j.web || j.installed || j;
@@ -593,7 +597,8 @@ function ClientSetup({ status, close, onSaved }) {
         <button type="button" class="btn tonal" onClick=${copy}><${Icon} name="copy" />複製</button></div></div>
     ${status.paste && html`<p class="hint">這台的公開網址不是 https 網域，Google 不會把瀏覽器導回這裡，所以用 localhost：連線時，授權後瀏覽器會停在一個打不開的頁面，把那個網址貼回 Kanade 就完成了。之後設好 https 網域、改了公開網址（kanade-manager config），要在用戶端加上新的重新導向 URI。</p>`}
     <form id="client-form" onSubmit=${save}>
-      <label class="field"><span>下載的 JSON 檔</span><input type="file" accept=".json,application/json" onChange=${pick} /></label>
+      <div class="field"><span>下載的 JSON 檔</span>
+        <${FilePick} label="選擇 JSON 檔" icon="upload" accept=".json,application/json" onPick=${pick} chosen=${jsonName} /></div>
       <label class="field"><span>用戶端 ID</span><input value=${id} autocomplete="off" spellcheck="false" placeholder="….apps.googleusercontent.com"
         onInput=${(e) => setId(e.target.value)} /></label>
       <label class="field"><span>用戶端密鑰</span><input type="password" value=${secret} autocomplete="off" onInput=${(e) => setSecret(e.target.value)} /></label>
@@ -677,6 +682,7 @@ function SettingsPage({ first, onLogout }) {
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
     <${PlaybackSettings} />
     <${Appearance} />
+    <${StatsTimeZone} />
     <${DownloadSettings} conf=${conf} />
     <h2 class="section-title">服務</h2>
     <div class="card pad">

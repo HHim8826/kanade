@@ -288,6 +288,13 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
   border: 1px solid var(--outline); background: var(--surface); resize: vertical;
 }
 .field input:focus, .field textarea:focus { outline: 2px solid var(--primary); border-color: transparent; }
+/* Hints in empty fields wear the theme's secondary text, readable in every theme (review #120). */
+input::placeholder, textarea::placeholder { color: var(--on-surface-variant); opacity: .85; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.file-pick { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; min-width: 0; }
+.file-chosen { font-size: 14px; color: var(--on-surface); overflow-wrap: anywhere; min-width: 0; }
+.field .file-pick { margin-top: 2px; }
+.items li.current .sub { color: var(--primary); }
 .inline-form { display: flex; gap: 8px; margin-bottom: 12px; }
 .inline-form input { flex: 1; min-width: 0; font: inherit; color: var(--on-surface); padding: 0 12px; height: 40px;
   border-radius: var(--radius-s); border: 1px solid var(--outline); background: var(--surface); }
@@ -697,12 +704,14 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .stats-section .year { font-weight: 600; min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
 .icon-btn.flip .icon { transform: scaleX(-1); }
 .refreshing { opacity: .55; transition: opacity .2s; }
-.stat-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(176px, 1fr)); gap: 12px; margin: 8px 0 16px; }
+.stat-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(176px, 1fr)); gap: 12px; margin: 8px 0 16px; }
 .stat-tile { padding: 14px 16px; border-radius: var(--radius-m); background: var(--surface-container-low); }
 .stat-tile .label { font-size: 13px; color: var(--on-surface-variant); }
 .stat-tile .value { font-size: 22px; font-weight: 600; margin: 4px 0 2px; white-space: nowrap; }
 .stat-tiles.small .value { font-size: 20px; }
+.heat-area { position: relative; }
 .heat-wrap { position: relative; overflow-x: auto; padding: 4px 0 8px; }
+.chart-tip.heat-tip { transform: none; visibility: hidden; }
 .heat { display: grid; grid-auto-rows: var(--cell); gap: 2px; width: max-content; align-items: center; }
 .heat-month { font-size: 11px; color: var(--on-surface-variant); white-space: nowrap; overflow: visible; width: var(--cell); }
 .heat-day { font-size: 11px; color: var(--on-surface-variant); padding-right: 6px; line-height: var(--cell); }

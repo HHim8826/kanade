@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get } from '../api.js';
 import { fromTrack, playQueue } from '../player.js';
 import { href } from '../router.js';
@@ -9,14 +9,37 @@ import { useRunner } from './organize.js';
 // week, month and year, what was listened to most, and when. Times are what was really heard; a
 // play counts once it reaches the D9 threshold. Every number a chart shows is also in its table.
 
-const TZ_KEY = 'kanade.statsTz';
+// The time zone days are counted in (review #117): the browser's, or one chosen in the settings,
+// kept in this browser. A zone chosen before the setting had a mode stays chosen.
+const TZ_KEY = 'kanade.statsTz', TZ_MODE_KEY = 'kanade.statsTzMode';
 const browserTz = () => Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-function savedTz() {
+const validTz = (z) => {
   try {
-    return localStorage.getItem(TZ_KEY) || '';
+    new Intl.DateTimeFormat('en', { timeZone: z });
+    return !!z;
   } catch {
-    return '';
+    return false;
   }
+};
+export function tzSetting() {
+  try {
+    const zone = localStorage.getItem(TZ_KEY) || '';
+    const mode = localStorage.getItem(TZ_MODE_KEY) || (zone ? 'manual' : 'auto');
+    return { mode: mode === 'manual' ? 'manual' : 'auto', zone };
+  } catch {
+    return { mode: 'auto', zone: '' };
+  }
+}
+function saveTzSetting({ mode, zone }) {
+  try {
+    localStorage.setItem(TZ_MODE_KEY, mode);
+    localStorage.setItem(TZ_KEY, zone || '');
+  } catch { /* the browser keeps nothing: the browser's zone then */ }
+}
+// statsTz is the zone days are counted in now; a zone this browser does not know falls back.
+export function statsTz() {
+  const s = tzSetting();
+  return s.mode === 'manual' && validTz(s.zone) ? s.zone : browserTz();
 }
 
 // fmtDur says a listening time: 2 小時 5 分, 45 分, 30 秒.
@@ -45,7 +68,7 @@ const kinds = [['', '全部'], ['music', '音樂'], ['spoken', '廣播劇／談�
 
 export function Stats() {
   const [kind, setKind] = useState('');
-  const [tz, setTz] = useState(() => savedTz() || browserTz());
+  const [tz] = useState(statsTz);
   const q = `tz=${encodeURIComponent(tz)}${kind ? '&kind=' + kind : ''}`;
   const today = todayIn(tz);
   const [rev, setRev] = useState(0);
@@ -56,13 +79,11 @@ export function Stats() {
     <div class="filter-row" role="group" aria-label="篩選">
       <nav class="seg" aria-label="類型">${kinds.map(([k, label]) => html`<button key=${k} class=${k === kind ? 'on' : ''}
         aria-pressed=${k === kind} onClick=${() => setKind(k)}>${label}</button>`)}</nav>
-      <span class="sub">時區 ${tz}</span>
     </div>
     <${Overview} q=${q} rev=${rev} />
     <${Heatmap} q=${q} today=${today} rev=${rev} />
     <${Period} q=${q} today=${today} rev=${rev} />
-    <${DataTools} q=${q} tz=${tz} setTz=${(v) => { setTz(v); try { localStorage.setItem(TZ_KEY, v === browserTz() ? '' : v); } catch { /* per device only */ } }}
-      onCleared=${() => setRev(rev + 1)} />
+    <${DataTools} q=${q} onCleared=${() => setRev(rev + 1)} />
   </section>`;
 }
 
@@ -96,7 +117,8 @@ function Heatmap({ q, today, rev }) {
   const [picked, setPicked] = useState('');
   const [focus, setFocus] = useState('');
   const [tip, setTip] = useState(null);
-  const grid = useRef(null);
+  const [cell, setCell] = useState(12);
+  const grid = useRef(null), area = useRef(null), tipBox = useRef(null);
   const data = useLoad(() => get(`/stats/days?year=${year}&${q}`), [year, q], rev);
   const byDate = useMemo(() => Object.fromEntries((data.data ? data.data.days : []).map((d) => [d.date, d])), [data.data]);
   const level = useMemo(() => levels(data.data ? data.data.days : []), [data.data]);
@@ -108,15 +130,55 @@ function Heatmap({ q, today, rev }) {
     const m = [0, 1, 2, 3, 4, 5, 6].map((k) => addDays(w, k)).find((d) => d.slice(8) === '01' && d.slice(0, 4) === String(year));
     return m && i < weeks.length - 1 ? `${Number(m.slice(5, 7))} 月` : '';
   });
-  const current = focus || (today.startsWith(String(year)) ? today : first);
+  // The day Tab reaches: the one focused last, when it is of this year (review #113).
+  const current = focus && focus.startsWith(year + '-') ? focus : today.startsWith(String(year)) ? today : first;
+  const toYear = (y) => { // the same day of the other year keeps the keyboard's way in
+    setYear(y);
+    setPicked('');
+    setTip(null);
+    if (focus) {
+      const md = focus.slice(5), leap = (y % 4 === 0 && y % 100 !== 0) || y % 400 === 0;
+      setFocus(`${y}-${md === '02-29' && !leap ? '02-28' : md}`);
+    }
+  };
+  useEffect(() => { // the year fills the width there is, with square days of 12 to 24 px; a phone scrolls it (review #118)
+    const el = grid.current;
+    if (!el) return;
+    const fit = () => {
+      const label = el.querySelector('.heat-day');
+      const n = weeks.length, gap = 2;
+      setCell(Math.max(12, Math.min(24, Math.floor((el.clientWidth - (label ? label.offsetWidth : 24) - gap * n) / n))));
+    };
+    fit();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [weeks.length]);
   useEffect(() => { // where the year does not fit (a phone), start at today's week, not January
     const el = grid.current, cell = el && el.querySelector(`[data-date="${current}"]`);
     if (cell && el.scrollWidth > el.clientWidth) el.scrollLeft = Math.max(0, cell.offsetLeft - el.clientWidth + 48);
-  }, [!!data.data, year]);
-  const show = (e, d) => {
-    const box = grid.current.getBoundingClientRect(), r = e.currentTarget.getBoundingClientRect();
-    setTip({ d, x: r.left - box.left + r.width / 2, y: r.top - box.top });
+  }, [!!data.data, year, cell]);
+  // The day's tip sits outside the scrolling map, so neither scrolling nor its edges cut it: within
+  // the section's width, above the day, or below it where the window has no room above (review #112).
+  const place = (cell, d) => {
+    const box = area.current.getBoundingClientRect(), r = cell.getBoundingClientRect(), view = grid.current.getBoundingClientRect();
+    if (r.right < view.left || r.left > view.right) return setTip(null); // scrolled out of sight
+    setTip({ d, x: r.left - box.left + r.width / 2, top: r.top - box.top, bottom: r.bottom - box.top, room: r.top });
   };
+  const show = (e, d) => place(e.currentTarget, d);
+  const follow = () => { // the map scrolled (by hand, or to a day the keyboard moved to): the tip follows its day
+    const cell = tip && grid.current.querySelector(`[data-date="${tip.d}"]`);
+    if (cell) place(cell, tip.d);
+  };
+  useLayoutEffect(() => {
+    const el = tipBox.current;
+    if (!el || !tip) return;
+    const w = el.offsetWidth, h = el.offsetHeight;
+    el.style.left = `${Math.max(0, Math.min(area.current.clientWidth - w, tip.x - w / 2))}px`;
+    el.style.top = `${tip.room - h - 8 >= 0 ? tip.top - h - 8 : tip.bottom + 8}px`;
+    el.style.visibility = 'visible';
+  }, [tip]);
   const move = (e) => {
     const step = { ArrowLeft: -7, ArrowRight: 7, ArrowUp: -1, ArrowDown: 1 }[e.key];
     if (!step) return;
@@ -133,16 +195,17 @@ function Heatmap({ q, today, rev }) {
   return html`<section class="stats-section">
     <div class="section-head">
       <h2 class="section-title grow">每日聆聽</h2>
-      <${IconButton} icon="back" label="前一年" onClick=${() => { setYear(year - 1); setPicked(''); }} />
+      <${IconButton} icon="back" label="前一年" onClick=${() => toYear(year - 1)} />
       <span class="year">${year}</span>
-      <${IconButton} icon="back" label="後一年" className="flip" disabled=${year >= thisYear} onClick=${() => { setYear(year + 1); setPicked(''); }} />
+      <${IconButton} icon="back" label="後一年" className="flip" disabled=${year >= thisYear} onClick=${() => toYear(year + 1)} />
     </div>
     <p class="sub">${data.data ? `${year} 年共聽了 ${fmtDur(total)}，${data.data.days.filter((d) => d.ms >= 60_000).length} 天有聽。` : ''}
       ${data.data && data.data.estimated_until ? `${data.data.estimated_until} 以前的時間是從舊的播放紀錄推算的（每次播放從最後回報往前算），跨午夜的部分可能歸錯日子。` : ''}</p>
     ${data.error && html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
-    <div class=${'heat-wrap' + (data.loading ? ' refreshing' : '')} ref=${grid}>
+    <div class="heat-area" ref=${area}>
+    <div class=${'heat-wrap' + (data.loading ? ' refreshing' : '')} ref=${grid} onScroll=${follow}>
       <div class="heat" role="grid" aria-label=${`${year} 年每天的聆聽時間`} onKeyDown=${move}
-        style=${`grid-template-columns: auto repeat(${weeks.length}, var(--cell))`}>
+        style=${`--cell: ${cell}px; grid-template-columns: auto repeat(${weeks.length}, var(--cell))`}>
         <span></span>${months.map((m, i) => html`<span key=${'m' + i} class="heat-month">${m}</span>`)}
         ${weekdays.map((w, row) => html`
           <span key=${'w' + row} class="heat-day">${row % 2 === 0 ? w : ''}</span>
@@ -158,7 +221,8 @@ function Heatmap({ q, today, rev }) {
               onBlur=${() => setTip(null)} onClick=${() => setPicked(d === picked ? '' : d)}></button>`;
           })}`)}
       </div>
-      ${tip && html`<div class="chart-tip" style=${`left:${tip.x}px; top:${tip.y}px`} role="status">
+    </div>
+      ${tip && html`<div class="chart-tip heat-tip" ref=${tipBox} role="status">
         <b>${fmtDur(byDate[tip.d] ? byDate[tip.d].ms : 0)}</b>
         <span>${longDate(tip.d)}${byDate[tip.d] ? ` · 有效播放 ${byDate[tip.d].plays} 次 · ${byDate[tip.d].tracks} 首` : ''}</span></div>`}
     </div>
@@ -334,24 +398,45 @@ function RankList({ items, group, by, plain }) {
   })}</ol>`;
 }
 
-// DataTools: the time zone days are counted in, exporting and clearing the listening.
-function DataTools({ q, tz, setTz, onCleared }) {
-  const zones = useMemo(() => (Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : [browserTz()]), []);
+// DataTools: exporting and clearing the listening.
+function DataTools({ q, onCleared }) {
   const clear = () => showDialog((close) => html`<${ClearStats} close=${close} onDone=${onCleared} />`);
   return html`<section class="stats-section data-tools">
     <h2 class="section-title">資料</h2>
-    <label class="field">統計時區（只影響這台裝置怎麼分日）
-      <select value=${tz} onChange=${(e) => setTz(e.target.value)}>
-        ${!zones.includes(tz) && html`<option value=${tz}>${tz}</option>`}
-        ${zones.map((z) => html`<option key=${z} value=${z}>${z}${z === browserTz() ? '（這台裝置）' : ''}</option>`)}
-      </select></label>
-    <p class="hint">聆聽時間只算真正播放的部分：暫停、緩衝和拖動進度都不算；同一次播放重送的回報不會重複計算。播放滿一半或 4 分鐘（較短者）算一次有效播放，30 秒以下的歌不算次數，但聆聽時間照算。</p>
+    <p class="hint">日子依<a href=${href('settings')}>設定</a>裡「聆聽統計」的時區來分。聆聽時間只算真正播放的部分：暫停、緩衝和拖動進度都不算；同一次播放重送的回報不會重複計算。播放滿一半或 4 分鐘（較短者）算一次有效播放，30 秒以下的歌不算次數，但聆聽時間照算。</p>
     <div class="actions">
       <a class="btn tonal" href=${'/api/v1/stats/export?format=csv&' + q} download><${Icon} name="download" />匯出 CSV</a>
       <a class="btn tonal" href=${'/api/v1/stats/export?format=json&' + q} download><${Icon} name="download" />匯出 JSON</a>
       <button class="btn text danger-text" onClick=${clear}><${Icon} name="delete" />清除聆聽統計…</button>
     </div>
   </section>`;
+}
+
+// StatsTimeZone sets the zone listening days are counted in, on the settings page (review #117):
+// following the browser, or one chosen, which stays chosen even when it is the browser's.
+export function StatsTimeZone() {
+  const [s, setS] = useState(tzSetting);
+  const zones = useMemo(() => (Intl.supportedValuesOf ? Intl.supportedValuesOf('timeZone') : [browserTz()]), []);
+  const choose = (patch) => {
+    const next = { ...s, ...patch };
+    if (next.mode === 'manual' && !validTz(next.zone)) next.zone = browserTz();
+    setS(next);
+    saveTzSetting(next);
+  };
+  return html`<h2 class="section-title">聆聽統計</h2>
+    <div class="card pad">
+      <div class="sub">「我的聆聽」用哪個時區分日</div>
+      <div class="choices" role="radiogroup" aria-label="聆聽統計的時區">
+        <button type="button" class="choice" role="radio" aria-checked=${s.mode === 'auto'} onClick=${() => choose({ mode: 'auto' })}>跟隨瀏覽器</button>
+        <button type="button" class="choice" role="radio" aria-checked=${s.mode === 'manual'} onClick=${() => choose({ mode: 'manual' })}>手動選擇</button>
+      </div>
+      ${s.mode === 'manual'
+        ? html`<label class="field">時區<select value=${s.zone} onChange=${(e) => choose({ zone: e.target.value })}>
+            ${!zones.includes(s.zone) && html`<option value=${s.zone}>${s.zone}</option>`}
+            ${zones.map((z) => html`<option key=${z} value=${z}>${z}${z === browserTz() ? '（瀏覽器的時區）' : ''}</option>`)}
+          </select></label>`
+        : html`<p class="hint tight">目前是 ${browserTz()}。</p>`}
+    </div>`;
 }
 
 function ClearStats({ close, onDone }) {

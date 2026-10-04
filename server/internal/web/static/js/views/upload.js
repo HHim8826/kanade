@@ -1,7 +1,7 @@
 import { useState } from '../../vendor/hooks.module.js';
 import { ApiError, api, get, post } from '../api.js';
 import { go } from '../router.js';
-import { ErrorBox, Icon, fmtBytes, html, toast, useLoad } from '../ui.js';
+import { ErrorBox, FilePick, Icon, fmtBytes, html, toast, useLoad } from '../ui.js';
 import { confirmDialog } from './organize.js';
 
 const AUDIO = /\.(flac|mp3|m4a|mp4|aac|ogg|oga|opus|wav|aiff?|ape|tak|wv|tta|dsf|dff|wma)$/i;
@@ -113,13 +113,13 @@ export function Upload() {
     let sent = 0;
     setError(null);
     try {
-      for (const entry of entries) {
+      for (const [index, entry] of entries.entries()) {
         const base = sent;
-        setProgress({ sent, total: totalBytes, file: entry.path });
-        await sendFile(group, entry, (n) => setProgress({ sent: base + n, total: totalBytes, file: entry.path }));
+        setProgress({ sent, total: totalBytes, index, fileSent: 0 });
+        await sendFile(group, entry, (n) => setProgress({ sent: base + n, total: totalBytes, index, fileSent: n }));
         sent = base + entry.file.size;
       }
-      setProgress({ sent: totalBytes, total: totalBytes, file: '建立匯入…' });
+      setProgress({ sent: totalBytes, total: totalBytes, index: entries.length, importing: true });
       const r = await post('/imports', { upload_group: group, preview: true });
       forgetGroup(key);
       toast('已上傳，請確認要怎麼匯入');
@@ -136,19 +136,21 @@ export function Upload() {
     <h1 class="page-title">上傳音樂</h1>
     <p class="hint">選擇資料夾時會保留資料夾結構，Disc 子資料夾、封面與掃描圖都會用來整理專輯。也可以上傳 ZIP 壓縮檔。上傳後會先列出要怎麼分成專輯，確認了才開始匯入。</p>
     <div class="actions">
-      <label class=${'btn tonal' + (busy ? ' disabled' : '')}><${Icon} name="note" />選擇檔案
-        <input type="file" multiple hidden disabled=${busy} accept="audio/*,.flac,.ape,.tak,.wv,.opus,.lrc,.cue,.log,.zip,application/zip" onChange=${pick} /></label>
-      <label class=${'btn tonal' + (busy ? ' disabled' : '')}><${Icon} name="album" />選擇資料夾
-        <input type="file" hidden disabled=${busy} webkitdirectory onChange=${pick} /></label>
+      <${FilePick} label="選擇檔案" icon="note" multiple disabled=${busy} onPick=${pick}
+        accept="audio/*,.flac,.ape,.tak,.wv,.opus,.lrc,.cue,.log,.zip,application/zip" />
+      <${FilePick} label="選擇資料夾" icon="album" directory disabled=${busy} onPick=${pick} />
     </div>
     ${entries.length > 0 && html`<div class="card pad">
       <div class="title">${[audioCount && `${audioCount} 首音樂`, zipCount && `${zipCount} 個壓縮檔`, imageCount && `${imageCount} 張圖片`, otherCount && `${otherCount} 個歌詞或附屬檔`].filter(Boolean).join('、')}，共 ${fmtBytes(totalBytes)}</div>
-      <ul class="items compact">${entries.slice(0, 50).map((e) => html`<li key=${e.path}><span class="grow path">${e.path}</span><span class="sub">${fmtBytes(e.file.size)}</span></li>`)}</ul>
+      <ul class="items compact">${entries.slice(0, 50).map((e, i) => html`<li key=${e.path} class=${busy && i === progress.index ? 'current' : ''}>
+        <span class="grow path">${e.path}</span><span class="sub">${!busy ? fmtBytes(e.file.size) : i < progress.index ? '已上傳'
+          : i === progress.index ? `上傳中 ${fmtBytes(progress.fileSent)} / ${fmtBytes(e.file.size)}` : `等待中 · ${fmtBytes(e.file.size)}`}</span></li>`)}</ul>
       ${entries.length > 50 && html`<div class="sub">…還有 ${entries.length - 50} 個檔案</div>`}
       ${busy
-        ? html`<div class="upload-progress"><div class="sub">${progress.file}</div>
+        ? html`<div class="upload-progress">
             <div class="progress"><div style=${{ width: `${(progress.sent / progress.total) * 100}%` }}></div></div>
-            <div class="sub">${fmtBytes(progress.sent)} / ${fmtBytes(progress.total)}</div></div>`
+            ${(progress.importing || entries.length > 1) && html`<div class="sub">${progress.importing ? '已上傳，正在建立匯入…'
+              : `第 ${progress.index + 1} / ${entries.length} 個檔案 · 共 ${fmtBytes(progress.sent)} / ${fmtBytes(progress.total)}`}</div>`}</div>`
         : html`<div class="actions"><button class="btn filled" disabled=${!audioCount && !zipCount} onClick=${start}><${Icon} name="upload" />${error ? '繼續上傳' : '開始上傳'}</button></div>`}
     </div>`}
     <${ErrorBox} error=${error} />

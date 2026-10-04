@@ -74,6 +74,20 @@ export function IconButton({ icon, label, onClick, disabled, filled, size = 24, 
     aria-label=${label} aria-pressed=${pressed} onClick=${onClick} disabled=${disabled}><${Icon} name=${icon} size=${size} /></button>`;
 }
 
+// FilePick opens a file chooser from a button of the theme: a real button, so Tab, Enter and Space
+// reach it, with the file input hidden beside it (reviews #119, #121). chosen, when given, names
+// the file chosen (or says none is). onPick gets the input's change event.
+export function FilePick({ label, icon, onPick, disabled, accept, multiple, directory, chosen, className = 'btn tonal' }) {
+  const input = useRef(null);
+  return html`<span class="file-pick">
+    <button type="button" class=${className} disabled=${disabled} onClick=${() => input.current && input.current.click()}>
+      ${icon && html`<${Icon} name=${icon} />`}${label}</button>
+    <input ref=${input} type="file" class="visually-hidden" tabindex="-1" aria-hidden="true" accept=${accept} multiple=${multiple}
+      webkitdirectory=${directory} disabled=${disabled} onChange=${onPick} />
+    ${chosen !== undefined && html`<span class="file-chosen">${chosen || '尚未選擇檔案'}</span>`}
+  </span>`;
+}
+
 // Cover shows a cover, or a placeholder when there is none or it fails to load. A failure belongs to
 // that image: a reused Cover given another one tries it (review #12).
 export function Cover({ id, size = 300, alt = '', className = '' }) {
