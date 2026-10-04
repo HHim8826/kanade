@@ -289,6 +289,9 @@ function loadLyrics(trackId) {
 // ---- lyrics found online (LRCLIB) ----
 // Asked only for a song whose lyrics are being looked at; the answer is kept for this page.
 const foundCache = new Map(); // track ID and search -> candidates
+// Exact matches stored by themselves, once a page (track?search#record -> trying, done or failed):
+// one that failed waits in the list for the listener, and one stored is never stored again.
+const autoTried = new Map();
 
 // findLyrics asks LRCLIB for a song's lyrics; query is a search adjusted by hand ("title=…&artist=…"
 // or "q=…"; empty: the song's own title and artist), which keys its answer (review #122).
@@ -305,20 +308,36 @@ function findLyrics(trackId, query = '') {
 
 async function applyFound(trackId, id, auto = false) {
   const r = await post(`/tracks/${trackId}/lyrics/online`, { id, auto });
-  lyricsCache.delete(trackId);
-  lyricsRev.set((v) => ({ n: v.n + 1 }));
+  await lyricsChanged(trackId);
   return r.saved;
 }
+
+// lyricsChanged fetches a song's lyrics after they changed, and only then has the open views show
+// them: the lyrics tab goes from what it showed straight to the new lyrics (review #133).
+async function lyricsChanged(trackId) {
+  lyricsCache.delete(trackId);
+  await loadLyrics(trackId).catch(() => {}); // a failure shows where they are loaded again
+  lyricsRev.set((v) => ({ n: v.n + 1 }));
+}
+
+// LyricsWait keeps about the room the lyrics take while they load or are looked for, so the page
+// does not shrink under the tabs and jump (review #132).
+const LyricsWait = ({ label }) => html`<div class="lyrics-wait sub"><${Spinner} />${label}</div>`;
 
 const fmtSec = (sec) => fmtTime(Math.round(sec) * 1000);
 
 // FoundLyrics lists what LRCLIB has for a song (query: a search adjusted by hand); choosing one
 // stores it. With auto, an exact match (same title and artist, length within two seconds) is stored
-// right away, where the song has no lyrics yet. onAdjust offers to adjust the search.
-function FoundLyrics({ item, auto, onChosen, query = '', onAdjust }) {
-  const data = useLoad(() => findLyrics(item.trackId, query), [item.trackId, query]);
+// right away, where the song has no lyrics yet: looking, storing and showing what was stored is one
+// wait, with no list to choose from in between (review #133). onAdjust offers to adjust the search;
+// frame puts what is shown at last (not the wait) in the lyrics tab's own words.
+function FoundLyrics({ item, auto, onChosen, query = '', onAdjust, frame = (body) => body }) {
+  const key = item.trackId + '?' + query;
+  const loaded = useLoad(() => findLyrics(item.trackId, query), [item.trackId, query]);
+  const data = loaded.loading && foundCache.has(key) ? { ...loaded, loading: false, data: foundCache.get(key) } : loaded;
   const [busy, setBusy] = useState(0);
-  const retry = () => { foundCache.delete(item.trackId + '?' + query); data.reload(); };
+  const [, setTried] = useState(0);
+  const retry = () => { foundCache.delete(key); data.reload(); };
   // The server asked to wait (Retry-After): asked once more by itself after that, at most twice for
   // a song; leaving the song or the panel cancels it (review #79).
   const tries = useRef({ track: 0, n: 0 });
@@ -331,12 +350,19 @@ function FoundLyrics({ item, auto, onChosen, query = '', onAdjust }) {
   }, [data.error]);
   const list = data.data || [];
   const best = list[0];
+  const at = best && key + '#' + best.id;
+  const tried = autoTried.get(at);
+  const pick = auto && !data.loading && best && best.exact && !best.instrumental && tried !== 'done' && tried !== 'failed' ? best : null;
   useEffect(() => {
-    if (auto && best && best.exact && !best.instrumental) {
-      setBusy(best.id);
-      applyFound(item.trackId, best.id, true).catch((e) => { toast(e.message, 'error'); setBusy(0); });
-    }
-  }, [auto, best && best.id]);
+    if (!pick || autoTried.has(at)) return;
+    let alive = true;
+    autoTried.set(at, 'trying');
+    applyFound(item.trackId, pick.id, true).then(() => autoTried.set(at, 'done'), (e) => {
+      autoTried.set(at, 'failed'); // shown in the list, to choose again
+      toast(e.message, 'error');
+    }).then(() => alive && setTried((n) => n + 1));
+    return () => { alive = false; };
+  }, [pick && at]);
   const choose = async (c) => {
     setBusy(c.id);
     try {
@@ -348,16 +374,18 @@ function FoundLyrics({ item, auto, onChosen, query = '', onAdjust }) {
       setBusy(0);
     }
   };
-  if (data.loading || (auto && busy)) return html`<div class="found-wait sub"><${Spinner} />正在 LRCLIB 尋找歌詞…</div>`;
+  if (data.loading || pick) {
+    return auto ? html`<${LyricsWait} label="正在 LRCLIB 尋找歌詞…" />` : html`<div class="found-wait sub"><${Spinner} />正在 LRCLIB 尋找歌詞…</div>`;
+  }
   const adjust = onAdjust && html`<div class="actions center"><button class="btn text" onClick=${onAdjust}><${Icon} name="search" />調整搜尋</button></div>`;
   if (data.error) {
-    return html`<p class="sub found-none">線上歌詞暫時查不到，不代表 LRCLIB 沒有這首歌的歌詞。</p>
-      <${ErrorBox} error=${data.error} onRetry=${retry} />${adjust}`;
+    return frame(html`<p class="sub found-none">線上歌詞暫時查不到，不代表 LRCLIB 沒有這首歌的歌詞。</p>
+      <${ErrorBox} error=${data.error} onRetry=${retry} />${adjust}`);
   }
   if (!list.length) {
-    return html`<p class="sub found-none">${query ? '這樣搜尋沒有找到歌詞，可以換個曲名、歌手或關鍵字。' : 'LRCLIB 沒有找到吻合這首歌標題的歌詞；改用其他曲名、歌手或關鍵字也許找得到。'}</p>${adjust}`;
+    return frame(html`<p class="sub found-none">${query ? '這樣搜尋沒有找到歌詞，可以換個曲名、歌手或關鍵字。' : 'LRCLIB 沒有找到吻合這首歌標題的歌詞；改用其他曲名、歌手或關鍵字也許找得到。'}</p>${adjust}`);
   }
-  return html`<div class="found">
+  return frame(html`<div class="found">
     <p class="sub">LRCLIB 找到 ${list.length} 個可能的歌詞，選一個套用：</p>
     <ul class="found-list">${list.map((c) => html`<li key=${c.id}><button class="found-item" disabled=${busy !== 0} onClick=${() => choose(c)}>
       <span class="title">${c.title}${c.exact ? html` <span class="pill good">吻合</span>` : ''}</span>
@@ -365,7 +393,7 @@ function FoundLyrics({ item, auto, onChosen, query = '', onAdjust }) {
         .filter(Boolean).join(' · ')}</span>
       ${c.preview && html`<span class="found-preview">${c.preview}</span>`}
     </button></li>`)}</ul>
-  </div>`;
+  </div>`);
 }
 
 // parseLRC reads [mm:ss.xx] lines (several tags on one line repeat it) and [offset:±ms];
@@ -392,7 +420,9 @@ export function parseLRC(text) {
 
 function Lyrics({ item, time }) {
   const rev = useStore(lyricsRev, (s) => s.n);
-  const data = useLoad(() => loadLyrics(item.trackId), [item.trackId, rev]);
+  const loaded = useLoad(() => loadLyrics(item.trackId), [item.trackId, rev]);
+  // Lyrics this page has already are shown at once, with no wait in between (review #132).
+  const data = loaded.loading && lyricsCache.has(item.trackId) ? { ...loaded, loading: false, data: lyricsCache.get(item.trackId) } : loaded;
   const lines = useMemo(() => (data.data && data.data.synced ? parseLRC(data.data.text) : []), [data.data]);
   const box = useRef(null);
   const userScrolled = useRef(0);
@@ -408,16 +438,19 @@ function Lyrics({ item, time }) {
   }, [at]);
 
   if (!item.trackId) return html`<${Empty} icon="lyrics">這首歌沒有歌詞。<//>`;
-  if (data.loading) return html`<${Spinner} />`;
+  if (data.loading) return html`<${LyricsWait} label="正在載入歌詞…" />`;
   if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`;
   if (!data.data) { // none of its own: LRCLIB is asked (not for drama and radio, rarely there)
-    return html`<div class="lyrics-none">
+    // "No lyrics" is said once LRCLIB has answered too, not while it is asked (review #133).
+    const none = (found) => html`<div class="lyrics-none">
       <${Empty} icon="lyrics">這首歌沒有歌詞。<//>
-      ${item.kind === 'spoken' && !lookFor.has(item.trackId)
-        ? html`<div class="actions center"><button class="btn text" onClick=${() => { lookFor.add(item.trackId); lyricsRev.set((v) => ({ n: v.n + 1 })); }}>在 LRCLIB 尋找</button></div>`
-        : html`<${FoundLyrics} item=${item} auto=${item.kind !== 'spoken'} onAdjust=${() => editLyrics(item, true)} />`}
+      ${found}
       <div class="actions center"><button class="btn tonal" onClick=${() => editLyrics(item)}>自己輸入歌詞</button></div>
     </div>`;
+    if (item.kind === 'spoken' && !lookFor.has(item.trackId)) {
+      return none(html`<div class="actions center"><button class="btn text" onClick=${() => { lookFor.add(item.trackId); lyricsRev.set((v) => ({ n: v.n + 1 })); }}>在 LRCLIB 尋找</button></div>`);
+    }
+    return html`<${FoundLyrics} item=${item} auto=${item.kind !== 'spoken'} onAdjust=${() => editLyrics(item, true)} frame=${none} />`;
   }
   const mark = () => { userScrolled.current = Date.now(); };
   return html`<div class="lyrics-wrap">
@@ -478,8 +511,7 @@ function LyricsEditor({ item, close, online: startOnline }) {
     try {
       if (body) await api('PUT', `/tracks/${item.trackId}/lyrics`, { text: body });
       else await api('DELETE', `/tracks/${item.trackId}/lyrics`);
-      lyricsCache.delete(item.trackId);
-      lyricsRev.set((r) => ({ n: r.n + 1 }));
+      await lyricsChanged(item.trackId);
       toast(body ? '已儲存歌詞' : '已刪除歌詞');
       close();
     } catch (e) {

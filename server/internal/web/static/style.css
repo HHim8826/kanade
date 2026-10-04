@@ -383,6 +383,11 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .lyrics.synced button:hover { background: var(--surface-container); }
 .lyrics.plain { white-space: pre-wrap; font-size: 17px; line-height: 1.8; padding: 8px; }
 .lyrics-foot { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+/* While lyrics load or are looked for: the room they take (the box and its foot), so the page keeps
+   its height and its place (review #132). */
+.lyrics-wait { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+  min-height: calc(min(60vh, 520px) + 48px); text-align: center; }
+.lyrics-wait .spinner { margin: 0; }
 /* Lyrics found in LRCLIB, to choose from. */
 .found-wait { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 8px; }
 .found-wait .spinner { margin: 0; }
