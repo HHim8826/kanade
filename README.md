@@ -6,7 +6,7 @@ A private, self-hosted music library: find releases through BitTorrent, choose t
 
 ## What it does
 
-- **Get music**: magnet links, `.torrent` files and RSS feeds (with rules and automatic downloads) through aria2. You choose the files; a download larger than the server's staging space goes in batches, each imported and cleared before the next. Seeding stops by ratio or time.
+- **Get music**: magnet links, `.torrent` files and RSS feeds (with rules and automatic downloads) through aria2, and direct HTTP/HTTPS links to an audio file or a zip. You choose a torrent's files; a download larger than the server's staging space goes in batches, each imported and cleared before the next. Seeding stops by ratio or time.
 - **Import and tidy**: reads tags (and guesses their text encoding), splits disc images by CUE sheet and converts other lossless formats to FLAC (FFmpeg), keeps CUE and log files with the album, treats a folder as an album where the tags do not say. It can turn a whole download into one album with a section for each folder. It also offers MusicBrainz lookups, details read from a pasted VGMdb page, editing one album or many at once, categories, and a history where every change can be undone.
 - **Store**: every file goes to your own Google Drive and is checked by SHA-256 after upload; files dropped into a Drive inbox folder are imported by themselves. The server keeps only a playback cache, so a small VPS is enough.
 - **Play**: queue, shuffle, repeat, shuffling the whole library or carrying on with it, resuming dramas where they stopped, synced lyrics (from the files, LRC, or found on LRCLIB), bookmarks, a sleep timer, lock-screen controls.

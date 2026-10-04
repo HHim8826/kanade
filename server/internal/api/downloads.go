@@ -25,8 +25,9 @@ func (s *Server) downloadError(w http.ResponseWriter, r *http.Request, err error
 	}
 }
 
-// createDownload accepts {"uri": "magnet:..."} / {"uri": "https://.../x.torrent"} as JSON,
-// or the raw bytes of a .torrent file with Content-Type application/x-bittorrent.
+// createDownload accepts {"uri": "magnet:..."} / {"uri": "https://.../x.torrent"} / {"uri":
+// "https://.../album.zip"} (a direct download) as JSON, or the raw bytes of a .torrent file with
+// Content-Type application/x-bittorrent. It answers the new download's id and kind.
 func (s *Server) createDownload(w http.ResponseWriter, r *http.Request) {
 	var uri string
 	var torrent []byte
@@ -52,7 +53,11 @@ func (s *Server) createDownload(w http.ResponseWriter, r *http.Request) {
 		s.downloadError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]int64{"id": id})
+	kind := downloader.KindTorrent
+	if v, err := s.downloads.Get(r.Context(), id); err == nil && v != nil {
+		kind = v.Kind
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id, "kind": kind})
 }
 
 func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {

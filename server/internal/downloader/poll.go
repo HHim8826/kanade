@@ -138,7 +138,13 @@ func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need, work
 		in[idx] = true
 	}
 	gid := r.gid
-	if gid == "" {
+	switch {
+	case gid == "" && r.Kind == KindDirect:
+		var err error
+		if gid, err = s.addURI(ctx, r); err != nil {
+			return err
+		}
+	case gid == "":
 		torrent, err := s.torrentFor(ctx, r)
 		if err != nil {
 			return fmt.Errorf("cannot start round %d: %w", round, err)
@@ -148,8 +154,10 @@ func (s *Service) beginRound(ctx context.Context, r *row, pick []int, need, work
 		}
 		r.uploadedBefore = r.UploadedBytes // a new task counts from zero
 	}
-	if err := s.aria.RPC.Call(ctx, "changeOption", nil, gid, map[string]string{"select-file": strings.Join(list, ",")}); err != nil {
-		return err
+	if r.Kind != KindDirect { // its one file is the task
+		if err := s.aria.RPC.Call(ctx, "changeOption", nil, gid, map[string]string{"select-file": strings.Join(list, ",")}); err != nil {
+			return err
+		}
 	}
 	if err := s.aria.RPC.Call(ctx, "unpause", nil, gid); err != nil {
 		return err
@@ -287,7 +295,7 @@ func (s *Service) pollTransfer(ctx context.Context, r *row) {
 		case r.State == StateSeeding:
 			r.State = StateCompleted
 			s.setState(ctx, r.ID, StateCompleted, "")
-		case r.Round > 0 && r.InfoHash != "": // its torrent is saved: plan the round again
+		case r.Round > 0 && (r.InfoHash != "" || r.Kind == KindDirect): // its torrent is saved, or its link: plan the round again
 			s.restartRound(ctx, r)
 		default:
 			s.fail(ctx, r, "aria2 lost the task")

@@ -126,7 +126,7 @@ DIR/
 | `GET /sidecars/{id}` | 下載與專輯一起保存的 CUE／LOG |
 | `GET /imports`、`GET /imports/{id}`、`POST /imports/{id}/retry` | 匯入批次、逐檔狀態與上傳進度（完成的批次另有 `unsaved`：沒存進曲庫、來源保留中的檔案數）、重試失敗項目：回應 `{requeued, saved, fetching, lost}`（重新排入、同一檔案已由其他批次入庫、正由下載重新取得、已無法取得，審查 #57） |
 | `POST /imports/{id}/discard` | 捨棄完成批次中沒存進曲庫的檔案（失敗、被略過的音檔），讓來源可以清理：`{"discarded": n}` |
-| `POST /downloads` | `{"uri": "magnet:..."}`／`{"uri": "https://.../x.torrent"}`，或以 `Content-Type: application/x-bittorrent` 直接送 .torrent |
+| `POST /downloads` | `{"uri": "magnet:..."}`／`{"uri": "https://.../x.torrent"}`／`{"uri": "https://.../album.zip"}`（直接下載），或以 `Content-Type: application/x-bittorrent` 直接送 .torrent；回傳 `{id, kind}`（`bt` 或 `http`） |
 | `GET /downloads`、`GET /downloads/{id}` | 下載清單；單一下載含檔案清單與預設勾選（`suggested`） |
 | `POST /downloads/{id}/select` | `{"files": [索引...]}`；省略則採預設勾選。總量超過暫存預算也接受，分批下載（審查 #28）；下載回應含 `round`、`rounds`、`left`（還沒輪到的檔案數）、`waiting_space`、`budget` |
 | `POST /downloads/{id}/pause`、`/resume`、`/cancel` | 控制；`cancel` 也用於放棄失敗的下載（清除還沒匯入的檔案，已入庫的歌曲保留） |
@@ -496,6 +496,25 @@ DIR/
 - `kanade-manager autostart [on|off]`（選單 15）：顯示並開關開機自動啟動（systemd enable、OpenRC rc-update、SysV rc 連結、cron @reboot）；服務檔被刪掉時重新寫入。安裝與狀態會顯示是否已開啟。
 - `update` 會一併更新 kanade-manager：先比對 release 的 `SHA256SUMS`（從 v0.1.12 起列入 `kanade.sh`）並確認 bash 能完整讀取；Kanade 已是同一版時只更新腳本、不重新啟動服務。
 - 驗證：以腳本自己的函式在暫存目錄測試（SysV 啟動、停止、重複啟動、殭屍、rc 連結、autostart 開關與重寫服務檔、管理腳本的校驗與截斷），以 root 實測 runuser 與 su 兩種啟動方式；原有的更新與退回測試照樣通過。
+
+### 審查修正（2026-10-04，#125–#133）
+
+- 播放器（#125、#126、#127）：`load` 累加載入次數，等待補歌的舊回應在期間換過歌時不再前進或暫停；保存的佇列帶實例 id，進度記錄 id、qid、asset，佇列也附寫入當下的進度，恢復時三者都符合才用進度 key，否則用佇列自帶的那份（跨分頁 localStorage 寫入有延遲，兩個 key 可能分屬兩個分頁）；最後有動作的分頁擁有保存狀態，清空佇列只刪自己的、登出一律刪；音訊真的開始播放才上報 `/plays`，恢復後沒播放不影響首頁續播。
+- 線上歌詞（#128）：斜線後綴只是猜測，只有等於歌曲的 artist 時才把去掉後綴的曲名當成精確比對。
+- 歌詞分頁（#132、#133）：已快取的歌詞直接顯示；等待區塊與歌詞框同高；搜尋、自動套用與取回歌詞是同一段等待，只有需要手選、沒找到或錯誤時才顯示「沒有歌詞」；自動套用每頁每筆一次，失敗留在清單。
+- 統計（#129）：專輯合併鏈只從期間內出現的專輯開始解（走 bucket 索引）；日統計與時段趨勢不解專輯。
+- 管理腳本（#130、#131）：SysV 的 `alive()` 比對 `/proc/PID/cmdline`，PID 被重用時不送信號；`install_manager` 本身驗證腳本（校驗碼、語法與入口），所有安裝入口共用，不通過就保留原本的 manager。
+- 部署為 v0.1.17；`TestHeardTimeIsBounded` 在整刻鐘附近執行時聆聽分成兩列而失敗，release 由 v0.1.18 發佈（程式相同，測試已修）。
+
+### HTTP/HTTPS 直接下載（2026-10-04，遷移 33：`downloads.kind`）
+
+- 新增下載的網址是 http(s) 時先探測（只讀開頭）：`application/x-bittorrent` 或以 bencode 字典開頭的照舊當 .torrent；其他當成直接下載的檔案。
+- 直接下載只收匯入吃得下的東西：音檔或 .zip（副檔名，或依 Content-Type 補上）；網頁（text/html）、其他類型、沒有 Content-Length 的都在加入時拒絕並說明原因，不留記錄。檔名取 Content-Disposition，否則取轉址後網址的最後一段，去掉路徑、控制字元與開頭的點，最長 200 bytes。
+- 加入後直接排隊（只有一個檔案，沒有選檔）；同一網址還在進行時不能重複加入。和 torrent 的一輪相同：排程取得暫存空間後才以 `addUri`（暫停、指定檔名、`continue`、不能續傳時從頭、不改名）加入 aria2，下載完交給匯入，沒有做種，匯入完成後清掉檔案。
+- aria2 弄丟任務時依連結重新加入並續傳；失敗可以重試（從連結重新加入）。重試與重抓的重複檢查改用 `twin`：torrent 依 info hash，直接下載依網址（避免空的 info hash 互相比對）。
+- 暫停恢復：只有已交給匯入的下載才回到做種；在 100% 但還沒交接時暫停的，恢復後回到這一輪，交接後才結束。
+- RSS 不受影響：RSS 自己抓連結並以 .torrent 內容加入。
+- 驗證：真實 aria2＋本機 HTTP 伺服器：zip 與單一音檔入庫並清除檔案、Content-Disposition 的中文檔名、重複網址、沒有副檔名的 .torrent 連結仍走 torrent、網頁／不支援的類型／沒有大小／404 被拒絕且不留記錄、限速下載中弄丟 aria2 任務後以 Range 續傳、失敗後重試。
 
 ## 使用方式（開發環境）
 

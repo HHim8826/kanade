@@ -72,6 +72,7 @@ type FileView struct {
 
 type View struct {
 	ID            int64      `json:"id"`
+	Kind          string     `json:"kind"` // KindTorrent or KindDirect
 	Source        string     `json:"source"`
 	Name          string     `json:"name"`
 	InfoHash      string     `json:"info_hash,omitempty"`
@@ -235,8 +236,9 @@ func (s *Service) ResumeAfterDisk(ctx context.Context) (int, error) {
 	return int(n), nil
 }
 
-// Add starts a download from a magnet link, a .torrent URL or .torrent bytes (uploaded, or fetched
-// by the caller; uri then names where they came from). Torrents become paused aria2 tasks right
+// Add starts a download from a magnet link, a web link or .torrent bytes (uploaded, or fetched by
+// the caller; uri then names where they came from). A web link gives a .torrent, or a file that is
+// downloaded directly (audio or a zip, queued at once). Torrents become paused aria2 tasks right
 // away; magnets first fetch their metadata. With auto the suggested files are chosen as soon as the
 // file list is known (RSS auto-download); otherwise the task waits for the user.
 func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool) (int64, error) {
@@ -257,12 +259,16 @@ func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool
 	case btih.MatchString(uri):
 		magnet = true
 	case strings.HasPrefix(uri, "https://"), strings.HasPrefix(uri, "http://"):
-		var err error
-		if torrent, err = fetchTorrent(ctx, uri); err != nil {
+		got, file, err := probe(ctx, uri)
+		if err != nil {
 			return 0, err
 		}
+		if file != nil {
+			return s.addDirect(ctx, uri, file)
+		}
+		torrent = got
 	default:
-		return 0, errors.New("expected a magnet link or a .torrent URL")
+		return 0, errors.New("expected a magnet link, a .torrent or a web link to a file")
 	}
 	if !magnet && (len(torrent) > maxTorrent || len(torrent) == 0 || torrent[0] != 'd') {
 		return 0, errors.New("that is not a .torrent file")
@@ -300,6 +306,64 @@ func (s *Service) Add(ctx context.Context, uri string, torrent []byte, auto bool
 }
 
 const maxTorrent = 10 << 20
+
+// addDirect records a direct download of the file a web link gives, queued at once: there is no
+// list to choose from. Like a torrent's round, it is added to aria2 when staging space is set aside
+// for it (beginRound).
+func (s *Service) addDirect(ctx context.Context, uri string, f *direct) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if other, ok := s.twin(ctx, &row{View: View{Kind: KindDirect, Source: uri}}); ok {
+		return 0, fmt.Errorf("this link is already download #%d", other)
+	}
+	files, _ := json.Marshal([]FileView{{Index: 1, Path: f.name, Length: f.size, Selected: true, Suggested: true}})
+	now := db.Now()
+	r, err := s.db.ExecContext(ctx, `INSERT INTO downloads (source, kind, name, state, dir, files, total_bytes, created_at, updated_at)
+		VALUES (?, ?, ?, ?, '', ?, ?, ?, ?)`, uri, KindDirect, f.name, StateQueued, string(files), f.size, now, now)
+	if err != nil {
+		return 0, err
+	}
+	id, _ := r.LastInsertId()
+	dir := filepath.Join(s.root, strconv.FormatInt(id, 10))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		s.db.ExecContext(ctx, `UPDATE downloads SET state = ?, error = ?, updated_at = ? WHERE id = ?`, StateFailed, err.Error(), db.Now(), id)
+		return id, err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE downloads SET dir = ?, updated_at = ? WHERE id = ?`, dir, db.Now(), id)
+	s.poke()
+	return id, err
+}
+
+// addURI adds a direct download's file to aria2, paused, under its own name in the download's
+// folder. A partial file left from before (a retry, a round started again) is continued where the
+// server can resume, else fetched again from the start; never saved under another name.
+func (s *Service) addURI(ctx context.Context, r *row) (string, error) {
+	if len(r.files) != 1 {
+		return "", errors.New("a direct download has one file")
+	}
+	var gid string
+	err := s.aria.RPC.Call(ctx, "addUri", &gid, []string{r.Source}, map[string]string{"dir": r.dir, "out": r.files[0].Path,
+		"pause": "true", "continue": "true", "always-resume": "false", "allow-overwrite": "true", "auto-file-renaming": "false"})
+	return gid, err
+}
+
+// twin is another download under way of the same torrent (by its info hash) or, for a direct
+// download, of the same link.
+func (s *Service) twin(ctx context.Context, r *row) (int64, bool) {
+	var other int64
+	var err error
+	switch {
+	case r.Kind == KindDirect:
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE kind = ? AND source = ? AND id != ? AND state NOT IN (?, ?, ?)`,
+			KindDirect, r.Source, r.ID, StateCompleted, StateFailed, StateCanceled).Scan(&other)
+	case r.InfoHash != "":
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE info_hash = ? AND id != ? AND state NOT IN (?, ?, ?)`,
+			r.InfoHash, r.ID, StateCompleted, StateFailed, StateCanceled).Scan(&other)
+	default:
+		return 0, false
+	}
+	return other, err == nil
+}
 
 // taskTorrent is the torrent kept in a download's folder, from which later rounds add the task
 // again (review #28).
@@ -499,14 +563,15 @@ type row struct {
 
 const rowCols = `id, source, name, info_hash, meta_gid, gid, state, dir, files, total_bytes, done_bytes, uploaded_bytes,
 	down_speed, up_speed, peers, error, coalesce(import_batch_id, 0), files_removed, created_at, coalesce(completed_at, 0), auto_select,
-	round, round_bytes, round_work, done_before, note, uploaded_before, grouping`
+	round, round_bytes, round_work, done_before, note, uploaded_before, grouping, kind`
 
 func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	var r row
 	var files, grouping string
 	err := sc.Scan(&r.ID, &r.Source, &r.Name, &r.InfoHash, &r.metaGID, &r.gid, &r.State, &r.dir, &files, &r.TotalBytes,
 		&r.DoneBytes, &r.UploadedBytes, &r.DownSpeed, &r.UpSpeed, &r.Peers, &r.Error, &r.ImportBatchID, &r.FilesRemoved,
-		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note, &r.uploadedBefore, &grouping)
+		&r.CreatedAt, &r.CompletedAt, &r.AutoSelect, &r.Round, &r.roundBytes, &r.roundWork, &r.doneBefore, &r.Note, &r.uploadedBefore, &grouping,
+		&r.Kind)
 	if err != nil {
 		return nil, err
 	}
@@ -528,6 +593,14 @@ func scanRow(sc interface{ Scan(...any) error }) (*row, error) {
 	r.CanRetry = r.State == StateFailed && len(retryable(r.files)) > 0 // (unless the torrent is downloading again elsewhere)
 	r.Clearable = r.finished() && !r.CanRetry && !r.holdsFiles()
 	return &r, nil
+}
+
+// what a download is of, for messages.
+func (r *row) what() string {
+	if r.Kind == KindDirect {
+		return "link"
+	}
+	return "torrent"
 }
 
 // finished: nothing runs for it any more (a failed one may still be retried).
@@ -926,11 +999,14 @@ func (s *Service) Resume(ctx context.Context, id int64) error {
 	if r.State != StatePaused {
 		return ErrBadState
 	}
-	if s.lowDisk.Load() && !(r.TotalBytes > 0 && r.DoneBytes >= r.TotalBytes) {
+	// Paused while seeding: its files fetched and handed to the importer. One paused at 100 % before
+	// that goes back to its round, which then hands them over (a direct download seeds nothing).
+	seeding := r.TotalBytes > 0 && r.DoneBytes >= r.TotalBytes && r.handedOver() && r.Kind != KindDirect
+	if s.lowDisk.Load() && !seeding {
 		return ErrLowDisk
 	}
 	s.db.ExecContext(ctx, `UPDATE downloads SET paused_by = '' WHERE id = ?`, id)
-	if r.TotalBytes > 0 && r.DoneBytes >= r.TotalBytes { // finished downloading: back to seeding
+	if seeding {
 		if err := s.aria.RPC.Call(ctx, "unpause", nil, r.gid); err != nil {
 			return err
 		}
@@ -964,16 +1040,16 @@ func (s *Service) Retry(ctx context.Context, id int64) error {
 	if len(retryable(r.files)) == 0 {
 		return errors.New("nothing is left to download: every chosen file was imported, or the files were never chosen; add it again")
 	}
-	var other int64
-	if s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE info_hash = ? AND id != ? AND state NOT IN (?, ?, ?)`,
-		r.InfoHash, r.ID, StateCompleted, StateFailed, StateCanceled).Scan(&other) == nil {
-		return fmt.Errorf("this torrent is already download #%d", other)
+	if other, ok := s.twin(ctx, r); ok {
+		return fmt.Errorf("this %s is already download #%d", r.what(), other)
 	}
 	if r.dir == "" {
 		r.dir = filepath.Join(s.root, strconv.FormatInt(r.ID, 10))
 	}
-	if _, err := s.torrentFor(ctx, r); err != nil {
-		return err
+	if r.Kind != KindDirect { // a direct download is added again from its link
+		if _, err := s.torrentFor(ctx, r); err != nil {
+			return err
+		}
 	}
 	for _, g := range []string{r.metaGID, r.gid} {
 		if g != "" {
@@ -1054,13 +1130,13 @@ func (s *Service) Refetch(ctx context.Context, batchID int64, paths []string) er
 		}
 		r.files[i].Round, r.files[i].Again, r.files[i].Fetched = 0, batchID, false
 	}
-	var other int64
-	if s.db.QueryRowContext(ctx, `SELECT id FROM downloads WHERE info_hash = ? AND id != ? AND state NOT IN (?, ?, ?)`,
-		r.InfoHash, r.ID, StateCompleted, StateFailed, StateCanceled).Scan(&other) == nil {
-		return fmt.Errorf("its torrent is download #%d now", other)
+	if other, ok := s.twin(ctx, r); ok {
+		return fmt.Errorf("its %s is download #%d now", r.what(), other)
 	}
-	if _, err := s.torrentFor(ctx, r); err != nil {
-		return err
+	if r.Kind != KindDirect {
+		if _, err := s.torrentFor(ctx, r); err != nil {
+			return err
+		}
 	}
 	files, _ := json.Marshal(r.files)
 	switch r.State {

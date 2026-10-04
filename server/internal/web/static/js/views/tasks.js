@@ -132,7 +132,7 @@ export function Tasks() {
         : html`<${Empty} icon="upload">沒有匯入紀錄<//>`}
       ${more('imports')}
     `}
-    ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(id) => { setAdding(false); tasks.reload(); toast('已加入，正在取得檔案清單'); }} />`}
+    ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(direct) => { setAdding(false); tasks.reload(); toast(direct ? '已加入，空間足夠時開始下載' : '已加入，正在取得檔案清單'); }} />`}
     ${selecting && html`<${SelectFiles} id=${selecting} onClose=${() => setSelecting(null)} onDone=${() => { setSelecting(null); tasks.reload(); }} />`}
   </section>`;
 }
@@ -141,14 +141,16 @@ function DownloadCard({ d, onSelect, onChange }) {
   const act = (action) => post(`/downloads/${d.id}/${action}`).then(onChange, (e) => toast(e.message, 'error'));
   const progress = d.total_bytes ? d.done_bytes / d.total_bytes : 0;
   const active = d.state === 'downloading' || d.state === 'seeding';
+  const direct = d.kind === 'http'; // one file from a web link: nothing to choose or seed
   return html`<article class="task">
     <div class="task-head">
       <div class="grow">
         <div class="title">${d.name || d.source}</div>
         <div class="sub">
           <span class=${'chip state-' + d.state}>${downloadStates[d.state] || d.state}</span>
+          ${direct && ` 直接下載 · ${hostOf(d.source)} ·`}
           ${d.total_bytes > 0 && html` ${fmtBytes(Math.min(d.done_bytes, d.total_bytes))} / ${fmtBytes(d.total_bytes)}`}
-          ${active && html` · ↓${fmtBytes(d.down_speed)}/s ↑${fmtBytes(d.up_speed)}/s · ${d.peers} 連線`}
+          ${active && (direct ? html` · ↓${fmtBytes(d.down_speed)}/s` : html` · ↓${fmtBytes(d.down_speed)}/s ↑${fmtBytes(d.up_speed)}/s · ${d.peers} 連線`)}
           ${d.import_batch_id ? ' · 已送入匯入' : ''}
         </div>
       </div>
@@ -174,6 +176,14 @@ function DownloadCard({ d, onSelect, onChange }) {
   </article>`;
 }
 
+const hostOf = (u) => {
+  try {
+    return new URL(u).host;
+  } catch {
+    return u;
+  }
+};
+
 // A failed download keeps what it fetched for a retry (review #49); giving it up clears what no
 // import has. Songs already imported stay in the library.
 const cancelPrompt = (d) => ({
@@ -192,7 +202,7 @@ function AddDownload({ onClose, onAdded }) {
     try {
       const r = file ? await api('POST', '/downloads', file, { contentType: 'application/x-bittorrent' })
         : await post('/downloads', { uri: uri.trim() });
-      onAdded(r.id);
+      onAdded(r.kind === 'http');
     } catch (e) {
       setError(e);
       setBusy(false);
@@ -201,8 +211,8 @@ function AddDownload({ onClose, onAdded }) {
   return html`<${Dialog} title="新增下載" onClose=${onClose} actions=${html`
     <button class="btn text" onClick=${onClose}>取消</button>
     <button class="btn filled" disabled=${busy || (!uri.trim() && !file)} onClick=${submit}>${busy ? '加入中…' : '加入'}</button>`}>
-    <label class="field"><span>magnet 連結或 .torrent 網址</span>
-      <textarea rows="3" value=${uri} onInput=${(e) => setUri(e.target.value)} placeholder="magnet:?xt=urn:btih:… 或 https://nyaa.si/download/….torrent" disabled=${!!file}></textarea>
+    <label class="field"><span>magnet 連結、.torrent 網址或檔案的網址</span>
+      <textarea rows="3" value=${uri} onInput=${(e) => setUri(e.target.value)} placeholder="magnet:?xt=urn:btih:…、https://nyaa.si/download/….torrent 或 https://example.com/album.zip" disabled=${!!file}></textarea>
     </label>
     <div class="field"><span>或選擇 .torrent 檔</span>
       <span class="file-pick">
@@ -211,7 +221,7 @@ function AddDownload({ onClose, onAdded }) {
         ${file && html`<${IconButton} icon="close" label="不用這個檔案" onClick=${() => setFile(null)} />`}
       </span>
     </div>
-    <p class="hint">加入後會先取得檔案清單，選好要下載的檔案才開始下載。</p>
+    <p class="hint">magnet 和 .torrent 加入後會先取得檔案清單，選好要下載的檔案才開始下載。HTTP／HTTPS 網址如果直接是音檔或 .zip（伺服器要提供檔案大小），會整個下載後匯入；網頁的網址不行，要用檔案本身的下載連結。</p>
     <${ErrorBox} error=${error} />
   <//>`;
 }
@@ -338,7 +348,7 @@ function ImportCard({ b, onChange }) {
   const kept = { upload: '原始檔留在伺服器的暫存空間', download: '下載的檔案會保留', inbox: '檔案留在 Drive 收件匣' }[b.kind] || '';
   const discard = () => confirmDialog({
     title: '捨棄未存進曲庫的檔案', action: '捨棄', danger: true,
-    children: html`<p>這次匯入有 ${b.unsaved} 個檔案沒有存進曲庫（原因見下方各檔案）。捨棄後就不再重試，${b.kind === 'upload' ? '伺服器上的上傳暫存會刪除' : b.kind === 'download' ? '做種結束後下載的檔案會刪除' : '不會刪除任何檔案'}。</p>`,
+    children: html`<p>這次匯入有 ${b.unsaved} 個檔案沒有存進曲庫（原因見下方各檔案）。捨棄後就不再重試，${b.kind === 'upload' ? '伺服器上的上傳暫存會刪除' : b.kind === 'download' ? '下載的檔案會在下載任務結束（做種的在做種結束）後刪除' : '不會刪除任何檔案'}。</p>`,
     onConfirm: async () => {
       const r = await post(`/imports/${b.id}/discard`);
       toast(`已捨棄 ${r.discarded} 個檔案`);
