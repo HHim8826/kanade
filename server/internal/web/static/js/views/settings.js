@@ -687,7 +687,8 @@ function SettingsPage({ first, onLogout }) {
     <h2 class="section-title">服務</h2>
     <div class="card pad">
       <${ErrorBox} error=${status.error} onRetry=${status.reload} />
-      ${st && html`<div class="sub">下載器（aria2）：${st.aria2_ready ? '運作中' : '未就緒'}</div>
+      ${st && html`<div class="sub">Kanade 版本：${st.version || '未知'}（<a class="link" href="https://github.com/HHim8826/kanade/releases" target="_blank" rel="noopener">發佈紀錄</a>）</div>
+        <div class="sub">下載器（aria2）：${st.aria2_ready ? '運作中' : '未就緒'}</div>
         <div class="sub">格式轉換與 CUE 分軌（FFmpeg）：${st.ffmpeg ? '可用' : '未安裝'}</div>
         ${st.disk && html`<div class=${'sub' + (st.disk.low ? ' state-failed' : '')}>磁碟：剩 ${fmtBytes(st.disk.free_bytes)}（保留 ${fmtBytes(st.disk.reserve_bytes)}）${st.disk.low ? '，空間不足' : ''}</div>`}
         <div class="sub">已運行 ${Math.floor(st.uptime_seconds / 3600)} 小時 ${Math.floor((st.uptime_seconds % 3600) / 60)} 分</div>`}

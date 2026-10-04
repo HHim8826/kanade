@@ -83,7 +83,8 @@ export function Home() {
   const busy = d && (Object.keys(d.tasks.downloads).length > 0 || d.tasks.importing > 0);
   const att = d && d.attention;
   const empty = d && !d.recently_added.length;
-  // The track in the top card is not repeated in the drama list below it.
+  // The track in the top card is not repeated in the drama list below it. The card waits for the
+  // page's data like everything else, though the player is back at once after a reload.
   const shown = live ? live.assetId : d && d.continue ? d.continue.asset.id : 0;
   const spoken = d ? d.spoken.filter((t) => t.asset.id !== shown) : [];
   return html`<section>
@@ -97,7 +98,7 @@ export function Home() {
       </div>
     </div>
     ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
-    ${live ? html`<${NowCard} />` : d && d.continue && html`<${LastPlayedCard} item=${d.continue} />`}
+    ${(d || home.error) && (live ? html`<${NowCard} />` : d && d.continue && html`<${LastPlayedCard} item=${d.continue} />`)}
     ${(busy || (att && att.failed_imports > 0)) && html`<a class="card summary-card" href=${href('tasks')}>
       <${Icon} name="tasks" />
       <span class="grow">
