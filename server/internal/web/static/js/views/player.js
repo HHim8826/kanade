@@ -11,6 +11,7 @@ import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { BookmarkDialog, BookmarkList } from './bookmarks.js';
 import { viewCover } from './coverview.js';
+import { showEffects } from './effects.js';
 import { Field } from './organize.js';
 
 const open = (v) => player.set({ nowPlayingOpen: v });
@@ -115,6 +116,7 @@ export function NowPlaying() {
     item.albumId && { icon: 'album', label: '前往專輯', onClick: () => go('album/' + item.albumId) },
     item.trackId && { icon: 'lyrics', label: '編輯歌詞', onClick: () => editLyrics(item) },
     item.coverId && { icon: 'image', label: '檢視封面', onClick: () => viewCover(item.coverId, item.album || item.title) },
+    { icon: 'equalizer', label: '音效…', onClick: showEffects },
   ]);
   return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放">
     <div class="np-top">

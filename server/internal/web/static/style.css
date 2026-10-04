@@ -400,6 +400,26 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .found-item .title, .found-item .sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .found-preview { white-space: pre-line; color: var(--on-surface-variant); font-size: 13px; line-height: 1.5;
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+/* Sound effects: the equalizer's bands side by side, upright (review #139). */
+.eq.off .eq-bands, .eq.off .choices { opacity: .5; }
+.eq-bands { display: grid; grid-template-columns: repeat(10, minmax(0, 1fr)); gap: 4px; margin: 16px 0 8px; max-width: 640px; }
+.eq-band { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 12px; min-width: 0; }
+/* Upright, filled from 0 dB (the middle) to the value: a boost up, a cut down. */
+.eq-band input { -webkit-appearance: none; appearance: none; writing-mode: vertical-lr; direction: rtl; width: 28px; height: 150px; margin: 0;
+  background: transparent; cursor: pointer;
+  --track: linear-gradient(to top, var(--outline-variant) var(--lo), var(--primary) var(--lo) var(--hi), var(--outline-variant) var(--hi)); }
+.eq-band input::-webkit-slider-runnable-track { width: 4px; border-radius: 2px; background: var(--track); }
+.eq-band input::-moz-range-track { width: 4px; border-radius: 2px; background: var(--track); }
+.eq-band input::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-left: -6px; border-radius: 50%; background: var(--primary); border: 0; }
+.eq-band input::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--primary); border: 0; }
+.eq-band input:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; border-radius: 4px; }
+.eq-band input:disabled { cursor: default; }
+.eq-val { font-variant-numeric: tabular-nums; font-weight: 600; min-height: 1.4em; }
+.eq-hz { color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
+.choice.ghost { border-style: dashed; cursor: default; }
+.eq-save input { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s);
+  padding: 8px 10px; min-width: 0; flex: 1 1 10em; max-width: 16em; }
+@media (max-width: 559px) { .eq-bands { grid-template-columns: repeat(5, minmax(0, 1fr)); row-gap: 20px; } .eq-band input { height: 120px; } }
 /* Keyboard shortcuts. */
 .shortcuts { display: grid; grid-template-columns: auto 1fr; gap: 10px 24px; align-items: center; margin: 0; }
 .shortcuts > div { display: contents; } /* one grid: the descriptions line up */

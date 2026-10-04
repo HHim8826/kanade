@@ -1,4 +1,5 @@
 import { coverURL, get, post, streamURL } from './api.js';
+import { attach, output, wake } from './effects.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
@@ -87,10 +88,15 @@ const SLEEP_FADE_MS = 20_000;
 const applyVolume = () => {
   const s = player.get();
   const fade = s.sleep && s.sleep.until ? Math.min(1, Math.max(0, (s.sleep.until - Date.now()) / SLEEP_FADE_MS)) : 1;
-  audio.volume = s.volume * fade;
-  audio.muted = s.muted;
+  output(s.volume * fade, s.muted); // through the sound effects' graph once there is one
 };
+attach(audio, applyVolume);
 applyVolume();
+// play starts the element, the sound effects ready first (a play asked for lets the browser start them).
+const play = () => {
+  wake();
+  return audio.play();
+};
 
 let qseq = 0;
 const tag = (items) => items.map((it) => ({ ...it, qid: ++qseq }));
@@ -162,7 +168,7 @@ function load(index, autoplay = true, again = false) {
   }
   player.set({ index, time: (pendingSeek || 0) / 1000, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay });
   audio.src = streamURL(item.assetId);
-  if (autoplay) audio.play().catch(() => player.set({ playing: false, buffering: false }));
+  if (autoplay) play().catch(() => player.set({ playing: false, buffering: false }));
   updateMediaSession(item);
   savePlace();
 }
@@ -637,7 +643,7 @@ export function resetPlayer(withReport = true, signOut = false) {
 
 export function toggle() {
   if (!current()) return;
-  if (audio.paused) audio.play().catch(() => {});
+  if (audio.paused) play().catch(() => {});
   else {
     pauses++;
     audio.pause();
@@ -778,7 +784,7 @@ export function playBookmark(b, anyway = false) {
   const cur = current();
   if (cur && cur.assetId === item.assetId) {
     seek(b.position_ms / 1000);
-    if (audio.paused) audio.play().catch(() => {});
+    if (audio.paused) play().catch(() => {});
     return;
   }
   playQueue([{ ...item, resumeMs: b.position_ms }], 0);

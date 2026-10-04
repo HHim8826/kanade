@@ -1,6 +1,7 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
+import { EffectsPanel } from './effects.js';
 import { showShortcuts } from '../shortcuts.js';
 import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { href } from '../router.js';
@@ -686,6 +687,8 @@ function SettingsPage({ first, onLogout }) {
     <${Drive} drive=${drive} />
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
     <${PlaybackSettings} />
+    <h2 class="section-title">音效</h2>
+    <div class="card pad"><${EffectsPanel} /></div>
     <${Appearance} />
     <${StatsTimeZone} />
     <${DownloadSettings} conf=${conf} />
