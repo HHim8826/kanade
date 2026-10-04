@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -255,5 +257,160 @@ func TestCollectionGathersSongsOnNoAlbum(t *testing.T) {
 	}
 	if again, err := svc.CollectionPlan(ctx, 1, "The Collection", ""); err != nil || len(again.Adds)+len(again.Moves) != 0 || again.Target.ID != album {
 		t.Fatalf("second look: %+v %v", again, err)
+	}
+}
+
+// collectionRig imports the first round of a download of three folders (Alpha, Beta and, for a later
+// round, Gamma and Delta), each its own album by its tags.
+type collectionRig struct {
+	ctx  context.Context
+	d    *sql.DB
+	lib  *library.Store
+	imp  *importer.Importer
+	svc  *Service
+	dir  string
+	path map[string]string // album -> its song, relative to dir
+}
+
+func newCollectionRig(t *testing.T) *collectionRig {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	tmp := t.TempDir()
+	d, err := db.Open(ctx, filepath.Join(tmp, "db.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	r := &collectionRig{ctx: ctx, d: d, lib: library.New(d), dir: filepath.Join(tmp, "downloads", "1"), path: map[string]string{}}
+	r.imp = importer.New(d, r.lib, &localDrive{}, filepath.Join(tmp, "staging"), log)
+	go r.imp.Run(ctx)
+	r.svc = NewService(d, nil, r.imp, filepath.Join(tmp, "downloads"), 1<<30, 0, log)
+	var files []FileView
+	for i, album := range []string{"Alpha", "Beta", "Gamma", "Delta"} {
+		rel := "Coll/" + album + "/01.mp3"
+		id3MP3(t, filepath.Join(r.dir, filepath.FromSlash(rel)), map[string]string{"TIT2": album + " song", "TPE1": "A", "TALB": album, "TRCK": "1"})
+		r.path[album] = rel
+		files = append(files, FileView{Index: i + 1, Path: rel, Selected: true})
+	}
+	raw, _ := json.Marshal(files)
+	if _, err := d.Exec(`INSERT INTO downloads (id, source, name, state, dir, files, round, created_at, updated_at)
+		VALUES (1, 'magnet:', 'Coll', 'downloading', ?, ?, 1, 0, 0)`, r.dir, string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	r.round(t, "Alpha", "Beta")
+	return r
+}
+
+// round imports the albums' songs as the download's next round, with the grouping it has now.
+func (r *collectionRig) round(t *testing.T, albums ...string) {
+	t.Helper()
+	row, _ := r.svc.load(r.ctx, 1)
+	var paths []string
+	for _, a := range albums {
+		paths = append(paths, filepath.Join(r.dir, filepath.FromSlash(r.path[a])))
+	}
+	opts, _ := json.Marshal(map[string]any{"grouping": row.batchGrouping(paths)})
+	b, _, err := r.imp.CreateBatchLinked(r.ctx, "download", "Coll", r.dir, paths, false, func(tx *sql.Tx, b int64) error {
+		_, err := tx.Exec(`UPDATE import_batches SET options = ? WHERE id = ?`, string(opts), b)
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "import", 20*time.Second, func() bool { v, _ := r.imp.Batch(r.ctx, b); return v.State == importer.BatchDone })
+	// The round's files are the download's from now on.
+	r.d.Exec(`UPDATE downloads SET files = (SELECT json_group_array(CASE WHEN json_extract(f.value, '$.path') IN (SELECT value FROM json_each(?))
+		THEN json_set(f.value, '$.batch', ?) ELSE json(f.value) END) FROM json_each(downloads.files) f) WHERE id = 1`,
+		fmt.Sprint(`["`, strings.Join(func() []string {
+			var out []string
+			for _, a := range albums {
+				out = append(out, r.path[a])
+			}
+			return out
+		}(), `","`), `"]`), b)
+}
+
+func (r *collectionRig) albums() []string {
+	list, _ := r.lib.Albums(r.ctx, 50, 0, false)
+	var out []string
+	for _, a := range list {
+		out = append(out, fmt.Sprintf("%s %d", a.Title, a.Tracks))
+	}
+	slices.Sort(out)
+	return out
+}
+
+func (r *collectionRig) rules() (grouping string, scopes int) {
+	r.d.QueryRow(`SELECT grouping FROM downloads WHERE id = 1`).Scan(&grouping)
+	r.d.QueryRow(`SELECT count(*) FROM album_scopes WHERE scope LIKE '%' || char(31) || char(31) || '%'`).Scan(&scopes)
+	return
+}
+
+// Making a collection is one write: when saving the grouping or the scope fails, or the request
+// ends, nothing of it stays and the error is told (review #87).
+func TestCollectionIsSavedWhole(t *testing.T) {
+	r := newCollectionRig(t)
+	before := fmt.Sprint(r.albums())
+	for _, trigger := range []string{
+		`CREATE TRIGGER fail BEFORE UPDATE OF grouping ON downloads BEGIN SELECT RAISE(ABORT, 'injected'); END`,
+		`CREATE TRIGGER fail BEFORE INSERT ON album_scopes BEGIN SELECT RAISE(ABORT, 'injected'); END`,
+	} {
+		if _, err := r.d.Exec(trigger); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := r.svc.MakeCollection(r.ctx, r.lib, 1, "The Collection", ""); err == nil || !strings.Contains(err.Error(), "injected") {
+			t.Fatalf("%s: %v", trigger, err)
+		}
+		r.d.Exec(`DROP TRIGGER fail`)
+		if g, n := r.rules(); fmt.Sprint(r.albums()) != before || g != "" || n != 0 {
+			t.Fatalf("after a failure: %v %q %d", r.albums(), g, n)
+		}
+	}
+	ended, cancel := context.WithCancel(r.ctx)
+	cancel()
+	if _, _, err := r.svc.MakeCollection(ended, r.lib, 1, "The Collection", ""); err == nil {
+		t.Fatal("made with the request ended")
+	}
+	if g, n := r.rules(); fmt.Sprint(r.albums()) != before || g != "" || n != 0 {
+		t.Fatalf("after the request ended: %v %q %d", r.albums(), g, n)
+	}
+	if _, _, err := r.svc.MakeCollection(r.ctx, r.lib, 1, "The Collection", ""); err != nil {
+		t.Fatal(err)
+	}
+	if g, n := r.rules(); fmt.Sprint(r.albums()) != "[The Collection 2]" || !strings.Contains(g, `"collection"`) || n != 1 {
+		t.Fatalf("made: %v %q %d", r.albums(), g, n)
+	}
+}
+
+// Undoing a collection takes back the grouping later rounds follow and the scope that found it with
+// the songs: the next round is imported by its tags again. Redoing it brings them back, and the round
+// after that joins the collection (review #88).
+func TestCollectionUndoRestoresLaterRounds(t *testing.T) {
+	r := newCollectionRig(t)
+	_, group, err := r.svc.MakeCollection(r.ctx, r.lib, 1, "The Collection", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	undo, conflicts, err := r.lib.Undo(r.ctx, group)
+	if err != nil || len(conflicts) != 0 {
+		t.Fatalf("undo: %v %+v", err, conflicts)
+	}
+	if g, n := r.rules(); fmt.Sprint(r.albums()) != "[Alpha 1 Beta 1]" || g != "" || n != 0 {
+		t.Fatalf("after undo: %v %q %d", r.albums(), g, n)
+	}
+	r.round(t, "Gamma")
+	if got := fmt.Sprint(r.albums()); got != "[Alpha 1 Beta 1 Gamma 1]" {
+		t.Fatalf("the next round after undo: %s", got)
+	}
+	if _, conflicts, err := r.lib.Undo(r.ctx, undo); err != nil || len(conflicts) != 0 { // redo
+		t.Fatalf("redo: %v %+v", err, conflicts)
+	}
+	if g, n := r.rules(); fmt.Sprint(r.albums()) != "[Gamma 1 The Collection 2]" || g == "" || n != 1 {
+		t.Fatalf("after redo: %v %q %d", r.albums(), g, n)
+	}
+	r.round(t, "Delta")
+	if got := fmt.Sprint(r.albums()); got != "[Gamma 1 The Collection 3]" {
+		t.Fatalf("the round after redo: %s", got)
 	}
 }

@@ -1255,25 +1255,9 @@ func (s *Service) reseed(ctx context.Context, r *row) error {
 // every album folder an album, or the whole download one collection, its folders the sections.
 // Rounds handed over from now on follow it; songs already imported are arranged with Arrange.
 func (s *Service) SetGrouping(ctx context.Context, id int64, g *importer.Grouping) error {
-	raw := ""
-	if g != nil {
-		switch g.Mode {
-		case importer.GroupFolders:
-			g = &importer.Grouping{Mode: g.Mode}
-		case importer.GroupCollection:
-			g = &importer.Grouping{Mode: g.Mode, Title: strings.TrimSpace(g.Title), Artist: strings.TrimSpace(g.Artist)}
-			if g.Title == "" {
-				return errors.New("a collection needs a title")
-			}
-		case "", "tags":
-			g = nil
-		default:
-			return fmt.Errorf("unknown grouping %q", g.Mode)
-		}
-	}
-	if g != nil {
-		b, _ := json.Marshal(g)
-		raw = string(b)
+	raw, err := GroupingJSON(g)
+	if err != nil {
+		return err
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE downloads SET grouping = ?, updated_at = ? WHERE id = ?`, raw, db.Now(), id)
 	if err != nil {
@@ -1283,6 +1267,31 @@ func (s *Service) SetGrouping(ctx context.Context, id int64, g *importer.Groupin
 		return errors.New("no such download")
 	}
 	return nil
+}
+
+// GroupingJSON is a grouping as downloads.grouping stores it ("" for by tags).
+func GroupingJSON(g *importer.Grouping) (string, error) {
+	raw := ""
+	if g != nil {
+		switch g.Mode {
+		case importer.GroupFolders:
+			g = &importer.Grouping{Mode: g.Mode}
+		case importer.GroupCollection:
+			g = &importer.Grouping{Mode: g.Mode, Title: strings.TrimSpace(g.Title), Artist: strings.TrimSpace(g.Artist)}
+			if g.Title == "" {
+				return "", errors.New("a collection needs a title")
+			}
+		case "", "tags":
+			g = nil
+		default:
+			return "", fmt.Errorf("unknown grouping %q", g.Mode)
+		}
+	}
+	if g != nil {
+		b, _ := json.Marshal(g)
+		raw = string(b)
+	}
+	return raw, nil
 }
 
 // batchGrouping is what a round's import batch is told of the download's grouping: for a
@@ -1443,6 +1452,23 @@ func (s *Service) CollectionPlan(ctx context.Context, id int64, title, artist st
 	slices.SortFunc(p.Emptied, func(a, b library.AlbumBrief) int { return int(a.ID - b.ID) })
 	slices.SortStableFunc(p.Moves, func(a, b library.Move) int { return a.Disc*1000 + a.Track - b.Disc*1000 - b.Track })
 	return p, nil
+}
+
+// MakeCollection arranges a download's imported songs into one collection (CollectionPlan) and has
+// its later rounds join it: the songs, the grouping the rounds follow and the scope that finds the
+// collection again are one edit, saved all together or not at all and undone together (review #87,
+// #88).
+func (s *Service) MakeCollection(ctx context.Context, lib *library.Store, id int64, title, artist string) (album, group int64, err error) {
+	p, err := s.CollectionPlan(ctx, id, title, artist)
+	if err != nil {
+		return 0, 0, fmt.Errorf("%w: %v", library.ErrInvalid, err)
+	}
+	grouping, err := GroupingJSON(&importer.Grouping{Mode: importer.GroupCollection, Title: p.Target.Title, Artist: p.Target.AlbumArtist})
+	if err != nil {
+		return 0, 0, err
+	}
+	return lib.Arrange(ctx, p, fmt.Sprintf("將下載整理成合集「%s」（%d 首）", p.Target.Title, len(p.Moves)+len(p.Adds)),
+		library.Rule{Download: id, Grouping: grouping, Scope: importer.CollectionScope(s.Dir(ctx, id), p.Target.Title)})
 }
 
 // Dir is a download's folder ("" when there is no such download).

@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -251,15 +252,82 @@ func mergeSummary(p *Plan) string {
 
 // Arrange carries out a plan made elsewhere (organizing a download's songs, review #82): the moves
 // are checked against the library as it is now. summary names the edit.
-func (s *Store) Arrange(ctx context.Context, p *Plan, summary string) (albumID, group int64, err error) {
+func (s *Store) Arrange(ctx context.Context, p *Plan, summary string, rules ...Rule) (albumID, group int64, err error) {
 	group, err = s.edit(ctx, SourceUser, summary, func(e *editor) error {
 		if err := s.markDuplicates(ctx, e.tx, p); err != nil {
 			return err
 		}
-		albumID, err = e.arrange(p, "")
-		return err
+		if albumID, err = e.arrange(p, ""); err != nil {
+			return err
+		}
+		for _, r := range rules {
+			if err := e.rule(r, albumID); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return albumID, group, err
+}
+
+// Rule is how a download imports from now on, changed in the same edit as an arrangement of its
+// songs (review #87, #88): a collection made from it is saved with the grouping its later rounds
+// follow and the scope that finds the collection again, all or nothing, and undo takes them back
+// with the songs.
+type Rule struct {
+	Download int64  // downloads.id
+	Grouping string // its grouping from now on (downloads.grouping)
+	Scope    string // an album_scopes scope that goes to the arranged album; "" for none
+}
+
+func (e *editor) rule(r Rule, album int64) error {
+	if r.Download != 0 {
+		cur, ok, err := e.current("download", r.Download, "grouping")
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: download %d", ErrNotFound, r.Download)
+		}
+		if v := Str(r.Grouping); !same(cur, v) {
+			if err := e.write("download", r.Download, "grouping", v); err != nil {
+				return err
+			}
+			if err := e.record("download", r.Download, "grouping", cur, v); err != nil {
+				return err
+			}
+		}
+	}
+	if r.Scope == "" {
+		return nil
+	}
+	b, _ := json.Marshal(scopeSource{Scope: r.Scope, AlbumID: album})
+	v := Str(string(b))
+	var id int64
+	err := e.tx.QueryRowContext(e.ctx, `SELECT id FROM album_scopes WHERE scope = ?`, r.Scope).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) { // a new row, its number never used before (AUTOINCREMENT)
+		res, err := e.tx.ExecContext(e.ctx, `INSERT INTO album_scopes (scope, album_id, artist, derived, title, created_at)
+			SELECT ?, id, album_artist, 0, title, ? FROM albums WHERE id = ?`, r.Scope, db.Now(), album)
+		if err != nil {
+			return err
+		}
+		id, _ = res.LastInsertId()
+		return e.record("scope", id, "source", nil, v)
+	}
+	if err != nil {
+		return err
+	}
+	cur, _, err := e.current("scope", id, "source")
+	if err != nil {
+		return err
+	}
+	if same(cur, v) {
+		return nil
+	}
+	if err := e.write("scope", id, "source", v); err != nil {
+		return err
+	}
+	return e.record("scope", id, "source", cur, v)
 }
 
 // arrange moves the plan's entries into its target (made when new), names its sections, and points

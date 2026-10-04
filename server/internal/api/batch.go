@@ -277,23 +277,10 @@ func (s *Server) makeCollection(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	ctx := r.Context()
-	p, err := s.downloads.CollectionPlan(ctx, id, req.Title, req.Artist)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
-		return
-	}
-	album, g, err := s.lib.Arrange(ctx, p, fmt.Sprintf("將下載整理成合集「%s」（%d 首）", p.Target.Title, len(p.Moves)+len(p.Adds)))
+	album, g, err := s.downloads.MakeCollection(r.Context(), s.lib, id, req.Title, req.Artist)
 	if err != nil {
 		s.libError(w, r, err)
 		return
-	}
-	err = s.downloads.SetGrouping(ctx, id, &importer.Grouping{Mode: importer.GroupCollection, Title: p.Target.Title, Artist: p.Target.AlbumArtist})
-	if err == nil {
-		err = s.importer.SetScopeAlbum(ctx, importer.CollectionScope(s.downloads.Dir(ctx, id), p.Target.Title), album, p.Target.AlbumArtist)
-	}
-	if err != nil {
-		s.log.Warn("remember the collection for later rounds", "download", id, "err", err)
 	}
 	writeJSON(w, http.StatusOK, map[string]int64{"group": g, "album_id": album})
 }
