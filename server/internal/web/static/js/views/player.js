@@ -126,8 +126,30 @@ function NowPlayingView() {
   const s = useStore(player);
   const { tab } = useStore(panel);
   const item = current();
-  const root = useRef(null);
+  const root = useRef(null), panelEl = useRef(null), top = useRef(0);
   useLayer(root, () => open(false));
+  // Switching between the queue and the lyrics keeps where the page is (review #132): the panel
+  // keeps at least the height the place needs, whatever the new tab shows (waiting, short lyrics,
+  // none), and gives it back only as the page is scrolled up.
+  const showTab = (k) => {
+    const outer = root.current, el = panelEl.current;
+    if (outer && el && k !== tab) {
+      const below = outer.scrollHeight - outer.scrollTop - outer.clientHeight; // room under the view
+      el.style.minHeight = Math.max(0, el.offsetHeight - below) + 'px';
+      top.current = outer.scrollTop;
+    }
+    panel.set({ tab: k });
+  };
+  const onScroll = () => {
+    const outer = root.current, el = panelEl.current;
+    if (!outer || !el) return;
+    const up = top.current - outer.scrollTop;
+    top.current = outer.scrollTop;
+    if (up > 0 && el.style.minHeight) {
+      const min = parseFloat(el.style.minHeight) - up;
+      el.style.minHeight = min > 0 ? min + 'px' : '';
+    }
+  };
   if (!item) return null;
   const menu = (e) => openMenu(e, [
     item.trackId && { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist([item]) },
@@ -136,7 +158,7 @@ function NowPlayingView() {
     item.coverId && { icon: 'image', label: '檢視封面', onClick: () => viewCover(item.coverId, item.album || item.title) },
     { icon: 'equalizer', label: '音效…', onClick: showEffects },
   ]);
-  return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放" ref=${root}>
+  return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放" ref=${root} onScroll=${onScroll}>
     <div class="np-top">
       <${IconButton} icon="expand" label="收起" onClick=${() => open(false)} />
       <${IconButton} icon="more" label="更多" onClick=${menu} />
@@ -173,10 +195,10 @@ function NowPlayingView() {
         </div>
       </div>
     </div>
-    <div class="np-panel">
+    <div class="np-panel" ref=${panelEl}>
       <nav class="tabs" role="tablist">
         ${[['queue', '播放佇列'], ['lyrics', '歌詞'], ['bookmarks', '書籤']].map(([k, label]) => html`<button role="tab" aria-selected=${k === tab}
-          class=${k === tab ? 'active' : ''} onClick=${() => panel.set({ tab: k })}>${label}</button>`)}
+          class=${k === tab ? 'active' : ''} onClick=${() => showTab(k)}>${label}</button>`)}
       </nav>
       ${tab === 'queue' ? html`<${Queue} s=${s} />` : tab === 'lyrics' ? html`<${Lyrics} item=${item} />`
         : html`<${TrackBookmarks} item=${item} />`}
