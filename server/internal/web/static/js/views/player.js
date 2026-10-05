@@ -440,6 +440,7 @@ function FoundLyrics({ item, auto, onChosen, query = '', onAdjust, frame = (body
         .filter(Boolean).join(' · ')}</span>
       ${c.preview && html`<span class="found-preview">${c.preview}</span>`}
     </button></li>`)}</ul>
+    ${onAdjust && html`<div class="actions center"><button class="btn text" onClick=${onAdjust}><${Icon} name="search" />都不對？調整搜尋</button></div>`}
   </div>`);
 }
 
