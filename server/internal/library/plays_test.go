@@ -285,3 +285,46 @@ func TestPlayedAlbumsFollowMerges(t *testing.T) {
 	}
 	check("undone", A)
 }
+
+// Recently played albums are read from the latest playback back, a few at a time (review #186):
+// an album played long before the others is still found, once, after one played many times since,
+// and an album merged since is the one it went into.
+func TestRecentlyPlayedAlbumsReadsBack(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	album := func(name string) (int64, int64, int64) {
+		t.Helper()
+		asset := assetWithDuration(t, s, name, 60_000)
+		res, err := s.Publish(ctx, asset, EntryInput{Title: name, Album: name + " album", AlbumArtist: "X"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var id, track int64
+		s.db.QueryRow(`SELECT album_id, track_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&id, &track)
+		return asset, track, id
+	}
+	oa, ot, old := album("old")
+	ma, mt, merged := album("merged")
+	na, nt, newest := album("newest")
+	play := func(i int, asset, track, album int64) {
+		if _, err := s.db.Exec(`INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			fmt.Sprint("p", i), asset, track, album, i, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	play(1, oa, ot, old)
+	play(2, ma, mt, merged)
+	for i := range 300 {
+		play(10+i, na, nt, newest)
+	}
+	if _, err := s.MergeAlbum(ctx, merged, newest); err != nil {
+		t.Fatal(err)
+	}
+	recent, err := s.RecentlyPlayedAlbums(ctx, 2)
+	if err != nil || len(recent) != 2 || recent[0].ID != newest || recent[1].ID != old {
+		t.Fatalf("recent %+v %v", recent, err)
+	}
+	if recent, _ := s.RecentlyPlayedAlbums(ctx, 10); len(recent) != 2 {
+		t.Fatalf("all %+v", recent)
+	}
+}

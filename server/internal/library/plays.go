@@ -276,23 +276,38 @@ func (s *Store) UnfinishedSpoken(ctx context.Context, limit int) ([]ResumeItem, 
 }
 
 // RecentlyPlayedAlbums orders albums by their latest playback: played from an album that was merged
-// since, the album it went into (review #152).
+// since, the album it went into (review #152). The playbacks are read from the latest back, a few
+// at a time, until there are limit albums: not the whole history (review #186).
 func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSummary, error) {
-	rows, err := s.db.QueryContext(ctx, rootsOf(`SELECT DISTINCT album_id FROM plays WHERE album_id IS NOT NULL`)+
-		`SELECT r.id FROM plays p JOIN roots r ON r.src = p.album_id GROUP BY r.id ORDER BY max(p.updated_at) DESC LIMIT ?`, limit)
-	if err != nil {
-		return nil, err
-	}
 	var ids []any
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+	seen := map[int64]bool{}  // albums listed
+	now := map[int64]int64{}  // album played from -> the album it is now (0: none)
+	batch := max(limit*8, 64) // most often enough; more each time it is not
+	for offset := 0; len(ids) < limit; offset, batch = offset+batch, min(batch*2, 4096) {
+		played, err := s.recentAlbums(ctx, batch, offset)
+		if err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		for _, a := range played {
+			if len(ids) == limit {
+				break
+			}
+			to, ok := now[a]
+			if !ok {
+				if to, _, err = s.AlbumNow(ctx, a); err != nil && ctx.Err() != nil {
+					return nil, err
+				}
+				now[a] = to // merged in a loop: none
+			}
+			if to != 0 && !seen[to] {
+				seen[to] = true
+				ids = append(ids, to)
+			}
+		}
+		if len(played) < batch {
+			break
+		}
 	}
-	rows.Close()
 	if len(ids) == 0 {
 		return []AlbumSummary{}, nil
 	}
@@ -312,6 +327,25 @@ func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSum
 		}
 	}
 	return out, nil
+}
+
+// recentAlbums are the albums of playbacks, the latest first (through plays_recent).
+func (s *Store) recentAlbums(ctx context.Context, limit, offset int) ([]int64, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT album_id FROM plays INDEXED BY plays_recent WHERE album_id IS NOT NULL
+		ORDER BY updated_at DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }
 
 // RandomAlbum picks an album that has playable music (drama CDs and radio are left out).
