@@ -564,33 +564,44 @@ DIR/
 
 ### 作品與 Bangumi（2026-10-05，#94，遷移 35：`works`、`album_works`、`track_works`）
 
-- `internal/bangumi`：Bangumi 公開 API（`api.bgm.tv/v0`，不需帳號），User-Agent 依其要求寫明 `HHim8826/kanade/<版本>`；請求間隔 0.5 秒，搜尋與條目回應在記憶體快取 1 小時；圖片只向 `bgm.tv` 網域抓（不是用戶端可指定的代理）。
+- `internal/bangumi`：Bangumi 公開 API（`api.bgm.tv/v0`，不需帳號），User-Agent 依其要求寫明 `HHim8826/kanade/<版本>`；請求間隔 0.5 秒，搜尋與條目回應在記憶體快取 1 小時（只快取驗證過的：錯誤頁、截斷的 JSON、不是所問條目的回應不留，#179）；圖片只向 `bgm.tv` 網域抓（不是用戶端可指定的代理）。
 - 作品（`works`）存來源給的原樣：原名、中文名、類型、平台、日期、簡介、評分（沒有就是 NULL）、圖片網址與取得時間；來源沒有的欄位不補。作品不刪：解除關聯後只是不列出，撤回時可以再關聯。
-- 關聯只由使用者確認：專輯頁「關聯作品」用專輯名稱（取「」『』內的字，或去掉 OST、Vol. 等字）預填搜尋，也可貼條目連結或編號；一個純數字同時當編號查與當字詞搜（例如「86」）。專輯的「works」與歌曲的「works」（用途 op/ed/insert/theme/character/bgm/other 與備註）都走修改紀錄，可以撤回；改綁時這張專輯歌曲的用途跟著移到新作品，解除時一起移除；合併專輯時作品跟著移過去。關聯不改動專輯或歌曲本身的任何欄位。
+- 關聯只由使用者確認：專輯頁「關聯作品」用專輯名稱（取「」『』內的字，或去掉 OST、Vol. 等字）預填搜尋，也可貼條目連結或編號；一個純數字同時當編號查與當字詞搜（例如「86」）。專輯的「works」與歌曲的「works」（用途 op/ed/insert/theme/character/bgm/other 與備註）都走修改紀錄，可以撤回；改綁時這張專輯歌曲的用途跟著移到新作品，解除時一起移除；歌曲也在其他仍關聯同一作品的專輯裡（單曲與合集共用一首）時保留原用途，改綁時另外給新作品一份（#173）；合併專輯時作品跟著移過去。關聯不改動專輯或歌曲本身的任何欄位。
 - 讀取：專輯頁、作品頁（`#/work/{id}`）、曲庫「作品」分頁、搜尋結果都只讀資料庫，不等 Bangumi；作品頁發現資料超過 30 天時在背景重新取得。Bangumi 連不上時搜尋與更新回 503（附 Retry-After），已存過的作品照樣能關聯。圖片由伺服器代抓並存進封面縮圖快取（`bgm-` 開頭，共用 256 MB 上限），網頁的 CSP 不需開外部圖片。
 - API：`GET /bangumi/search?q=&types=&offset=&album=`、`GET /bangumi/subjects/{sid}/image`、`GET /works`、`GET /works/{id}`、`GET /works/{id}/image`、`POST /works/{id}/refresh`、`POST /albums/{id}/works`（`source_id`、`replace`）、`DELETE /albums/{id}/works/{work}`、`PUT /tracks/{id}/works`。
 
 ### Bangumi 音樂條目與收藏（2026-10-05，#94，遷移 37：`album_subjects`、`bangumi_links`）
 
 - 專輯自己的 Bangumi 條目（音樂類，type 3）：和作品分開，一張專輯一個，存成 `works` 的一列並以 `album_subjects` 對應；綁定、改綁、解除走修改紀錄（專輯的 `subject` 欄位），可以撤回；合併時若目標沒有條目就移過去。綁定對話框和作品共用，預設只搜音樂類，非音樂條目不能綁成專輯條目（請用「關聯作品」）。
-- Bangumi 帳號：設定頁填 Bangumi 應用程式（bgm.tv/dev/app）的 App ID 與 App Secret（Secret 只寫入），回調地址 `<public_url>/oauth/bangumi/callback`；OAuth 授權碼流程（`bgm.tv/oauth/authorize`、`/oauth/access_token`），token 一週有效，剩不到一天時更新；被拒（401 或更新失敗）時標成失效，請使用者重新連結。Bangumi 沒有撤銷授權的 API，解除連結只刪除 Kanade 這邊的 token。
+- Bangumi 帳號：設定頁填 Bangumi 應用程式（bgm.tv/dev/app）的 App ID 與 App Secret（Secret 只寫入），回調地址 `<public_url>/oauth/bangumi/callback`；OAuth 授權碼流程（`bgm.tv/oauth/authorize`、`/oauth/access_token`），token 一週有效，剩不到一天時更新；同一帳號一次只更新一次，只寫回更新開始時的那個連結，重新連結後晚到的更新或拒絕不影響新連結（#172）；被拒（401 或更新失敗）時標成失效，請使用者重新連結。Bangumi 沒有撤銷授權的 API，解除連結只刪除 Kanade 這邊的 token。
 - 綁定時收藏：綁定對話框可勾選「綁定時加入我的 Bangumi 收藏」與狀態（預設勾選「聽過」，記在瀏覽器）；只有該條目還沒收藏時才寫入，已收藏的保持原狀（回應 `collected`：added／kept／not_linked／failed）。這是使用者按下綁定時的動作，播放與瀏覽仍不會改動收藏。
-- 收藏：專輯頁讀取時向 Bangumi 查（`GET /v0/users/{username}/collections/{id}`），附上條目的常用標籤與自己在音樂收藏用過的標籤（掃最多 500 筆收藏，快取 10 分鐘）；只有按「儲存到 Bangumi」才寫入（`POST /v0/users/-/collections/{id}`：狀態 1–5、評分 0–10、吐槽、僅自己可見、最多 10 個不含空白的標籤）。播放、瀏覽都不會改動 Bangumi。
-- 我的收藏清單：曲庫「Bangumi」分頁依狀態列出自己的音樂收藏（每頁 30），標出綁定了該條目的曲庫專輯；沒有的可以直接到 RSS 資源搜尋。不依名稱自動配對。
-- API：`PUT|DELETE /albums/{id}/subject`、`GET|PUT /albums/{id}/collection`、`GET /bangumi/account`、`PUT /bangumi/app`、`POST|DELETE /bangumi/link`、`GET /bangumi/collections?type=&offset=`；`GET /bangumi/search` 的候選多一個 `subject`（是否為這張專輯的條目）。
+- 收藏：專輯頁讀取時向 Bangumi 查（`GET /v0/users/{username}/collections/{id}`），附上條目的常用標籤；自己用過的標籤從最近更新的 200 筆音樂收藏在背景收集（`GET /bangumi/tags`，快取 10 分鐘），收藏狀態不等它（#185）；只有按「儲存到 Bangumi」才寫入（`POST /v0/users/-/collections/{id}`：狀態 1–5、評分 0–10、吐槽、僅自己可見、最多 10 個不含空白的標籤），回應就是存好的收藏，剛用的標籤直接併入快取，不必重讀。播放、瀏覽都不會改動 Bangumi。
+- 我的收藏清單：曲庫「Bangumi」分頁依狀態列出自己的音樂收藏（每頁 30），標出綁定了該條目的曲庫專輯；沒有的可以直接到 RSS 資源搜尋。不依名稱自動配對。狀態放在網址（`#/library/bangumi?type=`），返回時沿用 5 分鐘內讀過的頁，不再向 Bangumi 讀；晚到的舊回應不覆蓋新的選擇（#177、#187）。
+- API：`PUT|DELETE /albums/{id}/subject`、`GET|PUT /albums/{id}/collection`、`GET /bangumi/account`、`PUT /bangumi/app`、`POST|DELETE /bangumi/link`、`GET /bangumi/collections?type=&offset=`、`GET /bangumi/tags`；`GET /bangumi/search` 的候選多一個 `subject`（是否為這張專輯的條目）。
 - 驗證：Go 測試用假的 Bangumi（OAuth、me、單一收藏讀寫、收藏清單）驗證連結、state、非音樂條目被拒、讀取不寫入、寫入內容、標籤檢查、清單對應曲庫、撤回綁定、授權失效；Chromium 用真的 Bangumi 公開 API 測綁定，收藏讀寫以模擬的伺服器回應測介面與送出內容。沒有用真的 Bangumi 帳號實測寫入。
 
 ### Discord 狀態（2026-10-05，#135，遷移 36：`discord_links`）
 
 - 做法：由伺服器回報，顯示在使用者自己的 Discord 個人狀態（像 Spotify）。使用者用 Discord OAuth 連結一次，授權範圍是 `openid sdk.social_layer_presence identify`；`sdk.social_layer_presence` 是 Discord Social SDK 的權限，應用程式要先在 Developer Portal 開啟 Social SDK（填 Getting Started 表單），但 Kanade 不用 SDK 程式本身：`internal/discord` 用這個 OAuth token 連 Discord Gateway（`wss://gateway.discord.gg/?v=10`，IDENTIFY 的 token 為 `Bearer <access token>`、intents 0），READY 後用 op 3 設定 activity（type 2 Listening、name Kanade、details 歌名、state 歌手、assets 圖示與專輯、timestamps 進度）。這一步不在 Discord 公開文件裡（是 Social SDK 內部的做法，開源的 Discord-Social-RPC 也這樣做），Discord 可能改變；不使用帳號 token，不是 self-bot。
-- 只在有東西要顯示時連線：播放或（使用者選擇顯示時）暫停時連上，清空後送出空的 activities，2 分鐘後斷線，避免 Kanade 讓使用者一直顯示上線。狀態更新至少間隔 5 秒（Discord 有限制），只送最新的；連線中斷時以 5 秒起、最多 5 分鐘的間隔重連；4004（token 被拒）時先換新 token，換不到就把連結標成失效，設定頁請使用者重新連結。token 在到期前 1 小時內自動更新；解除連結時向 Discord 撤銷。
-- 播放狀態（`internal/presence`，記憶體）：網頁每個分頁在真正播放後才回報（`PUT /presence/players/{pid}`：裝置、歌名、歌手、專輯、長度、位置、序號），換歌、播放／暫停、跳轉（位置和時鐘差 2 秒以上）時回報，播放中每 30 秒再報一次；還原的暫停佇列、預載、瀏覽都不回報；關閉分頁送 DELETE，90 秒沒消息視為離開；登出、結束其他登入、改密碼時清掉那些登入的分頁。沒有連結 Discord 時不保存任何狀態（回報的回應 `publish:false`，網頁就停止回報）。選哪個分頁：跟隨的瀏覽器（或任何裝置）中，播放中的優先，其中最後開始播放的；都暫停時取最後變更的；心跳不會讓分頁輪流顯示。
-- 顯示選項（每個帳號）：歌手、專輯、進度、暫停時顯示「已暫停」或清除、播放時的線上狀態（閒置／線上／請勿打擾，預設閒置）、跟隨哪個瀏覽器。不送封面、音檔網址或登入資訊；圖示只用設定頁填的 Art Asset 名稱或 https 網址。
+- 只在有東西要顯示時連線：播放或（使用者選擇顯示時）暫停時連上；暫停最多顯示 10 分鐘，之後和沒有播放一樣（#184）。沒有東西要顯示時等 2 秒才送出空的 activities（這段時間內開始播放下一首就直接換成新歌，換歌之間不會空白，#183），2 分鐘後斷線，避免 Kanade 讓使用者一直顯示上線。狀態更新至少間隔 5 秒（Discord 有限制），只送最新的；連線中斷時以 5 秒起、最多 5 分鐘的間隔重連；4004（token 被拒）時換一次新 token 立刻再連，在 Discord 接受連線之前又被拒就把連結標成失效（不會一直換、一直連，#181），換 token 暫時失敗（429、5xx、網路）時照一般的間隔重試，不標成失效。token 在到期前 1 小時內自動更新，同一帳號一次只更新一次，重新連結後晚到的更新不覆蓋新連結（#172）；解除連結時向 Discord 撤銷。
+- 播放狀態（`internal/presence`，記憶體）：網頁每個分頁在真正播放後才回報（`PUT /presence/players/{pid}`：裝置、歌名、歌手、專輯、長度、位置、序號），換歌、播放／暫停、跳轉（位置和時鐘差 2 秒以上）時回報（變更後 0.3 秒內的合併成一次：播完、載入下一首、開始播放是一筆新歌從頭的回報，#183），播放中每 30 秒再報一次；還原的暫停佇列、預載、瀏覽都不回報；關閉分頁送 DELETE，90 秒沒消息視為離開；登出、結束其他登入、改密碼時清掉那些登入的分頁。沒有連結 Discord 時不保存任何狀態（回報的回應 `publish:false`，網頁就停止回報）。選哪個分頁：跟隨的瀏覽器（或任何裝置）中，播放中的優先，其中最後開始播放的；都暫停時取最後變更的；心跳不會讓分頁輪流顯示。
+- 顯示選項（每個帳號）：歌手、專輯、進度、暫停時顯示「已暫停」或清除、專輯封面（見下）、播放時的線上狀態（閒置／線上／請勿打擾，預設閒置）、跟隨哪個瀏覽器。不送音檔網址或登入資訊；圖示用設定頁填的 Art Asset 名稱或 https 網址。設定頁一次只送改動的那一項（`PATCH` 的 `show` 只含改動的欄位），伺服器逐項合併、一次一個寫入，連續切換不會互相覆蓋（#178）。
 - 設定：Discord 應用程式的 Client ID、Client Secret（只寫入，API 不回傳）與圖示存在 settings；OAuth token 存在 `discord_links`（也會進每天的資料庫備份）。OAuth 回呼 `GET /oauth/discord/callback` 不靠登入 cookie（SameSite=Strict 不會帶），靠 10 分鐘內有效、只能用一次的 state 對應帳號，完成後導回 `#/settings?discord=linked|denied|expired|scope|refused|failed`。
 - API：`GET /presence`、`PUT|DELETE /presence/players/{pid}`、`GET /discord`、`PUT /discord/app`、`POST /discord/link`（回傳授權網址）、`PATCH /discord/link`、`DELETE /discord/link`。
-- 專輯封面：Discord 只能顯示公開圖片（由它的 media proxy 抓取），網址先用 `POST /applications/{id}/external-assets`（OAuth token）換成 `mp:external/…` 再放進 activity，換過的會快取。來源依顯示選項（預設 `bangumi`）：專輯綁定的 Bangumi 音樂條目封面（本來就公開）；選 `all` 時，沒有條目的專輯改用 Kanade 自己的封面，網址是 `<public_url>/pub/covers/{id}/{HMAC}.jpg`（512px、只有圖片），只有在某個連結選了 `all` 時才會回應，改回其他選項後即失效；選 `none` 不顯示。網頁回報時帶上專輯 ID。
+- 專輯封面：Discord 只能顯示公開圖片（由它的 media proxy 抓取），網址先用 `POST /applications/{id}/external-assets`（OAuth token）換成 `mp:external/…` 再放進 activity，換過的會快取；換取在背景進行，換到之前先送沒有封面（應用程式圖示）的狀態，Discord 不收的圖片 10 分鐘內不再送（#183）。來源依顯示選項（預設 `bangumi`）：專輯綁定的 Bangumi 音樂條目封面（本來就公開）；選 `all` 時，沒有條目的專輯改用 Kanade 自己的封面，網址是 `<public_url>/pub/covers/{id}/{HMAC}.jpg`（512px、只有圖片），只有在某個連結選了 `all` 時才會回應，改回其他選項後即失效；選 `none` 不顯示。網頁回報時帶上專輯 ID。
 - 另一個做法（在使用者電腦上執行、透過本機 Discord RPC 的 `kanade-presence`）已寫好但沒有發佈，放在本機分支 `presence-companion`。
 - 驗證：Go 測試用假的 Discord（OAuth API 與 Gateway WebSocket）驗證連結、只有播放時才連線、送出的 activity、改設定、暫停、清除後斷線、token 被拒後更新、無法更新時停止、缺少權限範圍時不建立連結、解除時撤銷；Chromium 驗證設定頁、授權網址、回呼結果與網頁的回報時機。沒有用真的 Discord 帳號實測。
+
+### 第二輪審查修正（2026-10-05，#172–#188）
+
+- 登入節流（#182）：#148 的全體上限（15 分鐘 30 次錯誤密碼）只限制「沒登入過的瀏覽器」用密碼登入。網頁登入成功時另發一個簽章 cookie（`kanade_known`，400 天，HttpOnly、只送到 `/api/v1/`，只表示這個瀏覽器在這裡登入過），帶著它的登入只受自己位址的上限；已登入的人確認密碼（改密碼、新增 passkey）只受這個帳號自己的上限（15 分鐘 5 次）。IPv6 以 /64 計算位址的上限。觸發全體上限時記一次警告日誌，登入頁的訊息說明是其他地方的錯誤密碼，請改用 passkey 或登入過的瀏覽器（回應 `reason: throttled_all`）。
+- 串流預載（#175）：網頁預載下一首改用 `POST /stream/{id}/prefetch`（`Cache.Prefetch`：記成下一首、下載多或磁碟低時略過），不再發一般的串流請求，正在播的歌不會因此停止背景下載。
+- 縮圖（#176）：縮圖從讀原圖到最後一次縮放都要先拿到名額（同時 3 個），等待中的不先讀原圖；等的請求都離開時，還沒輪到的就停止。
+- 備份（#180）：`POST /backup` 回應時已經是 running，設定頁送出期間就顯示「備份中…」並追蹤到結束。
+- 首頁最近播放（#186）：從最新的播放往回分批讀（`plays_recent` 索引），每張專輯解析一次合併，湊滿就停；20 萬筆播放下約 0.5 ms（原本約 400 ms）。
+- 播放器（#174）：載入中（還沒有 metadata）的定位一律記成待定位置，取代較早的（包括 0 秒）；可以定位時直接跳過去並清掉待定的。
+- 作品分頁（#187）：類型與排序放在網址（`#/library/works?type=&sort=date`）。對話框標題最多兩行，完整標題放在 title（#188）；手機上 Bangumi 收藏列的專輯與「找資源」排在文字下方（#188）。
+- 驗證：新增的 Go 測試（Gateway 持續 4004、換 token 被限速、晚到的 token 更新、換歌不空白、封面被拒只送一次、暫停時限、同時改設定、Bangumi 錯誤回應不快取與晚到更新、共用歌曲的作品用途、全體上限與已知瀏覽器、帳號自己的上限、IPv6 /64、預載 API、縮圖背壓與取消、備份立即 running、最近播放分批）在 race detector 下通過；Chromium 實測載入中定位 90→0、90→30（舊版會從 90 秒開始）、預載請求、換歌與手動下一首的回報、Discord 連續切換、立即備份、Bangumi 分頁亂序回應與返回、收藏對話框、作品分頁返回、390px 版面與長標題。
 
 ## 使用方式（開發環境）
 
