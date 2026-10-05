@@ -182,3 +182,48 @@ func TestFetchesAtOnce(t *testing.T) {
 		t.Fatalf("%d at once", m)
 	}
 }
+
+// Originals wait for their turn unread (review #176): with resizing slow, only a few are read and
+// held at once; a cover nobody waits for any more stops waiting for its turn.
+func TestOriginalsWaitUnread(t *testing.T) {
+	s := newStore(t, 1<<30)
+	orig := pngData(t, 50, 50)
+	for range cap(s.decodes) { // resizing is slow
+		s.decodes <- struct{}{}
+	}
+	var held atomic.Int32 // originals read whole
+	open := func(ctx context.Context) (io.ReadCloser, error) {
+		select { // as Drive does: given up, it stops
+		case <-time.After(20 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		held.Add(1)
+		return io.NopCloser(bytes.NewReader(orig)), nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	for i := range 30 {
+		wg.Go(func() { s.Get(ctx, string(rune('a'+i)), 96, open) })
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := held.Load(); n > int32(cap(s.jobs)) {
+		t.Fatalf("%d originals held while %d can be resized", n, 3)
+	}
+	cancel()
+	wg.Wait()
+	for range cap(s.decodes) {
+		<-s.decodes
+	}
+	time.Sleep(200 * time.Millisecond)
+	s.mu.Lock()
+	calls := len(s.calls)
+	s.mu.Unlock()
+	if n := held.Load(); n > int32(cap(s.jobs)) || calls != 0 {
+		t.Fatalf("covers nobody waits for went on: %d read, %d being made", n, calls)
+	}
+	// Asked again: made.
+	if data, err := s.Get(context.Background(), "a", 96, open); err != nil || len(data) == 0 {
+		t.Fatal(err)
+	}
+}

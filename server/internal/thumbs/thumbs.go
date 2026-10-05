@@ -1,9 +1,11 @@
 // Package thumbs keeps the covers the web client shows: resized to a few sizes, and the originals
 // the cover viewer opens, each made once from the original in Drive (review #157). A file appears
 // whole or not at all (written aside, then renamed), so a request never gets one half written; the
-// same cover asked for at once is made once; only a few originals are read and decoded at a time
-// (decoding a large scan takes about 100 MB); the folder is held to a budget, the oldest files
-// going first; and an image that cannot be decoded is not fetched again for a while.
+// same cover asked for at once is made once; only a few covers are made at a time, from reading the
+// original to its last resize, so originals wait for their turn unread (decoding a large scan takes
+// about 100 MB; review #176), and one nobody waits for any more stops; the folder is held to a
+// budget, the oldest files going first; and an image that cannot be decoded is not fetched again
+// for a while.
 package thumbs
 
 import (
@@ -60,6 +62,7 @@ type Store struct {
 	budget int64
 	log    *slog.Logger
 
+	jobs    chan struct{} // covers resized at once, from reading the original to the end
 	fetches chan struct{} // originals read from Drive at once
 	decodes chan struct{} // images decoded at once
 
@@ -70,15 +73,17 @@ type Store struct {
 }
 
 type call struct {
-	done chan struct{}
-	data []byte
-	err  error
+	done    chan struct{}
+	data    []byte
+	err     error
+	waiting int                // askers waiting for it
+	stop    context.CancelFunc // once none is
 }
 
 // New keeps covers in dir, at most budget bytes. What a stop left half written, or an earlier
 // version wrote empty, goes.
 func New(dir string, budget int64, log *slog.Logger) *Store {
-	s := &Store{dir: dir, budget: budget, log: log, fetches: make(chan struct{}, 6), decodes: make(chan struct{}, 2),
+	s := &Store{dir: dir, budget: budget, log: log, jobs: make(chan struct{}, 3), fetches: make(chan struct{}, 6), decodes: make(chan struct{}, 2),
 		calls: map[string]*call{}, bad: map[string]time.Time{}, used: -1}
 	for _, e := range s.list() {
 		if e.size == 0 || strings.HasPrefix(filepath.Base(e.path), ".new-") {
@@ -109,29 +114,48 @@ func (s *Store) Get(ctx context.Context, sha string, size int, open func(context
 	}
 	c, ok := s.calls[name]
 	if !ok {
-		c = &call{done: make(chan struct{})}
+		// Not the first asker's to cancel: others may wait for it. It stops once none does.
+		mctx, stop := context.WithCancel(context.WithoutCancel(ctx))
+		c = &call{done: make(chan struct{}), stop: stop}
 		s.calls[name] = c
 		go func() {
-			// Not the first asker's to cancel: others may wait for it.
-			c.data, c.err = s.make(context.WithoutCancel(ctx), sha, size, path, open)
+			defer stop()
+			c.data, c.err = s.make(mctx, sha, size, path, open)
 			s.mu.Lock()
-			delete(s.calls, name)
+			if s.calls[name] == c {
+				delete(s.calls, name)
+			}
 			s.mu.Unlock()
 			close(c.done)
 		}()
 	}
+	c.waiting++
 	s.mu.Unlock()
 	select {
 	case <-c.done:
 		return c.data, c.err
 	case <-ctx.Done():
+		s.mu.Lock()
+		if c.waiting--; c.waiting == 0 {
+			c.stop()
+			if s.calls[name] == c {
+				delete(s.calls, name) // the next asker starts anew
+			}
+		}
+		s.mu.Unlock()
 		return nil, ctx.Err()
 	}
 }
 
+// take waits for a turn: none for one given up (a turn free and the end both there, it may be
+// either).
 func take(ctx context.Context, sem chan struct{}) (func(), error) {
 	select {
 	case sem <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			<-sem
+			return nil, err
+		}
 		return func() { <-sem }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -141,6 +165,14 @@ func take(ctx context.Context, sem chan struct{}) (func(), error) {
 func (s *Store) make(ctx context.Context, sha string, size int, path string, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	if size != 0 {
+		// Its turn first: the original is read only when it can be resized soon after.
+		done, err := take(ctx, s.jobs)
+		if err != nil {
+			return nil, err
+		}
+		defer done()
+	}
 	orig, err := s.original(ctx, open)
 	if err != nil {
 		return nil, err
