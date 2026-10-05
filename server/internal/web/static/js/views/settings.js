@@ -44,6 +44,37 @@ function useSection(path, first) {
   return { ...s, reload };
 }
 
+// Backups: a copy of the database in Drive every day (review #161).
+function Backups() {
+  const data = useSection('/backup');
+  const b = data.data && data.data.state;
+  useEffect(() => { // a copy being made: follow it
+    if (!b || !b.running) return;
+    const t = setTimeout(data.reload, 2000);
+    return () => clearTimeout(t);
+  }, [data.data]);
+  const now = async () => {
+    try {
+      data.reload(await post('/backup'));
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
+  const why = b && b.error && ({
+    not_connected: '沒有連線 Google Drive。', auth_expired: 'Google Drive 的授權已過期，請重新連線。', room: '暫存空間不夠放複本。',
+  }[b.reason] || b.error);
+  return html`<h2 class="section-title">資料庫備份</h2>
+    <div class="card pad">
+      ${!data.data && data.loading && html`<${Spinner} />`}
+      <${ErrorBox} error=${data.error} onRetry=${data.reload} />
+      <div class="sub">專輯分組、修改紀錄、歌單、收藏、書籤、聆聽記錄和 Drive 授權都在資料庫裡，Drive 上只有音檔。每天自動備份一份到 Google Drive 的「Kanade/backups」，保留最近 ${b ? b.keep : 14} 份，較舊的移到 Drive 垃圾桶。備份含 Google 授權與密碼雜湊。</div>
+      ${b && html`<div class="sub">上次備份：${b.last ? `${when(b.last)}（${b.name}）` : '還沒有'}${b.kept > 0 ? `；Drive 上有 ${b.kept} 份` : ''}</div>`}
+      ${why && html`<div class="task-error">上次備份失敗${b.error_at ? `（${when(b.error_at)}）` : ''}：${why}</div>`}
+      <div class="sub">還原：從 Drive 下載備份檔，放進伺服器資料目錄的 backups/ 資料夾，再執行 <code>sudo kanade-manager restore</code>。</div>
+      <div class="actions"><button class="btn tonal" disabled=${!b || b.running} onClick=${now}><${Icon} name="backup" />${b && b.running ? '備份中…' : '立即備份'}</button></div>
+    </div>`;
+}
+
 // DriveSync: the change feed, the full check and the inbox (P2-6), and how often they run (#77).
 function DriveSync({ first, conf }) {
   const sync = useSection('/drive/sync', first);
@@ -693,6 +724,7 @@ function SettingsPage({ first, onLogout }) {
     <h2 class="section-title">Google Drive</h2>
     <${Drive} drive=${drive} />
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
+    ${d && d.status.connected && html`<${Backups} />`}
     <${PlaybackSettings} />
     <h2 class="section-title">音效</h2>
     <div class="card pad"><${EffectsPanel} /></div>

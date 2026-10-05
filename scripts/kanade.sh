@@ -1063,6 +1063,15 @@ update_manager() {
   install_manager "$tmp/kanade.sh" && info "已更新 kanade-manager（Kanade 沒有變動，服務沒有重新啟動）。"
 }
 
+# prune_update_backups keeps the 5 latest copies made before updates (review #161); manual backups
+# and those made before a restore stay. The database is also copied to Drive every day.
+prune_update_backups() {
+  local old
+  old=$(ls -1t "$DATA_DIR/backups"/before-v*.sqlite 2>/dev/null | tail -n +6)
+  [ -n "$old" ] || return 0
+  while IFS= read -r f; do rm -f "$f"; done <<<"$old"
+}
+
 # proxy_hint: an installation behind a proxy on this machine that does not say which one counts
 # every client as one for the login throttle (the setting is new in 0.1.24, review #148).
 proxy_hint() {
@@ -1123,6 +1132,7 @@ do_update() {
     die "更新前備份資料庫失敗，沒有更新。"
   fi
   info "已備份資料庫：$backup"
+  prune_update_backups
 
   if ! stop_service; then
     rm -f "$BIN.new"
@@ -1343,7 +1353,7 @@ do_backup() {
   kanade backup "$file" >/dev/null || die "備份失敗。"
   [ -f "$DATA_DIR/config.json" ] && cp -p "$DATA_DIR/config.json" "${file%.sqlite}.config.json"
   info "已備份：$file"
-  echo "資料庫有帳號、曲庫與 Google Drive 的授權；音樂本身在 Drive。請把備份檔另存到安全的地方。"
+  echo "資料庫有帳號、曲庫與 Google Drive 的授權；音樂本身在 Drive。連線 Drive 後，伺服器也會每天備份一份到 Drive 的 Kanade/backups（保留 14 份）。"
 }
 
 do_restore() {
@@ -1354,7 +1364,8 @@ do_restore() {
   local -a files=()
   local listing
   listing=$(ls -1t "$dir"/*.sqlite 2>/dev/null) # newest first
-  [ -n "$listing" ] || die "$dir 裡沒有備份。"
+  [ -n "$listing" ] || die "$dir 裡沒有備份。Google Drive 的 Kanade/backups 裡有每天的備份：下載一份放進 $dir 再執行一次。"
+  echo "要用 Google Drive 上的備份（Kanade/backups，每天一份）：先下載放進 $dir。"
   while IFS= read -r f; do files+=("$f"); done <<<"$listing"
   for f in "${files[@]}"; do
     i=$((i + 1))

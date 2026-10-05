@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/auth"
+	"github.com/HHim8826/kanade/server/internal/backup"
 	"github.com/HHim8826/kanade/server/internal/clientip"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/diskguard"
@@ -63,6 +64,7 @@ type Deps struct {
 	Sync      *drivesync.Syncer
 	Loudness  *loudness.Service
 	Thumbs    *thumbs.Store   // covers made for the web client; nil: one in the data directory
+	Backup    *backup.Service // copies of the database in Drive; nil: none
 	Settings  *settings.Store // the service settings the settings page changes
 	Staging   *staging.Budget // shared by downloads, uploads and the importer
 	Pinned    map[string]bool // resources given as serve flags: they win until the next start
@@ -92,6 +94,7 @@ type Server struct {
 	sync      *drivesync.Syncer
 	loudness  *loudness.Service
 	thumbs    *thumbs.Store
+	backup    *backup.Service
 	proxy     clientip.Policy
 	streamKey []byte
 	log       *slog.Logger
@@ -109,7 +112,7 @@ func New(d Deps) *Server {
 	if d.Thumbs == nil {
 		d.Thumbs = thumbs.New(d.Config.Path(config.DirThumbs), ThumbsBudget, d.Log)
 	}
-	return &Server{proxy: proxy, thumbs: d.Thumbs, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	return &Server{proxy: proxy, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
@@ -191,6 +194,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/loudness", s.authed(s.getLoudness))
 	mux.Handle("GET /api/v1/loudness/scan", s.authed(s.loudnessScan))
 	mux.Handle("POST /api/v1/loudness/scan", s.authed(s.runLoudnessScan))
+	mux.Handle("GET /api/v1/backup", s.authed(s.backupState))
+	mux.Handle("POST /api/v1/backup", s.authed(s.backupNow))
 	mux.Handle("GET /api/v1/tracks/{id}/lyrics/online", s.authed(s.findLyrics))
 	mux.Handle("POST /api/v1/tracks/{id}/lyrics/online", s.authed(s.useFoundLyrics))
 	mux.Handle("GET /api/v1/history", s.authed(s.history))

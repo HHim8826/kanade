@@ -25,6 +25,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/api"
 	"github.com/HHim8826/kanade/server/internal/auth"
+	"github.com/HHim8826/kanade/server/internal/backup"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/diskguard"
@@ -239,6 +240,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	// folder, with the free-space reserve; checks and reservations are atomic across them (review #4).
 	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}
 	loud.Budget = budget
+	// A copy of the database in Drive every day, the 14 latest kept (review #161).
+	backups := &backup.Service{DB: d, Drive: drive, Dir: cfg.Path(config.DirStaging, "backup"), Budget: budget, Keep: 14,
+		Every: 24 * time.Hour, Log: log}
 	downloads.ShareBudget(budget)
 	ups.ShareBudget(budget)
 	budget.Use(staging.OnDisk(imp.WorkCommitted))
@@ -296,7 +300,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
-		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers})
+		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Backup: backups})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
@@ -305,6 +309,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	go guard.Run(ctx)
 	go syncer.Run(ctx)
 	go loud.Run(ctx)
+	go backups.Run(ctx)
 
 	has, err := authSvc.HasUsers(ctx)
 	if err != nil {
