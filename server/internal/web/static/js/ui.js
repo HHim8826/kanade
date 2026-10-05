@@ -291,11 +291,27 @@ export function MenuHost() {
 const layers = []; // open, the top one last: { el, close, opener, popped }
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
+let inerted = []; // what inertUnderTop made inert
+
 function inertUnderTop() {
+  for (const el of inerted) el.inert = false;
+  inerted = [];
   const top = layers[layers.length - 1];
-  const shell = document.querySelector('.shell');
-  for (const el of [shell, ...layers.map((l) => l.el)]) {
-    if (el) el.inert = !!top && el !== top.el;
+  if (!top || !top.el) return;
+  const hide = (el) => {
+    el.inert = true;
+    inerted.push(el);
+  };
+  for (const el of [document.querySelector('.shell'), ...layers.slice(0, -1).map((l) => l.el)]) {
+    if (!el) continue;
+    if (!el.contains(top.el)) {
+      hide(el);
+      continue;
+    }
+    // The layer is inside it (a dialog a page shows itself): what is beside the way down to it.
+    for (let at = top.el; at !== el; at = at.parentElement) {
+      for (const other of at.parentElement.children) if (other !== at) hide(other);
+    }
   }
 }
 
