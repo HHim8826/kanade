@@ -170,7 +170,7 @@ func (s *Server) collectOnBinding(r *http.Request, subject int64, typ int) (stri
 	}
 	col, err := s.bgm.Collection(r.Context(), sess.Access, sess.Username, subject)
 	if errors.Is(err, bangumi.ErrAuth) {
-		s.bgmAccounts.Failed(userID(r))
+		s.bgmAccounts.Failed(userID(r), sess)
 		return "not_linked", 0
 	}
 	if err != nil {
@@ -183,7 +183,6 @@ func (s *Server) collectOnBinding(r *http.Request, subject int64, typ int) (stri
 		s.log.Info("bangumi: collecting on binding", "err", err)
 		return "failed", 0
 	}
-	s.bgmAccounts.Changed(userID(r))
 	return "added", typ
 }
 
@@ -250,7 +249,7 @@ func (s *Server) albumCollection(w http.ResponseWriter, r *http.Request) {
 	out["linked"], out["username"] = true, sess.Username
 	col, err := s.bgm.Collection(r.Context(), sess.Access, sess.Username, sid)
 	if errors.Is(err, bangumi.ErrAuth) {
-		s.bgmAccounts.Failed(userID(r))
+		s.bgmAccounts.Failed(userID(r), sess)
 		s.bgmError(w, r, bangumi.ErrNotLinked)
 		return
 	}
@@ -262,9 +261,9 @@ func (s *Server) albumCollection(w http.ResponseWriter, r *http.Request) {
 		col.Subject = nil
 	}
 	out["collection"] = col
-	if tags, err := s.bgmAccounts.MyTags(r.Context(), userID(r), sess); err == nil {
-		out["my_tags"] = tags
-	}
+	// The person's own tags are gathered apart: the collection shows without waiting for them.
+	tags, pending := s.bgmAccounts.MyTags(userID(r), sess)
+	out["my_tags"], out["my_tags_pending"] = append([]string{}, tags...), pending
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -321,15 +320,28 @@ func (s *Server) setAlbumCollection(w http.ResponseWriter, r *http.Request) {
 	err = s.bgm.SetCollection(r.Context(), sess.Access, sid, bangumi.CollectionChange{Type: &req.Type, Rate: &req.Rate, Comment: &comment,
 		Private: &req.Private, Tags: &tags})
 	if errors.Is(err, bangumi.ErrAuth) {
-		s.bgmAccounts.Failed(userID(r))
+		s.bgmAccounts.Failed(userID(r), sess)
 		err = bangumi.ErrNotLinked
 	}
 	if err != nil {
 		s.bgmError(w, r, err)
 		return
 	}
-	s.bgmAccounts.Changed(userID(r))
-	w.WriteHeader(http.StatusNoContent)
+	// Saved as asked: the answer is the collection as it is now, with no reading it again.
+	s.bgmAccounts.Saved(userID(r), tags)
+	writeJSON(w, http.StatusOK, map[string]any{"collection": bangumi.Collection{SubjectID: sid, Type: req.Type, Rate: req.Rate, Comment: comment,
+		Private: req.Private, Tags: tags}})
+}
+
+// bgmTags are the owner's own tags in Bangumi, as gathered so far ({tags, pending}).
+func (s *Server) bgmTags(w http.ResponseWriter, r *http.Request) {
+	sess, err := s.bgmAccounts.Session(r.Context(), userID(r))
+	if err != nil {
+		s.bgmError(w, r, err)
+		return
+	}
+	tags, pending := s.bgmAccounts.MyTags(userID(r), sess)
+	writeJSON(w, http.StatusOK, map[string]any{"tags": append([]string{}, tags...), "pending": pending})
 }
 
 func contains(list []string, v string) bool {
@@ -354,7 +366,7 @@ func (s *Server) bgmCollections(w http.ResponseWriter, r *http.Request) {
 	const limit = 30
 	p, err := s.bgm.Collections(r.Context(), sess.Access, sess.Username, bangumi.Music, typ, limit, max(offset, 0))
 	if errors.Is(err, bangumi.ErrAuth) {
-		s.bgmAccounts.Failed(userID(r))
+		s.bgmAccounts.Failed(userID(r), sess)
 		err = bangumi.ErrNotLinked
 	}
 	if err != nil {

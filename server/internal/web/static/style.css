@@ -956,7 +956,12 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .collections .track-text .sub { white-space: normal; }
 .collection-albums { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; max-width: 45%; }
 .collection-albums .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; text-decoration: none; color: var(--on-surface); }
-@media (max-width: 600px) { .collections li { flex-wrap: wrap; } .collection-albums { max-width: none; justify-content: flex-start; } }
+/* Narrow: the text has the row's width, the albums (or 找資源) go under it (review #188). */
+@media (max-width: 600px) {
+  .collections li { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; row-gap: 6px; }
+  .collections li > .thumb { grid-row: span 2; }
+  .collection-albums { grid-column: 2; max-width: none; justify-content: flex-start; }
+}
 .seg.collection-type { display: grid; grid-template-columns: repeat(5, 1fr); width: 100%; }
 .seg.collection-type label { justify-content: center; padding: 8px 4px; }
 .seg.collection-type label + label { border-left: 1px solid var(--outline); }

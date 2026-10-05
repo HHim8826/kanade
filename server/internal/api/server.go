@@ -295,6 +295,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/bangumi/link", s.authed(s.beginBgmLink))
 	mux.Handle("DELETE /api/v1/bangumi/link", s.authed(s.unlinkBgm))
 	mux.Handle("GET /api/v1/bangumi/collections", s.authed(s.bgmCollections))
+	mux.Handle("GET /api/v1/bangumi/tags", s.authed(s.bgmTags))
 	mux.Handle("GET /api/v1/presence", s.authed(s.presenceInfo))
 	mux.Handle("PUT /api/v1/presence/players/{pid}", s.authed(s.reportPlayer))
 	mux.Handle("DELETE /api/v1/presence/players/{pid}", s.authed(s.removePlayer))

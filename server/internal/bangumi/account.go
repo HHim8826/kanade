@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -48,9 +49,10 @@ type Accounts struct {
 	Client    *Client
 	PublicURL string
 
-	mu      sync.Mutex
-	pending map[string]pending
-	tags    map[int64]cachedTags // a person's own tags, from their music collections
+	mu       sync.Mutex
+	pending  map[string]pending
+	tags     map[int64]*cachedTags // a person's own tags, from their music collections
+	renewals map[int64]*sync.Mutex // one renewal of a user's tokens at a time (review #172)
 }
 
 type pending struct {
@@ -59,12 +61,15 @@ type pending struct {
 }
 
 type cachedTags struct {
-	tags []string
-	at   time.Time
+	count map[string]int
+	tags  []string // the most used first
+	at    time.Time
+	busy  bool // being read
 }
 
 func NewAccounts(d *sql.DB, c *Client, publicURL string) *Accounts {
-	return &Accounts{DB: d, Client: c, PublicURL: strings.TrimRight(publicURL, "/"), pending: map[string]pending{}, tags: map[int64]cachedTags{}}
+	return &Accounts{DB: d, Client: c, PublicURL: strings.TrimRight(publicURL, "/"), pending: map[string]pending{}, tags: map[int64]*cachedTags{},
+		renewals: map[int64]*sync.Mutex{}}
 }
 
 // RedirectURI is where Bangumi sends the person back: the application's callback address.
@@ -168,19 +173,54 @@ type Session struct {
 // Session is how to ask Bangumi as a user's linked person, its token renewed when near its end;
 // ErrNotLinked when there is no working link (a refused one is marked so).
 func (a *Accounts) Session(ctx context.Context, user int64) (*Session, error) {
-	l, err := a.Link(ctx, user)
-	if err != nil {
-		return nil, err
+	for range 3 {
+		l, err := a.Link(ctx, user)
+		if err != nil {
+			return nil, err
+		}
+		if l == nil || l.Error != "" {
+			return nil, ErrNotLinked
+		}
+		if time.Until(time.UnixMilli(l.Expires)) > 24*time.Hour {
+			return &Session{Access: l.Access, Username: l.Username}, nil
+		}
+		s, err := a.renew(ctx, l)
+		if !errors.Is(err, errChanged) {
+			return s, err
+		}
 	}
-	if l == nil || l.Error != "" {
-		return nil, ErrNotLinked
+	return nil, errChanged
+}
+
+// errChanged is a link renewed or made again while it was being renewed: it is looked at again.
+var errChanged = fmt.Errorf("%w (the link changed meanwhile)", ErrUnavailable)
+
+// renew renews l's tokens: one renewal of a user's at a time, and only of the link as it was. One
+// that answers after the link was renewed by another, or made again (another account, or the same
+// anew), changes nothing and fails nothing of it (review #172).
+func (a *Accounts) renew(ctx context.Context, l *Link) (*Session, error) {
+	a.mu.Lock()
+	lock := a.renewals[l.User]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		a.renewals[l.User] = lock
 	}
-	if time.Until(time.UnixMilli(l.Expires)) > 24*time.Hour {
-		return &Session{Access: l.Access, Username: l.Username}, nil
+	a.mu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
+	same := func() bool {
+		now, err := a.Link(ctx, l.User)
+		return err == nil && now != nil && now.LinkedAt == l.LinkedAt && now.Refresh == l.Refresh && now.Error == ""
+	}
+	if !same() {
+		return nil, errChanged
 	}
 	tok, err := a.Client.Refresh(ctx, a.App(ctx), l.Refresh)
+	if err != nil && !same() {
+		return nil, errChanged
+	}
 	if errors.Is(err, ErrAuth) {
-		a.Failed(user)
+		a.fail(l.User, "refresh_token", l.Refresh)
 		return nil, ErrNotLinked
 	}
 	if err != nil {
@@ -189,30 +229,67 @@ func (a *Accounts) Session(ctx context.Context, user int64) (*Session, error) {
 		}
 		return nil, err
 	}
-	if _, err := a.DB.ExecContext(ctx, `UPDATE bangumi_links SET access_token = ?, refresh_token = ?, expires_at = ? WHERE user_id = ?`,
-		tok.Access, tok.Refresh, tok.Expires.UnixMilli(), user); err != nil {
+	res, err := a.DB.ExecContext(ctx, `UPDATE bangumi_links SET access_token = ?, refresh_token = ?, expires_at = ?
+		WHERE user_id = ? AND linked_at = ? AND refresh_token = ?`, tok.Access, tok.Refresh, tok.Expires.UnixMilli(), l.User, l.LinkedAt, l.Refresh)
+	if err != nil {
 		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, errChanged
 	}
 	return &Session{Access: tok.Access, Username: l.Username}, nil
 }
 
-// Failed marks a user's link as one Bangumi no longer accepts.
-func (a *Accounts) Failed(user int64) {
-	a.DB.Exec(`UPDATE bangumi_links SET error = ? WHERE user_id = ?`, "Bangumi 不再接受這個連結（授權過期或被撤銷），請重新連結。", user)
+// Failed marks a user's link as one Bangumi no longer accepts, as it refused s: a link made again
+// since is left alone (review #172).
+func (a *Accounts) Failed(user int64, s *Session) {
+	a.fail(user, "access_token", s.Access)
 }
 
-// MyTags are the tags a person put on their music collections, the most used first (kept ten
-// minutes).
-func (a *Accounts) MyTags(ctx context.Context, user int64, s *Session) ([]string, error) {
+func (a *Accounts) fail(user int64, column, token string) {
+	a.DB.Exec(`UPDATE bangumi_links SET error = ? WHERE user_id = ? AND `+column+` = ?`,
+		"Bangumi 不再接受這個連結（授權過期或被撤銷），請重新連結。", user, token)
+}
+
+// tagPages is how many pages of a person's music collections (the latest changed first) their own
+// tags are gathered from: enough to know the ones they use, few enough not to hold Bangumi's
+// requests up for long (review #185).
+const tagPages = 4
+
+// MyTags are the tags a person put on their music collections, the most used first: as gathered
+// within ten minutes, else those gathered before (none the first time) while they are gathered
+// again apart, for the next asking (review #185); pending says they are.
+func (a *Accounts) MyTags(user int64, s *Session) (tags []string, pending bool) {
 	a.mu.Lock()
-	if c, ok := a.tags[user]; ok && time.Since(c.at) < 10*time.Minute {
-		a.mu.Unlock()
-		return c.tags, nil
+	defer a.mu.Unlock()
+	c := a.tags[user]
+	if c == nil {
+		c = &cachedTags{}
+		a.tags[user] = c
 	}
-	a.mu.Unlock()
+	if c.busy || time.Since(c.at) < 10*time.Minute {
+		return slices.Clone(c.tags), c.busy
+	}
+	c.busy = true
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		count, err := a.gather(ctx, s)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		c.busy = false
+		if err != nil || a.tags[user] != c {
+			return // asked again next time
+		}
+		c.count, c.tags, c.at = count, mostUsed(count), time.Now()
+	}()
+	return slices.Clone(c.tags), true
+}
+
+func (a *Accounts) gather(ctx context.Context, s *Session) (map[string]int, error) {
 	count := map[string]int{}
-	for offset := 0; offset < 500; offset += 50 {
-		p, err := a.Client.Collections(ctx, s.Access, s.Username, Music, 0, 50, offset)
+	for page := range tagPages {
+		p, err := a.Client.Collections(ctx, s.Access, s.Username, Music, 0, 50, page*50)
 		if err != nil {
 			return nil, err
 		}
@@ -221,10 +298,14 @@ func (a *Accounts) MyTags(ctx context.Context, user int64, s *Session) ([]string
 				count[t]++
 			}
 		}
-		if offset+50 >= p.Total {
+		if (page+1)*50 >= p.Total {
 			break
 		}
 	}
+	return count, nil
+}
+
+func mostUsed(count map[string]int) []string {
 	tags := make([]string, 0, len(count))
 	for t := range count {
 		tags = append(tags, t)
@@ -238,15 +319,21 @@ func (a *Accounts) MyTags(ctx context.Context, user int64, s *Session) ([]string
 	if len(tags) > 30 {
 		tags = tags[:30]
 	}
-	a.mu.Lock()
-	a.tags[user] = cachedTags{tags, time.Now()}
-	a.mu.Unlock()
-	return tags, nil
+	return tags
 }
 
-// Changed drops what is kept of a person's tags (they changed a collection).
-func (a *Accounts) Changed(user int64) {
+// Saved counts the tags a person just put on a collection with their own (from before, which
+// they may have taken off: kept as they were until gathered again), so the next asking needs no
+// gathering again (review #185).
+func (a *Accounts) Saved(user int64, tags []string) {
 	a.mu.Lock()
-	delete(a.tags, user)
-	a.mu.Unlock()
+	defer a.mu.Unlock()
+	c := a.tags[user]
+	if c == nil || c.count == nil {
+		return
+	}
+	for _, t := range tags {
+		c.count[t]++
+	}
+	c.tags = mostUsed(c.count)
 }

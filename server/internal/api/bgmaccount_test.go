@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/library"
 )
@@ -168,9 +169,22 @@ func TestBangumiAccount(t *testing.T) {
 		SubjectTags []string `json:"subject_tags"`
 		MyTags      []string `json:"my_tags"`
 	}
-	if call("GET", path+"/collection", nil, &col); !col.Linked || col.Collection != nil || strings.Join(col.SubjectTags, ",") != "ARIA,2005" ||
-		strings.Join(col.MyTags, ",") != "OST,鱼韵" {
+	if call("GET", path+"/collection", nil, &col); !col.Linked || col.Collection != nil || strings.Join(col.SubjectTags, ",") != "ARIA,2005" {
 		t.Fatalf("collection %+v", col)
+	}
+	// The person's own tags are gathered apart (review #185).
+	var mine struct {
+		Tags    []string
+		Pending bool
+	}
+	for i := 0; i < 100; i++ {
+		if call("GET", "/api/v1/bangumi/tags", nil, &mine); !mine.Pending {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if strings.Join(mine.Tags, ",") != "OST,鱼韵" {
+		t.Fatalf("my tags %+v", mine)
 	}
 	if len(f.posted) != 0 {
 		t.Fatal("reading wrote")
@@ -180,8 +194,20 @@ func TestBangumiAccount(t *testing.T) {
 			t.Fatalf("%v: %d", bad, code)
 		}
 	}
-	if code := call("PUT", path+"/collection", map[string]any{"type": 2, "rate": 9, "comment": " 好聽 ", "private": true, "tags": []string{"ARIA", "鱼韵", "ARIA"}}, nil); code != 204 {
-		t.Fatalf("write: %d", code)
+	var saved struct {
+		Collection struct {
+			Type, Rate int
+			Comment    string
+			Tags       []string
+		}
+	}
+	if code := call("PUT", path+"/collection", map[string]any{"type": 2, "rate": 9, "comment": " 好聽 ", "private": true, "tags": []string{"ARIA", "鱼韵", "ARIA"}}, &saved); code != 200 ||
+		saved.Collection.Rate != 9 || saved.Collection.Comment != "好聽" || strings.Join(saved.Collection.Tags, ",") != "ARIA,鱼韵" {
+		t.Fatalf("write: %d %+v", code, saved)
+	}
+	// The tags saved count with the person's own, with no gathering them again.
+	if call("GET", "/api/v1/bangumi/tags", nil, &mine); mine.Pending || strings.Join(mine.Tags, ",") != "OST,鱼韵,ARIA" {
+		t.Fatalf("my tags after saving %+v", mine)
 	}
 	if len(f.posted) != 1 || f.posted[0]["type"] != 2.0 || f.posted[0]["comment"] != "好聽" || f.posted[0]["private"] != true ||
 		len(f.posted[0]["tags"].([]any)) != 2 {

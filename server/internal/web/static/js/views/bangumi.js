@@ -1,4 +1,4 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast } from '../ui.js';
@@ -21,7 +21,10 @@ export function SubjectRow({ album }) {
   useEffect(() => {
     setCol(null);
     if (!sub) return;
-    get(`/albums/${album.id}/collection`).then(setCol, () => setCol({ failed: true }));
+    // Another album or entry since: its answer shows nothing (review #177).
+    let alive = true;
+    get(`/albums/${album.id}/collection`).then((v) => alive && setCol(v), () => alive && setCol({ failed: true }));
+    return () => { alive = false; };
   }, [album.id, sub && sub.id]);
   if (!sub) {
     return html`<div class="chips album-categories album-works">
@@ -49,12 +52,27 @@ function CollectionDialog({ album, onSaved, close }) {
   const [form, setForm] = useState(null);
   const [busy, run] = useRunner();
   useEffect(() => {
+    let alive = true;
     get(`/albums/${album.id}/collection`).then((d) => {
+      if (!alive) return;
       setData(d);
       const c = d.collection;
       setForm({ type: c ? c.type : 2, rate: c ? c.rate : 0, tags: c ? c.tags.join(' ') : '', comment: c ? c.comment || '' : '', private: c ? c.private : false });
-    }, setError);
+    }, (e) => alive && setError(e));
+    return () => { alive = false; };
   }, [album.id]);
+  // The owner's own tags are gathered apart: they show once they are (review #185).
+  useEffect(() => {
+    if (!data || !data.my_tags_pending) return;
+    let alive = true, tries = 0;
+    const ask = () => get('/bangumi/tags').then((r) => {
+      if (!alive) return;
+      if (!r.pending || ++tries >= 20) setData((d) => ({ ...d, my_tags: r.tags, my_tags_pending: false }));
+      else t = setTimeout(ask, 1500);
+    }, () => {});
+    let t = setTimeout(ask, 1000);
+    return () => { alive = false; clearTimeout(t); };
+  }, [data && data.my_tags_pending]);
   const tags = form ? form.tags.split(/[\s,，、]+/).filter(Boolean) : [];
   const toggleTag = (t) => setForm((f) => {
     const list = f.tags.split(/[\s,，、]+/).filter(Boolean);
@@ -63,10 +81,10 @@ function CollectionDialog({ album, onSaved, close }) {
   });
   const save = () => run(async () => {
     if (tags.length > 10) throw new Error('標籤最多 10 個');
-    await api('PUT', `/albums/${album.id}/collection`, { ...form, tags: [...new Set(tags)] });
+    // The answer is the collection as saved: nothing to read again (review #185).
+    const r = await api('PUT', `/albums/${album.id}/collection`, { ...form, tags: [...new Set(tags)] });
     toast(`已更新 Bangumi 收藏：${statusNames[form.type]}`);
-    const d = await get(`/albums/${album.id}/collection`);
-    if (onSaved) onSaved(d);
+    if (onSaved) onSaved({ ...data, collection: r.collection });
     close();
   });
   const sub = album.subject;
@@ -146,7 +164,7 @@ export function BangumiAccount() {
   const unlink = () => confirmDialog({
     title: '解除 Bangumi 連結', action: '解除連結', danger: true,
     children: html`<p>Kanade 會忘記這個帳號的授權，之後無法在這裡管理收藏；已綁定的條目會保留。Bangumi 沒有撤銷授權的功能，舊授權會在一週內自動失效。</p>`,
-    onConfirm: () => api('DELETE', '/bangumi/link').then(load),
+    onConfirm: () => api('DELETE', '/bangumi/link').then(() => { kept = null; load(); }),
   });
   const l = info && info.link;
   const ready = info && info.app_id && info.has_secret;
@@ -183,26 +201,51 @@ export function BangumiAccount() {
     </div>`;
 }
 
+// What the collections tab read last, kept a while: back from an album, it shows as it was, with
+// the pages loaded, without asking Bangumi again (review #187).
+let kept = null; // { type, pages, at }
+const keptFor = 5 * 60 * 1000;
+
 // CollectionsTab is the owner's music collections in Bangumi, a type at a time, with the library's
-// albums of each.
+// albums of each. The type is in the address (#/library/bangumi?type=1).
 export function CollectionsTab() {
-  const [type, setType] = useState(2);
-  const [pages, setPages] = useState(null); // { total, items, username }
+  const [type, setType] = useState(() => {
+    const t = Number(parseHash().query.get('type'));
+    return statusNames[t] ? t : 2;
+  });
+  const [pages, setPages] = useState(() => (kept && kept.type === type && Date.now() - kept.at < keptFor ? kept.pages : null));
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  // Each read is numbered: one that answers after a newer one, or after the type changed, shows
+  // nothing (review #177).
+  const asked = useRef(0);
   const load = async (more) => {
+    const my = ++asked.current;
     setLoading(true);
     setError(null);
     try {
       const r = await get(`/bangumi/collections?type=${type}&offset=${more ? pages.items.length : 0}`);
-      setPages(more ? { ...r, items: [...pages.items, ...r.items] } : r);
+      if (my !== asked.current) return;
+      const next = more ? { ...r, items: [...pages.items, ...r.items] } : r;
+      setPages(next);
+      kept = { type, pages: next, at: Date.now() };
     } catch (e) {
+      if (my !== asked.current) return;
       setError(e);
       if (!more) setPages(null);
     }
     setLoading(false);
   };
-  useEffect(() => { load(false); }, [type]);
+  const shown = useRef(pages ? type : null); // the type shown as it was kept
+  useEffect(() => {
+    keepInAddress(`library/bangumi?type=${type}`);
+    if (shown.current === type) {
+      shown.current = null;
+      return;
+    }
+    setPages(null);
+    load(false);
+  }, [type]);
   if (error && error.body && error.body.reason === 'not_linked') {
     return html`<${Empty} icon="link">連結 Bangumi 帳號後，這裡會列出你的音樂收藏（想聽、聽過…），並標出曲庫有沒有。
       <div class="actions center"><a class="btn tonal" href=${href('settings')}>到設定連結</a></div><//>`;

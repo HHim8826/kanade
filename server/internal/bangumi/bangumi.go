@@ -141,13 +141,16 @@ func (c *Client) Search(ctx context.Context, keyword string, types []int, offset
 	}
 	b, _ := json.Marshal(body)
 	u := fmt.Sprintf("%s/v0/search/subjects?limit=%d&offset=%d", c.Base, PageSize, max(offset, 0))
-	data, err := c.do(ctx, http.MethodPost, u, b)
-	if err != nil {
-		return nil, err
-	}
 	var p Page
-	if err := json.Unmarshal(data, &p); err != nil {
-		return nil, fmt.Errorf("%w (%v)", ErrUnavailable, err)
+	if _, err := c.do(ctx, http.MethodPost, u, b, func(data []byte) bool {
+		var check struct {
+			Total *int            `json:"total"`
+			Data  json.RawMessage `json:"data"`
+		}
+		p = Page{}
+		return json.Unmarshal(data, &check) == nil && check.Total != nil && json.Unmarshal(data, &p) == nil
+	}); err != nil {
+		return nil, err
 	}
 	if p.Subjects == nil {
 		p.Subjects = []Subject{}
@@ -160,13 +163,12 @@ func (c *Client) Search(ctx context.Context, keyword string, types []int, offset
 
 // Subject reads one subject.
 func (c *Client) Subject(ctx context.Context, id int64) (*Subject, error) {
-	data, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v0/subjects/%d", c.Base, id), nil)
-	if err != nil {
-		return nil, err
-	}
 	var s Subject
-	if err := json.Unmarshal(data, &s); err != nil || s.ID == 0 {
-		return nil, fmt.Errorf("%w (an answer that is no subject)", ErrUnavailable)
+	if _, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v0/subjects/%d", c.Base, id), nil, func(data []byte) bool {
+		s = Subject{}
+		return json.Unmarshal(data, &s) == nil && s.ID == id
+	}); err != nil {
+		return nil, err
 	}
 	c.seen(&s)
 	return &s, nil
@@ -241,10 +243,12 @@ func (c *Client) wait(ctx context.Context) error {
 	}
 }
 
-func (c *Client) do(ctx context.Context, method, rawURL string, body []byte) ([]byte, error) {
+// do asks the API, or answers as it did a while ago. An answer is taken, and kept, only when ok
+// says it is one: an error page sent as a success is not kept for the next asking (review #179).
+func (c *Client) do(ctx context.Context, method, rawURL string, body []byte, ok func([]byte) bool) ([]byte, error) {
 	key := method + " " + rawURL + " " + string(body)
 	c.mu.Lock()
-	if h, ok := c.cache[key]; ok && time.Since(h.at) < cacheTTL {
+	if h, found := c.cache[key]; found && time.Since(h.at) < cacheTTL && ok(h.body) {
 		c.mu.Unlock()
 		return h.body, nil
 	}
@@ -281,6 +285,9 @@ func (c *Client) do(ctx context.Context, method, rawURL string, body []byte) ([]
 	}
 	if len(data) > maxAnswer {
 		return nil, fmt.Errorf("%w (answer too large)", ErrUnavailable)
+	}
+	if !ok(data) {
+		return nil, fmt.Errorf("%w (an answer that is not what was asked for)", ErrUnavailable)
 	}
 	c.mu.Lock()
 	if len(c.cache) >= maxCached {
