@@ -68,9 +68,10 @@ func TestLoginRefusesOtherSites(t *testing.T) {
 	}
 
 	rec := send("/api/v1/login", cookieLogin, web)
-	cookie := rec.Result().Cookies()
-	if rec.Code != http.StatusOK || len(cookie) != 1 || !cookie[0].HttpOnly || !cookie[0].Secure || cookie[0].SameSite != http.SameSiteStrictMode ||
-		cookie[0].MaxAge != int(auth.SessionLifetime/time.Second) {
+	cookie := rec.Result().Cookies() // the login, and the browser marked as known (review #182)
+	if rec.Code != http.StatusOK || len(cookie) != 2 || cookie[0].Name != sessionCookie || !cookie[0].HttpOnly || !cookie[0].Secure ||
+		cookie[0].SameSite != http.SameSiteStrictMode || cookie[0].MaxAge != int(auth.SessionLifetime/time.Second) ||
+		cookie[1].Name != knownCookie || !cookie[1].HttpOnly || !cookie[1].Secure || cookie[1].SameSite != http.SameSiteStrictMode {
 		t.Fatalf("web login %d %+v", rec.Code, cookie)
 	}
 	// An app sends no Origin and asks for the token.

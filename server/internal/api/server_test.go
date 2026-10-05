@@ -165,6 +165,49 @@ func TestStreamRequiresTokenOrValidSignature(t *testing.T) {
 	}
 }
 
+// A browser that logged in here before still logs in while someone guesses passwords from
+// everywhere (review #182); others are told why they cannot.
+func TestKnownBrowserLogsIn(t *testing.T) {
+	s, h := newTestServer(t)
+	s.auth.CreateUser(context.Background(), "admin", "correct horse battery", false)
+	login := func(cookies []*http.Cookie) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"username": "admin", "password": "correct horse battery", "cookie": true})
+		req := httptest.NewRequest("POST", "/api/v1/login", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set(csrfHeader, "kanade")
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	rec := login(nil)
+	var known *http.Cookie
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == knownCookie {
+			known = c
+		}
+	}
+	if rec.Code != 200 || known == nil || !known.HttpOnly {
+		t.Fatalf("login: %d, known %+v", rec.Code, known)
+	}
+	for i := range 30 {
+		s.auth.Login(context.Background(), "admin", "wrong password!", "", fmt.Sprintf("192.0.2.%d", i))
+	}
+	if rec := login(nil); rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), `"reason":"throttled_all"`) {
+		t.Fatalf("an unknown browser: %d %s", rec.Code, rec.Body)
+	}
+	forged := *known
+	forged.Value = strings.Replace(known.Value, ".", "1.", 1)
+	if rec := login([]*http.Cookie{&forged}); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("a forged mark: %d", rec.Code)
+	}
+	if rec := login([]*http.Cookie{known}); rec.Code != 200 {
+		t.Fatalf("the known browser: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestImportPathMustStayInsideRoots(t *testing.T) {
 	s, h := newTestServer(t)
 	token := loginToken(t, s, h)

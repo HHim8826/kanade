@@ -36,7 +36,12 @@ export function Login({ onLogin }) {
       await post('/login', { username, password, device: 'web: ' + navigator.userAgent.slice(0, 240), cookie: true }, { allow401: true });
       onLogin();
     } catch (err) {
-      setError(err.status === 401 ? new Error('帳號或密碼錯誤') : err.status === 429 ? new Error('嘗試次數過多，請 15 分鐘後再試') : err);
+      // Refused for guesses from elsewhere: not this person's mistake, and not over in 15 minutes
+      // while it goes on (review #182).
+      const everyone = err.body && err.body.reason === 'throttled_all';
+      setError(err.status === 401 ? new Error('帳號或密碼錯誤')
+        : everyone ? new Error('最近有許多來自其他地方的錯誤密碼，暫時不接受新裝置用密碼登入。請改用 passkey，或用曾經登入過的瀏覽器登入。')
+          : err.status === 429 ? new Error('嘗試次數過多，請 15 分鐘後再試') : err);
       setBusy(false);
     }
   };

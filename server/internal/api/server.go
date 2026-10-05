@@ -4,11 +4,15 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"embed"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"io"
 	"log/slog"
@@ -576,8 +580,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !cookieLogin(w, r, req.Cookie) {
 		return
 	}
-	token, err := s.auth.Login(r.Context(), req.Username, req.Password, req.Device, s.clientIP(r))
+	ctx := r.Context()
+	if s.knownDevice(r) {
+		ctx = auth.KnownDevice(ctx)
+	}
+	token, err := s.auth.Login(ctx, req.Username, req.Password, req.Device, s.clientIP(r))
 	switch {
+	case errors.Is(err, auth.ErrThrottledAll):
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": err.Error(), "reason": "throttled_all"})
 	case errors.Is(err, auth.ErrThrottled):
 		writeError(w, http.StatusTooManyRequests, err)
 	case errors.Is(err, auth.ErrBadCredentials):
@@ -589,15 +599,45 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// loggedIn answers a successful login: the web client gets an HttpOnly cookie instead of the token.
+// loggedIn answers a successful login: the web client gets an HttpOnly cookie instead of the token,
+// and one that marks the browser as known.
 func (s *Server) loggedIn(w http.ResponseWriter, token string, cookie bool) {
 	if !cookie {
 		writeJSON(w, http.StatusOK, map[string]string{"token": token})
 		return
 	}
+	secure := strings.HasPrefix(s.cfg.PublicURL, "https://")
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", MaxAge: int(auth.SessionLifetime / time.Second),
-		HttpOnly: true, Secure: strings.HasPrefix(s.cfg.PublicURL, "https://"), SameSite: http.SameSiteStrictMode})
+		HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode})
+	now := time.Now().Unix()
+	http.SetCookie(w, &http.Cookie{Name: knownCookie, Value: fmt.Sprintf("%d.%s", now, s.knownSig(now)), Path: "/api/v1/",
+		MaxAge: int(knownLifetime / time.Second), HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode})
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// knownCookie marks a browser that logged in here (review #182): its logins are not held to the
+// limit for everyone together, so someone guessing passwords cannot keep the owner out. It is no
+// login and says nothing else; only this server can make one.
+const (
+	knownCookie   = "kanade_known"
+	knownLifetime = 400 * 24 * time.Hour
+)
+
+func (s *Server) knownSig(issued int64) string {
+	m := hmac.New(sha256.New, s.streamKey)
+	fmt.Fprintf(m, "known browser %d", issued)
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
+}
+
+// knownDevice says whether the request comes from a browser that logged in here.
+func (s *Server) knownDevice(r *http.Request) bool {
+	c, err := r.Cookie(knownCookie)
+	if err != nil {
+		return false
+	}
+	at, sig, ok := strings.Cut(c.Value, ".")
+	issued, err := strconv.ParseInt(at, 10, 64)
+	return ok && err == nil && time.Since(time.Unix(issued, 0)) < knownLifetime && hmac.Equal([]byte(sig), []byte(s.knownSig(issued)))
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

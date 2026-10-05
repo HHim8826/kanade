@@ -98,12 +98,13 @@ func TestThrottleCountsChecksUnderWay(t *testing.T) {
 	if checked != maxFailures {
 		t.Fatalf("%d of 20 guesses were checked, want %d", checked, maxFailures)
 	}
-	// The same budget covers the passkey's password confirmation and passkey logins.
-	if _, err := s.RegisterChallenge(ctx, 1, password, "9.9.9.9"); !errors.Is(err, ErrThrottled) {
-		t.Fatalf("password confirmation: %v", err)
-	}
+	// The same budget covers passkey logins.
 	if _, err := s.PasskeyLogin(ctx, rp, nil, nil, nil, nil, nil, "", "9.9.9.9"); !errors.Is(err, ErrThrottled) {
 		t.Fatalf("passkey login: %v", err)
+	}
+	// One logged in confirming the password has the account's own budget (review #182).
+	if _, err := s.RegisterChallenge(ctx, 1, password, "9.9.9.9"); err != nil {
+		t.Fatalf("password confirmation: %v", err)
 	}
 
 	// A right password is not a failure, and a check under way is held only while it runs.

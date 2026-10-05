@@ -94,9 +94,10 @@ func (s *Service) useLoginChallenge(ch []byte) bool {
 }
 
 // RegisterChallenge confirms the account's password, then makes a one-time challenge for adding a
-// passkey to it. Wrong passwords count towards the login throttle.
+// passkey to it. Wrong passwords count against the account's own limit, not the one for everyone
+// (review #182).
 func (s *Service) RegisterChallenge(ctx context.Context, userID int64, password, clientIP string) (ch []byte, err error) {
-	done, err := s.attempt(clientIP, true)
+	done, err := s.attempt(account(userID), false)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +286,7 @@ func (s *Service) DeletePasskey(ctx context.Context, userID, id int64) error {
 // Login with the password. Failures count towards the same throttle.
 func (s *Service) PasskeyLogin(ctx context.Context, rp webauthn.RP, credentialID, clientDataJSON, authenticatorData, signature,
 	userHandle []byte, deviceName, clientIP string) (token string, err error) {
-	done, err := s.attempt(clientIP, false)
+	done, err := s.attempt(network(clientIP), false)
 	if err != nil {
 		return "", err
 	}

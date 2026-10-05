@@ -8,6 +8,9 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"log/slog"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -21,9 +24,11 @@ import (
 var (
 	ErrBadCredentials = errors.New("wrong username or password")
 	ErrThrottled      = errors.New("too many failed logins; try again later")
-	ErrNoSession      = errors.New("not logged in")
-	ErrUsersExist     = errors.New("an account already exists")
-	ErrShortPassword  = errors.New("password must be at least 10 characters")
+	// ErrThrottledAll is the limit for everyone together reached: someone is guessing passwords.
+	ErrThrottledAll  = fmt.Errorf("%w (many wrong passwords from elsewhere: use a passkey, or a browser that logged in here before)", ErrThrottled)
+	ErrNoSession     = errors.New("not logged in")
+	ErrUsersExist    = errors.New("an account already exists")
+	ErrShortPassword = errors.New("password must be at least 10 characters")
 )
 
 const (
@@ -58,14 +63,46 @@ type Service struct {
 	challenges map[string]challenge   // pending passkey requests to add one
 	key        []byte                 // signs the challenges to log in with a passkey
 	used       map[string]time.Time   // those used, until they expire
+	warned     time.Time              // when the limit for everyone was last said to be reached
+
+	Log *slog.Logger
 }
 
 func New(d *sql.DB) *Service {
 	key := make([]byte, 32)
 	rand.Read(key)
 	return &Service{db: d, failures: map[string][]time.Time{}, checking: map[string]int{}, turns: make(chan struct{}, maxChecks),
-		challenges: map[string]challenge{}, key: key, used: map[string]time.Time{}}
+		challenges: map[string]challenge{}, key: key, used: map[string]time.Time{}, Log: slog.New(slog.DiscardHandler)}
 }
+
+type knownKey struct{}
+
+// KnownDevice marks a login as made from a browser that logged in here before (a cookie only this
+// server can make says so): it is held to its own address's limit, not to the limit for everyone
+// together, so guesses from elsewhere cannot keep the owner out (review #182).
+func KnownDevice(ctx context.Context) context.Context {
+	return context.WithValue(ctx, knownKey{}, true)
+}
+
+func known(ctx context.Context) bool {
+	k, _ := ctx.Value(knownKey{}).(bool)
+	return k
+}
+
+// network is what a client's failures count against: its address, or for IPv6 its /64, which
+// one machine has all of (review #182).
+func network(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil || !a.Is6() || a.Is4In6() {
+		return ip
+	}
+	p, _ := a.Prefix(64)
+	return p.String()
+}
+
+// account is what an account's own password confirmations count against: one logged in already
+// confirming it to change it or add a passkey is no guess from the world (review #182).
+func account(id int64) string { return fmt.Sprintf("account %d", id) }
 
 // compare checks a password against a hash, when there is a turn for it.
 func (s *Service) compare(ctx context.Context, hash []byte, password string) error {
@@ -176,7 +213,7 @@ var ErrSamePassword = errors.New("the new password is the current one")
 // (throttled like a login, review #76). As with SetPassword, every login of the account ends,
 // this one too; passkeys stay.
 func (s *Service) ChangePassword(ctx context.Context, userID int64, current, password, clientIP string) (err error) {
-	done, err := s.attempt(clientIP, true)
+	done, err := s.attempt(account(userID), false)
 	if err != nil {
 		return err
 	}
@@ -256,11 +293,11 @@ func (s *Service) EndOtherSessions(ctx context.Context, userID int64, token stri
 	return int(n), nil
 }
 
-// attempt lets a client check a password or passkey, unless its recent failures and the checks it
-// has under way reach the limit: checks still running count, so a burst of guesses sent at once is
-// held to the limit too. Passwords are also held to a limit for everyone together. done ends the
-// check; a refused one is remembered as a failure.
-func (s *Service) attempt(ip string, password bool) (done func(err error), err error) {
+// attempt lets a client (key: its network, or an account) check a password or passkey, unless its
+// recent failures and the checks it has under way reach the limit: checks still running count, so
+// a burst of guesses sent at once is held to the limit too. With everyone, a password is also held
+// to a limit for everyone together. done ends the check; a refused one is remembered as a failure.
+func (s *Service) attempt(ip string, everyone bool) (done func(err error), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
@@ -279,11 +316,19 @@ func (s *Service) attempt(ip string, password bool) (done func(err error), err e
 		s.failures[ip] = recent
 	}
 	s.wrong = within(s.wrong, now)
-	if len(recent)+s.checking[ip] >= maxFailures || (password && len(s.wrong)+s.passwords >= maxAllFailures) {
+	if len(recent)+s.checking[ip] >= maxFailures {
 		return nil, ErrThrottled
 	}
+	if everyone && len(s.wrong)+s.passwords >= maxAllFailures {
+		if now.Sub(s.warned) >= failureWindow { // once while it lasts
+			s.warned = now
+			s.Log.Warn("auth: too many wrong passwords from everywhere; passwords are refused for a while, except from browsers that logged in here before",
+				"wrong", len(s.wrong), "window", failureWindow)
+		}
+		return nil, ErrThrottledAll
+	}
 	s.checking[ip]++
-	if password {
+	if everyone {
 		s.passwords++
 	}
 	return func(err error) {
@@ -292,12 +337,12 @@ func (s *Service) attempt(ip string, password bool) (done func(err error), err e
 		if s.checking[ip]--; s.checking[ip] <= 0 {
 			delete(s.checking, ip)
 		}
-		if password {
+		if everyone {
 			s.passwords--
 		}
 		if refused(err) {
 			s.failures[ip] = append(s.failures[ip], time.Now())
-			if password {
+			if everyone {
 				s.wrong = append(s.wrong, time.Now())
 			}
 		}
@@ -323,7 +368,7 @@ func refused(err error) bool {
 
 // Login checks the password and returns a new login token. clientIP is used for throttling.
 func (s *Service) Login(ctx context.Context, username, password, deviceName, clientIP string) (token string, err error) {
-	done, err := s.attempt(clientIP, true)
+	done, err := s.attempt(network(clientIP), !known(ctx))
 	if err != nil {
 		return "", err
 	}

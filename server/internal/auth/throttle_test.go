@@ -11,7 +11,8 @@ import (
 )
 
 // Guesses from ever new addresses (review #148) are held to a limit for everyone together; a
-// passkey still logs in meanwhile.
+// passkey still logs in meanwhile, and so does a browser that logged in before; one logged in
+// still confirms its password, to change it or add a passkey (review #182).
 func TestThrottleAcrossAddresses(t *testing.T) {
 	ctx := context.Background()
 	s := newService(t)
@@ -22,10 +23,16 @@ func TestThrottleAcrossAddresses(t *testing.T) {
 			t.Fatalf("guess %d: %v", i, err)
 		}
 	}
-	if _, err := s.Login(ctx, "admin", password, "", "198.51.100.1"); !errors.Is(err, ErrThrottled) {
+	if _, err := s.Login(ctx, "admin", password, "", "198.51.100.1"); !errors.Is(err, ErrThrottledAll) {
 		t.Fatalf("a new address after %d wrong passwords: %v", maxAllFailures, err)
 	}
-	if err := s.ChangePassword(ctx, 1, "wrong password!", "another password", "198.51.100.2"); !errors.Is(err, ErrThrottled) {
+	if _, err := s.Login(KnownDevice(ctx), "admin", password, "", "198.51.100.1"); err != nil {
+		t.Fatalf("a browser that logged in before: %v", err)
+	}
+	if _, err := s.RegisterChallenge(ctx, 1, password, "198.51.100.2"); err != nil {
+		t.Fatalf("adding a passkey: %v", err)
+	}
+	if err := s.ChangePassword(ctx, 1, "wrong password!", "another password", "198.51.100.2"); !errors.Is(err, ErrBadCredentials) {
 		t.Fatalf("changing the password: %v", err)
 	}
 	cd, ad, sig := answer(t, s, dev)
@@ -40,6 +47,45 @@ func TestThrottleAcrossAddresses(t *testing.T) {
 	s.mu.Unlock()
 	if _, err := s.Login(ctx, "admin", password, "", "198.51.100.1"); err != nil {
 		t.Fatalf("after the window: %v", err)
+	}
+}
+
+// An account's own password confirmations are held to its own limit (review #182).
+func TestConfirmationsHaveTheirOwnLimit(t *testing.T) {
+	ctx := context.Background()
+	s := newService(t)
+	s.CreateUser(ctx, "admin", password, false)
+	for i := range maxFailures {
+		if err := s.ChangePassword(ctx, 1, "wrong password!", "another password", fmt.Sprintf("192.0.2.%d", i)); !errors.Is(err, ErrBadCredentials) {
+			t.Fatalf("%d: %v", i, err)
+		}
+	}
+	if _, err := s.RegisterChallenge(ctx, 1, password, "203.0.113.1"); !errors.Is(err, ErrThrottled) {
+		t.Fatalf("after %d wrong confirmations: %v", maxFailures, err)
+	}
+	if _, err := s.Login(ctx, "admin", password, "", "203.0.113.1"); err != nil {
+		t.Fatalf("logging in is another limit: %v", err)
+	}
+}
+
+// The addresses of one IPv6 /64 are one machine's: they share its limit (review #182).
+func TestIPv6NetworksShareALimit(t *testing.T) {
+	ctx := context.Background()
+	s := newService(t)
+	s.CreateUser(ctx, "admin", password, false)
+	for i := range maxFailures {
+		if _, err := s.Login(ctx, "admin", "wrong password!", "", fmt.Sprintf("2001:db8::%x", i+1)); !errors.Is(err, ErrBadCredentials) {
+			t.Fatalf("%d: %v", i, err)
+		}
+	}
+	if _, err := s.Login(ctx, "admin", password, "", "2001:db8::ffff"); !errors.Is(err, ErrThrottled) || errors.Is(err, ErrThrottledAll) {
+		t.Fatalf("another address of the /64: %v", err)
+	}
+	if _, err := s.Login(ctx, "admin", password, "", "2001:db8:0:1::1"); err != nil {
+		t.Fatalf("another /64: %v", err)
+	}
+	if network("192.0.2.7") != "192.0.2.7" || network("::ffff:192.0.2.7") != "::ffff:192.0.2.7" || network("2001:db8::1") != "2001:db8::/64" {
+		t.Fatal(network("2001:db8::1"))
 	}
 }
 
