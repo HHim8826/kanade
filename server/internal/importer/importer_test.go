@@ -24,10 +24,11 @@ import (
 )
 
 type fakeDrive struct {
-	mu       sync.Mutex
-	files    map[string][]byte // drive ID -> content
-	uploads  int
-	failNext error
+	mu         sync.Mutex
+	files      map[string][]byte // drive ID -> content
+	uploads    int
+	failNext   error
+	failCovers int // cover uploads to fail
 }
 
 func (f *fakeDrive) Folder(_ context.Context, path string) (string, error) {
@@ -41,6 +42,10 @@ func (f *fakeDrive) Upload(_ context.Context, u gdrive.Upload) (gdrive.File, err
 		err := f.failNext
 		f.failNext = nil
 		return gdrive.File{}, err
+	}
+	if f.failCovers > 0 && u.ParentID == "folder:covers" {
+		f.failCovers--
+		return gdrive.File{}, errors.New("drive is unavailable")
 	}
 	data, err := os.ReadFile(u.Path)
 	if err != nil {

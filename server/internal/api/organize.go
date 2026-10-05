@@ -142,8 +142,12 @@ func (s *Server) setAlbumCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cover, err := s.importer.StoreCover(r.Context(), data)
-	if err != nil {
+	if errors.Is(err, importer.ErrNotCover) {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err != nil {
+		upstreamError(w, err, 0)
 		return
 	}
 	g, err := s.lib.SetAlbumCover(r.Context(), id, cover)

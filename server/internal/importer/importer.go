@@ -59,7 +59,7 @@ type Importer struct {
 
 	mu           sync.Mutex
 	progress     map[int64][2]int64       // item ID -> bytes sent, total
-	covers       map[string]int64         // directory -> cover ID, for the current run
+	covers       map[coverKey]int64       // a batch's folders -> their cover ID
 	driveDirs    map[string][]gdrive.File // inbox folder -> its files, for the current batch
 	inboxWaiting atomic.Int64             // new inbox files the last scan left for later
 	settle       atomic.Int64             // SetInboxSettle's wait (ns); 0: the default; -1: none
@@ -89,7 +89,7 @@ type Importer struct {
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
 	return &Importer{db: d, lib: lib, drive: drive, staging: stagingDir, log: log,
-		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[string]int64{}, albumArtists: map[string]string{},
+		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[coverKey]int64{}, albumArtists: map[string]string{},
 		driveDirs: map[string][]gdrive.File{}}
 }
 
@@ -769,6 +769,7 @@ func (im *Importer) batchDone(ctx context.Context, batchID int64) {
 	im.mu.Lock()
 	clear(im.driveDirs) // the next inbox batch lists folders afresh
 	im.mu.Unlock()
+	im.forgetCovers(batchID)
 	if kind == "inbox" {
 		if err := im.tidyInbox(ctx, batchID); err != nil {
 			im.log.Warn("tidy inbox", "batch", batchID, "err", err)
@@ -883,7 +884,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	case it.driveParent != "": // fetched from the Drive inbox: its folder is there
 		in.CoverID = im.driveCover(ctx, it, info)
 	default:
-		in.CoverID = im.coverFor(ctx, beside, info)
+		in.CoverID = im.coverFor(ctx, it.batchID, beside, info)
 	}
 	res, err := im.lib.Publish(ctx, asset.ID, in)
 	if err != nil {
@@ -1199,13 +1200,20 @@ func (im *Importer) Original(ctx context.Context, trackID int64) (*library.Entry
 	return &in, nil
 }
 
+// ErrNotCover is an image that cannot be a cover: not a JPEG or PNG, or larger than 16 MB.
+var ErrNotCover = errors.New("the cover must be a JPEG or PNG image of at most 16 MB")
+
 // StoreCover keeps an image (JPEG or PNG) as a cover, uploading it once per content.
 func (im *Importer) StoreCover(ctx context.Context, data []byte) (int64, error) {
 	if len(data) > maxCoverFile {
-		return 0, errors.New("the image is larger than 16 MB")
+		return 0, ErrNotCover
 	}
-	if id := im.storeCover(ctx, data); id != 0 {
-		return id, nil
+	id, err := im.storeCover(ctx, data)
+	if err != nil {
+		return 0, fmt.Errorf("storing the cover in Drive: %w", err)
 	}
-	return 0, errors.New("not a JPEG or PNG image, or the upload to Drive failed")
+	if id == 0 {
+		return 0, ErrNotCover
+	}
+	return id, nil
 }

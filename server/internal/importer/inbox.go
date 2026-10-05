@@ -522,15 +522,12 @@ func (im *Importer) readDrive(ctx context.Context, f gdrive.File, limit int64) (
 // then one that looks like a cover, then the first image.
 func (im *Importer) driveCover(ctx context.Context, it *item, info *media.Info) int64 {
 	if info.Cover != nil {
-		if id := im.storeCover(ctx, info.Cover.Data); id != 0 {
+		if id, _ := im.storeCover(ctx, info.Cover.Data); id != 0 {
 			return id
 		}
 	}
 	key := "drive:" + it.driveParent
-	im.mu.Lock()
-	id, seen := im.covers[key]
-	im.mu.Unlock()
-	if seen {
+	if id, seen := im.coverSeen(it.batchID, key); seen {
 		return id
 	}
 	folders := []string{it.driveParent}
@@ -559,14 +556,17 @@ func (im *Importer) driveCover(ctx context.Context, it *item, info *media.Info) 
 			break
 		}
 	}
+	var id int64
 	if pick != nil {
-		if data, err := im.readDrive(ctx, *pick, maxCoverFile); err == nil {
-			id = im.storeCover(ctx, data)
+		data, err := im.readDrive(ctx, *pick, maxCoverFile)
+		if err != nil {
+			return 0 // tried again by the next song
+		}
+		if id, err = im.storeCover(ctx, data); err != nil {
+			return 0
 		}
 	}
-	im.mu.Lock()
-	im.covers[key] = id
-	im.mu.Unlock()
+	im.coverFound(it.batchID, key, id)
 	return id
 }
 

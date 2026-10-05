@@ -26,33 +26,68 @@ var (
 )
 
 // coverFor picks album art in the order decided in D2: embedded picture, then a
-// cover/folder/front/jacket image next to the album, then the scans folder.
-func (im *Importer) coverFor(ctx context.Context, path string, info *media.Info) int64 {
+// cover/folder/front/jacket image next to the album, then the scans folder. The art of a folder is
+// kept for the rest of the batch (review #150: a folder can be used again by a later one), unless
+// storing it failed: the next song tries again.
+func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, info *media.Info) int64 {
 	if info.Cover != nil {
-		if id := im.storeCover(ctx, info.Cover.Data); id != 0 {
+		if id, _ := im.storeCover(ctx, info.Cover.Data); id != 0 {
 			return id
 		}
 	}
 	dir := filepath.Dir(path)
-	im.mu.Lock()
-	id, seen := im.covers[dir]
-	im.mu.Unlock()
-	if seen {
+	if id, seen := im.coverSeen(batchID, dir); seen {
 		return id
 	}
+	var id int64
 	if p := findCoverFile(dir); p != "" {
-		if f, err := os.Open(p); err == nil {
-			data, err := io.ReadAll(io.LimitReader(f, maxCoverFile+1))
-			f.Close()
-			if err == nil && len(data) <= maxCoverFile {
-				id = im.storeCover(ctx, data)
+		f, err := os.Open(p)
+		if err != nil {
+			return 0
+		}
+		data, err := io.ReadAll(io.LimitReader(f, maxCoverFile+1))
+		f.Close()
+		if err != nil {
+			return 0
+		}
+		if len(data) <= maxCoverFile {
+			if id, err = im.storeCover(ctx, data); err != nil {
+				return 0
 			}
 		}
 	}
-	im.mu.Lock()
-	im.covers[dir] = id
-	im.mu.Unlock()
+	im.coverFound(batchID, dir, id)
 	return id
+}
+
+// coverKey is a folder's art in a batch.
+type coverKey struct {
+	batch  int64
+	folder string // a local path, or "drive:" and the Drive folder ID
+}
+
+func (im *Importer) coverSeen(batchID int64, folder string) (int64, bool) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	id, ok := im.covers[coverKey{batchID, folder}]
+	return id, ok
+}
+
+func (im *Importer) coverFound(batchID int64, folder string, id int64) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	im.covers[coverKey{batchID, folder}] = id
+}
+
+// forgetCovers drops a finished batch's folder art.
+func (im *Importer) forgetCovers(batchID int64) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	for k := range im.covers {
+		if k.batch == batchID {
+			delete(im.covers, k)
+		}
+	}
 }
 
 func images(dir string) []string {
@@ -107,39 +142,42 @@ func findCoverFile(dir string) string {
 	return ""
 }
 
-// storeCover uploads an image once per content hash and returns its cover ID (0 on failure;
-// a missing cover never fails an import).
-func (im *Importer) storeCover(ctx context.Context, data []byte) int64 {
+// storeCover uploads an image once per content hash and returns its cover ID: 0 for what is no
+// JPEG or PNG, and an error when it could not be stored (a missing cover never fails an import).
+func (im *Importer) storeCover(ctx context.Context, data []byte) (int64, error) {
 	mime := http.DetectContentType(data)
 	ext := map[string]string{"image/jpeg": ".jpg", "image/png": ".png"}[mime]
 	if ext == "" {
-		return 0
+		return 0, nil
 	}
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
 	if id, driveID, err := im.lib.CoverBySHA(ctx, sha); err == nil && id != 0 && driveID != "" {
-		return id
+		return id, nil
 	}
+	id, err := im.uploadCover(ctx, data, sha, mime, ext)
+	if err != nil {
+		im.log.Warn("cover upload failed", "err", err)
+	}
+	return id, err
+}
+
+func (im *Importer) uploadCover(ctx context.Context, data []byte, sha, mime, ext string) (int64, error) {
 	tmp := filepath.Join(im.staging, "cover-"+sha+ext)
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		im.log.Warn("cover", "err", err)
-		return 0
+		return 0, err
 	}
 	defer os.Remove(tmp)
 	folder, err := im.drive.Folder(ctx, "covers")
-	if err == nil {
-		var f gdrive.File
-		f, err = im.drive.Upload(ctx, gdrive.Upload{Path: tmp, Name: sha + ext, ParentID: folder, MIME: mime,
-			Size: int64(len(data)), SHA256: sha, Sessions: &memSessions{}})
-		if err == nil {
-			id, err := im.lib.AddCover(ctx, sha, mime, f.ID)
-			if err == nil {
-				return id
-			}
-		}
+	if err != nil {
+		return 0, err
 	}
-	im.log.Warn("cover upload failed", "err", err)
-	return 0
+	f, err := im.drive.Upload(ctx, gdrive.Upload{Path: tmp, Name: sha + ext, ParentID: folder, MIME: mime,
+		Size: int64(len(data)), SHA256: sha, Sessions: &memSessions{}})
+	if err != nil {
+		return 0, err
+	}
+	return im.lib.AddCover(ctx, sha, mime, f.ID)
 }
 
 // memSessions keeps a session only for the life of one small upload.
