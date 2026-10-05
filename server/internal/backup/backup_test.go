@@ -23,9 +23,13 @@ type fakeDrive struct {
 	data   map[string][]byte
 	down   error
 	nextID int
+	gate   chan struct{} // Folder waits for it, when set
 }
 
 func (d *fakeDrive) Folder(_ context.Context, path string) (string, error) {
+	if d.gate != nil {
+		<-d.gate
+	}
 	if d.down != nil {
 		return "", d.down
 	}
@@ -192,5 +196,29 @@ func TestDriveDownAndRun(t *testing.T) {
 	run()
 	if s.State(ctx).Name != first.Name {
 		t.Fatal("copied again within the day")
+	}
+}
+
+// A copy started is running as soon as it is accepted (review #180): the state read right after
+// says so, and a second start is turned away.
+func TestStartIsRunningAtOnce(t *testing.T) {
+	ctx := context.Background()
+	s, fd, _ := setup(t)
+	fd.gate = make(chan struct{})
+	if !s.Start(ctx) {
+		t.Fatal("not started")
+	}
+	if st := s.State(ctx); !st.Running {
+		t.Fatalf("accepted, not running: %+v", st)
+	}
+	if s.Start(ctx) {
+		t.Fatal("started twice")
+	}
+	close(fd.gate)
+	for i := 0; i < 300 && s.State(ctx).Running; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := s.State(ctx); st.Running || st.Last == 0 || st.Error != "" {
+		t.Fatalf("after %+v", st)
 	}
 }

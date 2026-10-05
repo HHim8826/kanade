@@ -56,13 +56,18 @@ function Backups() {
     const t = setTimeout(data.reload, 2000);
     return () => clearTimeout(t);
   }, [data.data]);
+  // Asked for: shown as being made at once, then followed to its end (review #180).
+  const [starting, setStarting] = useState(false);
   const now = async () => {
+    setStarting(true);
     try {
       data.reload(await post('/backup'));
     } catch (e) {
       toast(e.message, 'error');
     }
+    setStarting(false);
   };
+  const busy = starting || (b && b.running);
   const why = b && b.error && ({
     not_connected: '沒有連線 Google Drive。', auth_expired: 'Google Drive 的授權已過期，請重新連線。', room: '暫存空間不夠放複本。',
   }[b.reason] || b.error);
@@ -74,7 +79,7 @@ function Backups() {
       ${b && html`<div class="sub">上次備份：${b.last ? `${when(b.last)}（${b.name}）` : '還沒有'}${b.kept > 0 ? `；Drive 上有 ${b.kept} 份` : ''}</div>`}
       ${why && html`<div class="task-error">上次備份失敗${b.error_at ? `（${when(b.error_at)}）` : ''}：${why}</div>`}
       <div class="sub">還原：從 Drive 下載備份檔，放進伺服器資料目錄的 backups/ 資料夾，再執行 <code>sudo kanade-manager restore</code>。</div>
-      <div class="actions"><button class="btn tonal" disabled=${!b || b.running} onClick=${now}><${Icon} name="backup" />${b && b.running ? '備份中…' : '立即備份'}</button></div>
+      <div class="actions"><button class="btn tonal" disabled=${!b || busy} onClick=${now}><${Icon} name="backup" />${busy ? '備份中…' : '立即備份'}</button></div>
     </div>`;
 }
 

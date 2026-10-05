@@ -107,27 +107,37 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
-// Start makes a copy now, in the background; false when one is being made.
+// Start makes a copy now, in the background; false when one is being made. It is running once Start
+// returns, so the state read right after says so (review #180).
 func (s *Service) Start(ctx context.Context) bool {
-	s.mu.Lock()
-	running := s.state.Running
-	s.mu.Unlock()
-	if running {
+	if !s.begin() {
 		return false
 	}
-	go s.Now(context.WithoutCancel(ctx))
+	go s.make(context.WithoutCancel(ctx))
 	return true
 }
 
 // Now makes a copy and keeps it in Drive, unless one is being made; the error is also in State.
 func (s *Service) Now(ctx context.Context) error {
-	s.mu.Lock()
-	if s.state.Running {
-		s.mu.Unlock()
+	if !s.begin() {
 		return nil
 	}
+	return s.make(ctx)
+}
+
+// begin marks a copy as being made; false when one is already.
+func (s *Service) begin() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state.Running {
+		return false
+	}
 	s.state.Running = true
-	s.mu.Unlock()
+	return true
+}
+
+// make makes the copy begun, and says how it went.
+func (s *Service) make(ctx context.Context) error {
 	name, kept, err := s.copy(ctx)
 	s.mu.Lock()
 	defer s.mu.Unlock()
