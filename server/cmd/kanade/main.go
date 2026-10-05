@@ -42,6 +42,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
+	"github.com/HHim8826/kanade/server/internal/thumbs"
 	"github.com/HHim8826/kanade/server/internal/uploads"
 )
 
@@ -254,8 +255,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	mb := identify.New(strings.TrimRight(cfg.PublicURL, "/") + "/")
 	mb.Log = log
 	feeds := rss.New(d, downloads, strings.TrimRight(cfg.PublicURL, "/")+"/", log)
-	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace, Cache: cache,
-		DL: downloads, UL: ups, Log: log}
+	covers := thumbs.New(cfg.Path(config.DirThumbs), api.ThumbsBudget, log)
+	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace,
+		Cache: trimmed{cache, covers}, DL: downloads, UL: ups, Log: log}
 	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget}
 
 	// The settings page's settings (reviews #74, #75, #77): applied now, and again when saved.
@@ -294,7 +296,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
-		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud})
+		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
@@ -351,6 +353,15 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	return nil
 }
+
+// trimmed is what the disk guard empties when space runs low: the stream cache, then the covers
+// made for the web client (review #157).
+type trimmed struct {
+	*stream.Cache
+	covers *thumbs.Store
+}
+
+func (t trimmed) Trim() int64 { return t.Cache.Trim() + t.covers.Trim() }
 
 func readPassword() (string, error) {
 	fmt.Fprint(os.Stderr, "password: ")

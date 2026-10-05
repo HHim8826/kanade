@@ -1,30 +1,25 @@
 package api
 
 import (
-	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"image"
-	"image/jpeg"
-	_ "image/png"
 	"io"
 	"mime"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
-	"golang.org/x/image/draw"
-
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
 
 func pageArgs(r *http.Request) (limit, offset int) {
@@ -216,8 +211,8 @@ func contentType(format string) string {
 
 // ---- covers ----
 
-const maxCoverPixels = 25_000_000 // refuse to decode huge scans on a 1.5 GB VPS (plan §5)
-
+// cover is a cover at ?size (one of thumbs.Sizes, the nearest above; 0 or none: the original),
+// made once and kept (review #157).
 func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -225,9 +220,7 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
-	if size < 0 || size > 1024 {
-		size = 300
-	}
+	size = thumbs.Size(size)
 	c, err := s.lib.Cover(r.Context(), id)
 	if err != nil {
 		s.internal(w, r, err)
@@ -237,61 +230,30 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no such cover"))
 		return
 	}
-	name := fmt.Sprintf("%s-%d.jpg", c.SHA256, size)
+	data, err := s.thumbs.Get(r.Context(), c.SHA256, size, func(ctx context.Context) (io.ReadCloser, error) {
+		resp, err := s.drive.Do(ctx, http.MethodGet, gdrive.MediaURL(c.DriveFileID), nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		return resp.Body, nil
+	})
+	switch {
+	case errors.Is(err, thumbs.ErrUndecodable):
+		writeError(w, http.StatusNotFound, err)
+		return
+	case err != nil:
+		if r.Context().Err() == nil {
+			upstreamError(w, err, 0)
+		}
+		return
+	}
 	mime := "image/jpeg"
 	if size == 0 {
-		name, mime = c.SHA256+"-orig", c.MIME
-	}
-	path := s.cfg.Path(config.DirThumbs, name)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if data, err = s.renderCover(r, c.DriveFileID, size); err != nil {
-			upstreamError(w, err, 0)
-			return
-		}
-		os.WriteFile(path, data, 0o600)
+		mime = c.MIME
 	}
 	w.Header().Set("Content-Type", mime)
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable") // content-addressed
 	w.Write(data)
-}
-
-func (s *Server) renderCover(r *http.Request, driveID string, size int) ([]byte, error) {
-	resp, err := s.drive.Do(r.Context(), http.MethodGet, gdrive.MediaURL(driveID), nil, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	orig, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
-	if err != nil {
-		return nil, err
-	}
-	if size == 0 {
-		return orig, nil
-	}
-	cfg, _, err := image.DecodeConfig(bytes.NewReader(orig))
-	if err != nil {
-		return nil, err
-	}
-	if cfg.Width*cfg.Height > maxCoverPixels {
-		return nil, errors.New("cover image too large to resize")
-	}
-	img, _, err := image.Decode(bytes.NewReader(orig))
-	if err != nil {
-		return nil, err
-	}
-	b := img.Bounds()
-	scale := float64(size) / float64(max(b.Dx(), b.Dy()))
-	if scale > 1 {
-		scale = 1
-	}
-	dst := image.NewRGBA(image.Rect(0, 0, max(int(float64(b.Dx())*scale), 1), max(int(float64(b.Dy())*scale), 1)))
-	draw.CatmullRom.Scale(dst, dst.Bounds(), img, b, draw.Over, nil)
-	var out bytes.Buffer
-	if err := jpeg.Encode(&out, dst, &jpeg.Options{Quality: 85}); err != nil {
-		return nil, err
-	}
-	return out.Bytes(), nil
 }
 
 // ---- imports ----

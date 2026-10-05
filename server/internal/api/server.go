@@ -36,6 +36,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
+	"github.com/HHim8826/kanade/server/internal/thumbs"
 	"github.com/HHim8826/kanade/server/internal/uploads"
 	"github.com/HHim8826/kanade/server/internal/web"
 )
@@ -61,6 +62,7 @@ type Deps struct {
 	Disk      *diskguard.Guard
 	Sync      *drivesync.Syncer
 	Loudness  *loudness.Service
+	Thumbs    *thumbs.Store   // covers made for the web client; nil: one in the data directory
 	Settings  *settings.Store // the service settings the settings page changes
 	Staging   *staging.Budget // shared by downloads, uploads and the importer
 	Pinned    map[string]bool // resources given as serve flags: they win until the next start
@@ -89,6 +91,7 @@ type Server struct {
 	disk      *diskguard.Guard
 	sync      *drivesync.Syncer
 	loudness  *loudness.Service
+	thumbs    *thumbs.Store
 	proxy     clientip.Policy
 	streamKey []byte
 	log       *slog.Logger
@@ -97,10 +100,16 @@ type Server struct {
 	unproxied sync.Once // the log said a proxy's headers are not believed
 }
 
+// ThumbsBudget is the most the covers made for the web client take on disk.
+const ThumbsBudget = 256 << 20
+
 // New makes the server; d.Config.TrustedProxy was checked (clientip.Parse) by the caller.
 func New(d Deps) *Server {
 	proxy, _ := clientip.Parse(d.Config.TrustedProxy)
-	return &Server{proxy: proxy, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	if d.Thumbs == nil {
+		d.Thumbs = thumbs.New(d.Config.Path(config.DirThumbs), ThumbsBudget, d.Log)
+	}
+	return &Server{proxy: proxy, thumbs: d.Thumbs, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
