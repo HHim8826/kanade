@@ -76,14 +76,21 @@ export function guess(title) {
 
 export const linkWorks = (album, replace) => showDialog((close) => html`<${LinkWorks} albumId=${album.id} title=${album.title} replaceFirst=${replace} close=${close} />`);
 
-// LinkWorks finds a work in Bangumi for an album and links it, or corrects or removes a link.
-function LinkWorks({ albumId, title, replaceFirst, close }) {
+// bindSubject finds the album's own entry in Bangumi (a music subject), to manage its collection.
+export const bindSubject = (album) => showDialog((close) => html`<${LinkWorks} albumId=${album.id} title=${album.title} subject close=${close} />`);
+
+// plainTitle is an album's title without what is in brackets ([FLAC], (Disc 1)…).
+const plainTitle = (t) => (t || '').replace(/[[(【][^\])】]*[\])】]/g, ' ').replace(/\s+/g, ' ').trim() || (t || '').trim();
+
+// LinkWorks finds a work in Bangumi for an album and links it, or corrects or removes a link; with
+// subject, it finds the album's own entry (a music subject) instead, one per album.
+function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
   const rev = useLibRev();
   const album = useLoad(() => get('/albums/' + albumId), [albumId], rev);
-  const works = album.data ? album.data.works : [];
+  const works = album.data ? (subject ? (album.data.subject ? [album.data.subject] : []) : album.data.works) : [];
   const [replacing, setReplacing] = useState(replaceFirst || null);
-  const [q, setQ] = useState(() => guess(title));
-  const [types, setTypes] = useState(new Set([2, 4, 1, 6]));
+  const [q, setQ] = useState(() => (subject ? plainTitle(title) : guess(title)));
+  const [types, setTypes] = useState(new Set(subject ? [3] : [2, 4, 1, 6]));
   const [found, setFound] = useState(null); // { q, types, total, subjects, page_size }
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -108,10 +115,19 @@ function LinkWorks({ albumId, title, replaceFirst, close }) {
   useEffect(() => { search(false); }, []);
   const linked = (c) => works.some((w) => w.source_id === c.source_id);
   const link = (c) => run(async () => {
+    if (subject) {
+      if (c.type !== 3) throw new Error('這個條目不是音樂：動畫、遊戲請用「關聯作品」。');
+      done(await api('PUT', `/albums/${albumId}/subject`, { source_id: c.source_id }), `已綁定 Bangumi 條目「${c.name}」`);
+      return;
+    }
     const res = await post(`/albums/${albumId}/works`, { source_id: c.source_id, replace: replacing ? replacing.id : 0 });
     if (done(res, replacing ? `已將「${replacing.name}」改為「${c.name}」` : `已關聯「${c.name}」`)) setReplacing(null);
   });
   const unlink = (w) => run(async () => {
+    if (subject) {
+      done(await api('DELETE', `/albums/${albumId}/subject`), `已解除 Bangumi 條目「${w.name}」`);
+      return;
+    }
     const res = await api('DELETE', `/albums/${albumId}/works/${w.id}`);
     done(res, `已解除與「${w.name}」的關聯`);
     if (replacing && replacing.id === w.id) setReplacing(null);
@@ -122,14 +138,16 @@ function LinkWorks({ albumId, title, replaceFirst, close }) {
     return n;
   });
   const more = found && found.subjects.length < found.total && !found.subjects.every((c) => c.by_id);
-  return html`<${Dialog} title="關聯 Bangumi 作品" wide onClose=${close} actions=${html`<button class="btn filled" onClick=${close}>完成</button>`}>
-    <p class="hint tight">為「${title}」選擇所屬的作品。只會關聯你確認的條目；專輯本身的資料不會改變，可在修改紀錄撤回。</p>
-    ${works.length > 0 && html`<h3 class="sub-title">已關聯</h3>
+  return html`<${Dialog} title=${subject ? '綁定 Bangumi 音樂條目' : '關聯 Bangumi 作品'} wide onClose=${close} actions=${html`<button class="btn filled" onClick=${close}>完成</button>`}>
+    <p class="hint tight">${subject
+      ? `找出「${title}」在 Bangumi 上的音樂條目（專輯、單曲本身那一頁），綁定後可以在這裡管理你的收藏、評分與標籤。只會綁定你確認的條目，可在修改紀錄撤回。`
+      : `為「${title}」選擇所屬的作品。只會關聯你確認的條目；專輯本身的資料不會改變，可在修改紀錄撤回。`}</p>
+    ${works.length > 0 && html`<h3 class="sub-title">${subject ? '已綁定' : '已關聯'}</h3>
       <ul class="items linked-works">${works.map((w) => html`<li key=${w.id} class=${replacing && replacing.id === w.id ? 'current' : ''}>
         <${WorkImage} id=${w.image ? w.id : 0} size=${96} className="thumb" />
         <span class="grow track-text"><a class="title" href=${href('work/' + w.id)} onClick=${close}>${w.name}</a>
           <span class="sub">${[w.name_cn, workLine(w)].filter(Boolean).join(' · ')}</span></span>
-        <button class="btn text" disabled=${busy} onClick=${() => { setReplacing(w); input.current && input.current.focus(); }}>改綁…</button>
+        ${!subject && html`<button class="btn text" disabled=${busy} onClick=${() => { setReplacing(w); input.current && input.current.focus(); }}>改綁…</button>`}
         <button class="btn text" disabled=${busy} onClick=${() => unlink(w)}>解除</button>
       </li>`)}</ul>`}
     ${replacing && html`<div class="card pad replacing">
@@ -158,14 +176,16 @@ function LinkWorks({ albumId, title, replaceFirst, close }) {
             <span class="sub">${[workLine(c), c.score && `★ ${c.score.toFixed(1)}（${c.votes} 人評分）`].filter(Boolean).join(' · ')}</span>
           </span>
           ${c.by_id && html`<span class="pill">依編號</span>`}
-          ${on && html`<span class="pill good">已關聯</span>`}
+          ${on && html`<span class="pill good">${subject ? '已綁定' : '已關聯'}</span>`}
           <span class=${'chev' + (shown ? ' open' : '')}><${Icon} name="expand" /></span>
         </button>
         ${shown && html`<div class="candidate-detail">
           ${c.summary ? html`<p class="work-summary">${c.summary}</p>` : html`<p class="hint tight">Bangumi 沒有這部作品的簡介。</p>`}
           <div class="actions">
             <a class="btn text" href=${c.url} target="_blank" rel="noopener noreferrer"><${Icon} name="openNew" />在 Bangumi 查看</a>
-            <button class="btn filled" disabled=${busy || on} onClick=${() => link(c)}>${on ? '已關聯' : replacing ? `改為這部` : '關聯這部作品'}</button>
+            <button class="btn filled" disabled=${busy || on} onClick=${() => link(c)}>${subject
+              ? (on ? '已綁定' : works.length ? '改為這個條目' : '綁定這個條目')
+              : (on ? '已關聯' : replacing ? '改為這部' : '關聯這部作品')}</button>
           </div>
         </div>`}
       </li>`;

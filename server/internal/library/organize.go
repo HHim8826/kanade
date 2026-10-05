@@ -49,7 +49,8 @@ var fields = map[string]map[string]string{
 		"cover_id": "cover_id", "merged_into": "merged_into", "mb_release": "mb_release", "aliases": "", "sections": "",
 		"categories": "",  // review #92: the categories it is in, by number
 		"favorite":   "",  // review #151: when it was made a favorite, or nil
-		"works":      ""}, // review #94: the works it is linked to, by number
+		"works":      "",  // review #94: the works it is linked to, by number
+		"subject":    ""}, // review #94: the work (a Bangumi music subject) it is, or nil
 	"entry":  {"album_id": "album_id", "disc_no": "disc_no", "track_no": "track_no", "row": ""},
 	"artist": {"aliases": ""},
 	// How a download imports, changed with the library by an arrangement (review #87, #88), never
@@ -172,6 +173,8 @@ func (e *editor) current(target string, id int64, field string) (v *string, ok b
 		return Str(string(b)), true, nil
 	case "works":
 		return e.currentWorks(target, id)
+	case "subject":
+		return e.currentSubject(id)
 	case "categories", "favorite":
 		var one int
 		if err := e.tx.QueryRowContext(e.ctx, `SELECT 1 FROM albums WHERE id = ?`, id).Scan(&one); errors.Is(err, sql.ErrNoRows) {
@@ -243,7 +246,7 @@ func invalid(format string, args ...any) error {
 
 // check validates a value from a user or a lookup and puts it in stored form.
 func (e *editor) check(c Change) (*string, error) {
-	if _, ok := fields[c.Target][c.Field]; !ok || c.Field == "row" || c.Field == "categories" || c.Field == "favorite" || c.Field == "works" || c.Target == "download" ||
+	if _, ok := fields[c.Target][c.Field]; !ok || c.Field == "row" || c.Field == "categories" || c.Field == "favorite" || c.Field == "works" || c.Field == "subject" || c.Target == "download" ||
 		c.Target == "scope" || c.Target == "category" {
 		return nil, invalid("cannot change %s.%s", c.Target, c.Field)
 	}
@@ -398,6 +401,8 @@ func (e *editor) write(target string, id int64, field string, v *string) error {
 		return e.writeCategories(id, v)
 	case "works":
 		return e.writeWorks(target, id, v)
+	case "subject":
+		return e.writeSubject(id, v)
 	case "favorite":
 		if v == nil {
 			_, err := tx.ExecContext(ctx, `DELETE FROM favorite_albums WHERE album_id = ?`, id)
@@ -829,6 +834,9 @@ func (e *editor) passOn(from, to int64) error {
 		return err
 	}
 	if err := e.moveWorks(from, to); err != nil {
+		return err
+	}
+	if err := e.moveSubject(from, to); err != nil {
 		return err
 	}
 	fav, _, err := e.current("album", from, "favorite")
@@ -1284,6 +1292,8 @@ func (s *Store) EditGroup(ctx context.Context, id int64) (*EditGroup, error) {
 			ed.OldLabel, ed.NewLabel = s.categoryNames(ctx, ed.Old), s.categoryNames(ctx, ed.New)
 		case "works":
 			ed.OldLabel, ed.NewLabel = s.worksLabel(ctx, ed.Target, ed.Old), s.worksLabel(ctx, ed.Target, ed.New)
+		case "subject":
+			ed.OldLabel, ed.NewLabel = s.worksLabel(ctx, "album", ed.Old), s.worksLabel(ctx, "album", ed.New)
 		case "favorite":
 			fav := func(v *string) string { return map[bool]string{true: "已收藏", false: "未收藏"}[v != nil] }
 			ed.OldLabel, ed.NewLabel = fav(ed.Old), fav(ed.New)

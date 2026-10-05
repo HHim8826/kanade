@@ -179,7 +179,7 @@ func TestDriveDownAndRun(t *testing.T) {
 	firstRun = 10 * time.Millisecond
 	defer func() { firstRun = old }()
 	run := func() {
-		ctx, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+		ctx, cancel := context.WithTimeout(ctx, 3*time.Second) // room for a copy under the race detector
 		defer cancel()
 		s.Run(ctx)
 	}

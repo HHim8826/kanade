@@ -133,6 +133,8 @@ type AlbumDetail struct {
 	Categories []CategoryBrief `json:"categories"`
 	// Works are the works it is linked to (review #94).
 	Works []WorkBrief `json:"works"`
+	// Subject is the album's own entry in Bangumi, a music subject (review #94).
+	Subject *Work `json:"subject"`
 }
 
 func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
@@ -157,6 +159,9 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		return nil, err
 	}
 	if d.Works, err = s.AlbumWorks(ctx, id); err != nil {
+		return nil, err
+	}
+	if d.Subject, err = s.AlbumSubject(ctx, id); err != nil {
 		return nil, err
 	}
 	uses, err := s.albumTrackWorks(ctx, id)

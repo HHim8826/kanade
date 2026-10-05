@@ -80,36 +80,37 @@ type Deps struct {
 }
 
 type Server struct {
-	cfg       config.Config
-	db        *sql.DB
-	auth      *auth.Service
-	drive     *gdrive.Client
-	lib       *library.Store
-	importer  *importer.Importer
-	cache     *stream.Cache
-	downloads *downloader.Service
-	aria2     *downloader.Aria2
-	settings  *settings.Store
-	staging   *staging.Budget
-	pinned    map[string]bool
-	uploads   *uploads.Store
-	mb        *identify.MusicBrainz
-	lrclib    *lrclib.Client
-	rss       *rss.Service
-	disk      *diskguard.Guard
-	sync      *drivesync.Syncer
-	loudness  *loudness.Service
-	thumbs    *thumbs.Store
-	backup    *backup.Service
-	bgm       *bangumi.Client
-	presence  *presence.Hub
-	discord   *discord.Service
-	proxy     clientip.Policy
-	streamKey []byte
-	log       *slog.Logger
-	version   string
-	started   time.Time
-	unproxied sync.Once // the log said a proxy's headers are not believed
+	cfg         config.Config
+	db          *sql.DB
+	auth        *auth.Service
+	drive       *gdrive.Client
+	lib         *library.Store
+	importer    *importer.Importer
+	cache       *stream.Cache
+	downloads   *downloader.Service
+	aria2       *downloader.Aria2
+	settings    *settings.Store
+	staging     *staging.Budget
+	pinned      map[string]bool
+	uploads     *uploads.Store
+	mb          *identify.MusicBrainz
+	lrclib      *lrclib.Client
+	rss         *rss.Service
+	disk        *diskguard.Guard
+	sync        *drivesync.Syncer
+	loudness    *loudness.Service
+	thumbs      *thumbs.Store
+	backup      *backup.Service
+	bgm         *bangumi.Client
+	bgmAccounts *bangumi.Accounts
+	presence    *presence.Hub
+	discord     *discord.Service
+	proxy       clientip.Policy
+	streamKey   []byte
+	log         *slog.Logger
+	version     string
+	started     time.Time
+	unproxied   sync.Once // the log said a proxy's headers are not believed
 
 	refreshing sync.Map // works whose description is being read again
 }
@@ -132,7 +133,7 @@ func New(d Deps) *Server {
 	if d.Discord == nil {
 		d.Discord = discord.New(d.DB, d.Presence, d.Config.PublicURL, d.Log)
 	}
-	return &Server{proxy: proxy, bgm: d.Bangumi, presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	return &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
@@ -150,6 +151,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /privacy", s.page("pages/privacy.html"))
 	mux.HandleFunc("GET /oauth/google/callback", s.oauthCallback)
 	mux.HandleFunc("GET /oauth/discord/callback", s.discordCallback)
+	mux.HandleFunc("GET /oauth/bangumi/callback", s.bgmCallback)
 	mux.Handle("GET /app/", web.Handler())
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 
@@ -281,6 +283,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/albums/{id}/works", s.authed(s.linkWork))
 	mux.Handle("DELETE /api/v1/albums/{id}/works/{work}", s.authed(s.unlinkWork))
 	mux.Handle("PUT /api/v1/tracks/{id}/works", s.authed(s.setTrackWorks))
+	mux.Handle("PUT /api/v1/albums/{id}/subject", s.authed(s.setAlbumSubject))
+	mux.Handle("DELETE /api/v1/albums/{id}/subject", s.authed(s.clearAlbumSubject))
+	mux.Handle("GET /api/v1/albums/{id}/collection", s.authed(s.albumCollection))
+	mux.Handle("PUT /api/v1/albums/{id}/collection", s.authed(s.setAlbumCollection))
+	mux.Handle("GET /api/v1/bangumi/account", s.authed(s.bgmAccountInfo))
+	mux.Handle("PUT /api/v1/bangumi/app", s.authed(s.setBgmApp))
+	mux.Handle("POST /api/v1/bangumi/link", s.authed(s.beginBgmLink))
+	mux.Handle("DELETE /api/v1/bangumi/link", s.authed(s.unlinkBgm))
+	mux.Handle("GET /api/v1/bangumi/collections", s.authed(s.bgmCollections))
 	mux.Handle("GET /api/v1/presence", s.authed(s.presenceInfo))
 	mux.Handle("PUT /api/v1/presence/players/{pid}", s.authed(s.reportPlayer))
 	mux.Handle("DELETE /api/v1/presence/players/{pid}", s.authed(s.removePlayer))

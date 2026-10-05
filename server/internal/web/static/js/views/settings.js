@@ -7,6 +7,7 @@ import { showShortcuts } from '../shortcuts.js';
 import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { fromAgent } from '../presence.js';
 import { DiscordSettings } from './discord.js';
+import { BangumiAccount } from './bangumi.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
@@ -724,6 +725,7 @@ function SettingsPage({ first, onLogout }) {
     <div class="card pad"><${EffectsPanel} /></div>
     <${Appearance} />
     <${DiscordSettings} />
+    <${BangumiAccount} />
     <${StatsTimeZone} />
     <${DownloadSettings} conf=${conf} />
     <h2 class="section-title">服務</h2>

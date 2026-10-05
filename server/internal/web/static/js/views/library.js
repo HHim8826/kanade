@@ -8,7 +8,8 @@ import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, h
 import { FavoritesTab, PlaylistsTab } from './collections.js';
 import { AlbumActions, Categorize, SongActions, editSections } from './batch.js';
 import { CategoriesTab } from './categories.js';
-import { WorkGrid, WorkImage, WorksTab, linkWorks, trackWorks, useTags } from './works.js';
+import { WorkGrid, WorkImage, WorksTab, bindSubject, linkWorks, trackWorks, useTags } from './works.js';
+import { CollectionsTab, SubjectRow } from './bangumi.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { viewCover } from './coverview.js';
@@ -141,7 +142,8 @@ export function Home() {
   </section>`;
 }
 
-const tabs = [['albums', '專輯'], ['categories', '分類'], ['works', '作品'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏']];
+const tabs = [['albums', '專輯'], ['categories', '分類'], ['works', '作品'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏'],
+  ['bangumi', 'Bangumi']];
 const tabURL = { playlists: '/playlists', favorites: '/favorites', categories: '/categories', works: '/works' };
 
 const PAGE = 200;
@@ -169,8 +171,9 @@ export function Library({ tab = 'albums', filter = '' }) {
   const rev = useLibRev();
   const paged = !tabURL[tab];
   if (tab !== 'tracks' || !trackFilters.some(([k]) => k === filter)) filter = '';
+  const selfLoaded = tab === 'bangumi'; // loads its own
   const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? '&filter=' + filter : ''}`;
-  const data = useLoad(() => get(base), [base], rev);
+  const data = useLoad(() => (selfLoaded ? Promise.resolve(null) : get(base)), [base], rev);
   // Later pages, for this tab, filter and library version only (review #9).
   const key = `${base}:${rev}`;
   const [more, setMore] = useState({ key: null, pages: [], done: false, busy: false });
@@ -223,6 +226,7 @@ export function Library({ tab = 'albums', filter = '' }) {
     ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
     ${data.data && tab === 'categories' && html`<${CategoriesTab} data=${data.data} />`}
     ${data.data && tab === 'works' && html`<${WorksTab} data=${data.data} />`}
+    ${selfLoaded && html`<${CollectionsTab} />`}
     ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}
       items=${tab === 'albums' ? list : list.map(fromTrack)}>
       ${tab === 'albums' ? html`<${AlbumActions} sel=${sel} />` : html`<${SongActions} sel=${sel} />`}
@@ -269,6 +273,7 @@ export function Album({ id }) {
     a.entries.length > 1 && { icon: 'split', label: '拆分…', onClick: () => splitAlbum(a) },
     { icon: 'order', label: '區段名稱…', onClick: () => editSections(a) },
     { icon: 'work', label: '關聯 Bangumi 作品…', onClick: () => linkWorks(a) },
+    { icon: 'note', label: a.subject ? 'Bangumi 條目…' : '綁定 Bangumi 條目…', onClick: () => bindSubject(a) },
     a.original && { icon: 'restore', label: '恢復原標籤…', onClick: () => restoreAlbum(a) },
     { icon: 'delete', label: '移除專輯…', onClick: () => removeAlbum(a) },
   ]);
@@ -295,6 +300,7 @@ export function Album({ id }) {
           <button class="chip ghost" onClick=${() => linkWorks(a)}>
             <${Icon} name=${a.works && a.works.length ? 'edit' : 'work'} size=${16} />${a.works && a.works.length ? '作品' : '關聯作品'}</button>
         </div>
+        <${SubjectRow} album=${a} />
         <div class="actions">
           <button class="btn filled" onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放</button>
           <button class="btn tonal" onClick=${() => playQueue(shuffled(items), 0)}><${Icon} name="shuffle" />隨機播放</button>

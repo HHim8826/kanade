@@ -95,6 +95,17 @@ type Subject struct {
 		Total int     `json:"total"`
 		Score float64 `json:"score"`
 	} `json:"rating"`
+	// In a collection's subject (a slim one) these stand for the rating and the summary.
+	Score        float64 `json:"score"`
+	Rank         int     `json:"rank"`
+	ShortSummary string  `json:"short_summary"`
+	Tags         []Tag   `json:"tags"` // the most used, first
+}
+
+// Tag is a tag people put on a subject, and how many did.
+type Tag struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
 }
 
 // Image is the subject's picture, at the largest size Bangumi has; empty when it has none.
@@ -298,4 +309,249 @@ func Ref(s string) (int64, bool) {
 	}
 	id, err := strconv.ParseInt(s, 10, 64)
 	return id, err == nil && id > 0 && id < 1<<40
+}
+
+// ---- the user's own account (OAuth) and collections ----
+
+// Collection types, as Bangumi numbers them (for music: 想聽, 聽過, 在聽, 擱置, 拋棄).
+const (
+	Wish    = 1
+	Done    = 2
+	Doing   = 3
+	OnHold  = 4
+	Dropped = 5
+)
+
+// ErrAuth is a link Bangumi no longer accepts: it must be made again.
+var ErrAuth = errors.New("Bangumi no longer accepts this link")
+
+// App is the Bangumi application an account is linked with.
+type App struct {
+	ID, Secret, RedirectURI string
+}
+
+func (a App) Ready() bool { return a.ID != "" && a.Secret != "" && a.RedirectURI != "" }
+
+type Token struct {
+	Access, Refresh string
+	Expires         time.Time
+	UserID          int64
+}
+
+// AuthorizeURL is where the person agrees to the link.
+func (c *Client) AuthorizeURL(app App, state string) string {
+	q := url.Values{"client_id": {app.ID}, "response_type": {"code"}, "redirect_uri": {app.RedirectURI}, "state": {state}}
+	return c.Site + "/oauth/authorize?" + q.Encode()
+}
+
+func (c *Client) token(ctx context.Context, app App, form url.Values) (*Token, error) {
+	form.Set("client_id", app.ID)
+	form.Set("client_secret", app.Secret)
+	form.Set("redirect_uri", app.RedirectURI)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.Site+"/oauth/access_token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", c.ua)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%w (%v)", ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	var r struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		ExpiresIn    int64  `json:"expires_in"`
+		UserID       any    `json:"user_id"`
+		Error        string `json:"error"`
+		Description  string `json:"error_description"`
+	}
+	json.Unmarshal(body, &r)
+	switch {
+	case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnauthorized:
+		return nil, fmt.Errorf("%w: %s %s", ErrAuth, r.Error, r.Description)
+	case resp.StatusCode != http.StatusOK || r.AccessToken == "":
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrUnavailable, resp.StatusCode)
+	}
+	t := &Token{Access: r.AccessToken, Refresh: r.RefreshToken, Expires: time.Now().Add(time.Duration(r.ExpiresIn) * time.Second)}
+	switch v := r.UserID.(type) { // a number, or a string of one
+	case float64:
+		t.UserID = int64(v)
+	case string:
+		t.UserID, _ = strconv.ParseInt(v, 10, 64)
+	}
+	return t, nil
+}
+
+// Exchange trades the code Bangumi sent back for tokens.
+func (c *Client) Exchange(ctx context.Context, app App, code string) (*Token, error) {
+	return c.token(ctx, app, url.Values{"grant_type": {"authorization_code"}, "code": {code}})
+}
+
+// Refresh renews the tokens before they expire.
+func (c *Client) Refresh(ctx context.Context, app App, refresh string) (*Token, error) {
+	return c.token(ctx, app, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}})
+}
+
+// authed asks the API as the linked person: never cached, never spaced with others' requests
+// beyond the usual gap.
+func (c *Client) authed(ctx context.Context, method, rawURL, access string, body any) ([]byte, int, error) {
+	if err := c.wait(ctx); err != nil {
+		return nil, 0, err
+	}
+	var rd io.Reader
+	if body != nil {
+		b, _ := json.Marshal(body)
+		rd = bytes.NewReader(b)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, rd)
+	if err != nil {
+		return nil, 0, err
+	}
+	req.Header.Set("User-Agent", c.ua)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", "Bearer "+access)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		return nil, 0, fmt.Errorf("%w (%v)", ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxAnswer+1))
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("%w (%v)", ErrUnavailable, err)
+	}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return nil, resp.StatusCode, ErrAuth
+	case resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests:
+		return nil, resp.StatusCode, fmt.Errorf("%w (HTTP %d)", ErrUnavailable, resp.StatusCode)
+	}
+	return data, resp.StatusCode, nil
+}
+
+// Me is the linked person.
+type Me struct {
+	ID       int64  `json:"id"`
+	Username string `json:"username"`
+	Nickname string `json:"nickname"`
+}
+
+func (c *Client) Me(ctx context.Context, access string) (*Me, error) {
+	data, code, err := c.authed(ctx, http.MethodGet, c.Base+"/v0/me", access, nil)
+	if err != nil {
+		return nil, err
+	}
+	var m Me
+	if code != http.StatusOK || json.Unmarshal(data, &m) != nil || m.Username == "" {
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrUnavailable, code)
+	}
+	return &m, nil
+}
+
+// Collection is a person's collecting of a subject.
+type Collection struct {
+	SubjectID int64    `json:"subject_id"`
+	Type      int      `json:"type"`
+	Rate      int      `json:"rate"`
+	Comment   string   `json:"comment"`
+	Private   bool     `json:"private"`
+	Tags      []string `json:"tags"`
+	UpdatedAt string   `json:"updated_at"`
+	Subject   *Subject `json:"subject,omitempty"`
+}
+
+// Collection is how username collected a subject; nil when they have not.
+func (c *Client) Collection(ctx context.Context, access, username string, subject int64) (*Collection, error) {
+	data, code, err := c.authed(ctx, http.MethodGet, fmt.Sprintf("%s/v0/users/%s/collections/%d", c.Base, url.PathEscape(username), subject), access, nil)
+	if err != nil {
+		return nil, err
+	}
+	if code == http.StatusNotFound {
+		return nil, nil
+	}
+	var col Collection
+	if code != http.StatusOK || json.Unmarshal(data, &col) != nil {
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrUnavailable, code)
+	}
+	if col.Tags == nil {
+		col.Tags = []string{}
+	}
+	return &col, nil
+}
+
+// CollectionChange is what to set of a collection; nil fields stay as they are.
+type CollectionChange struct {
+	Type    *int      `json:"type,omitempty"`
+	Rate    *int      `json:"rate,omitempty"`
+	Comment *string   `json:"comment,omitempty"`
+	Private *bool     `json:"private,omitempty"`
+	Tags    *[]string `json:"tags,omitempty"`
+}
+
+// ErrRefused is Bangumi refusing a change, with why.
+type ErrRefused struct{ Message string }
+
+func (e *ErrRefused) Error() string { return "Bangumi refused the change: " + e.Message }
+
+// SetCollection collects a subject, or changes how it is collected.
+func (c *Client) SetCollection(ctx context.Context, access string, subject int64, ch CollectionChange) error {
+	data, code, err := c.authed(ctx, http.MethodPost, fmt.Sprintf("%s/v0/users/-/collections/%d", c.Base, subject), access, ch)
+	if err != nil {
+		return err
+	}
+	if code == http.StatusNoContent || code == http.StatusOK || code == http.StatusAccepted {
+		return nil
+	}
+	var e struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}
+	json.Unmarshal(data, &e)
+	return &ErrRefused{Message: strings.TrimSpace(e.Title + " " + e.Description)}
+}
+
+// CollectionPage is a page of a person's collections.
+type CollectionPage struct {
+	Total int          `json:"total"`
+	Data  []Collection `json:"data"`
+}
+
+// Collections are username's collections of subjects of a type (0: all), of a collection type (0:
+// all), from offset.
+func (c *Client) Collections(ctx context.Context, access, username string, subjectType, collectionType, limit, offset int) (*CollectionPage, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}, "offset": {strconv.Itoa(offset)}}
+	if subjectType > 0 {
+		q.Set("subject_type", strconv.Itoa(subjectType))
+	}
+	if collectionType > 0 {
+		q.Set("type", strconv.Itoa(collectionType))
+	}
+	data, code, err := c.authed(ctx, http.MethodGet, fmt.Sprintf("%s/v0/users/%s/collections?%s", c.Base, url.PathEscape(username), q.Encode()), access, nil)
+	if err != nil {
+		return nil, err
+	}
+	var p CollectionPage
+	if code != http.StatusOK || json.Unmarshal(data, &p) != nil {
+		return nil, fmt.Errorf("%w (HTTP %d)", ErrUnavailable, code)
+	}
+	for i := range p.Data {
+		if p.Data[i].Tags == nil {
+			p.Data[i].Tags = []string{}
+		}
+		if p.Data[i].Subject != nil {
+			c.seen(p.Data[i].Subject)
+		}
+	}
+	if p.Data == nil {
+		p.Data = []Collection{}
+	}
+	return &p, nil
 }

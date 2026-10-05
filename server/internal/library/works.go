@@ -569,3 +569,138 @@ func (s *Store) worksLabel(ctx context.Context, target string, v *string) string
 	}
 	return strings.Join(parts, "、")
 }
+
+// ---- an album's own entry (review #94: Bangumi's music subjects) ----
+
+// AlbumSubject is the work (a music subject) an album is in Bangumi as, or nil.
+func (s *Store) AlbumSubject(ctx context.Context, album int64) (*Work, error) {
+	list, err := scanWorks(s.db.QueryContext(ctx, `SELECT `+workCols+` FROM album_subjects a JOIN works w ON w.id = a.work_id WHERE a.album_id = ?`, album))
+	if err != nil || len(list) == 0 {
+		return nil, err
+	}
+	return &list[0], nil
+}
+
+// AlbumsAsSubjects are the albums in the lists that are these Bangumi subjects (by their number),
+// by subject.
+func (s *Store) AlbumsAsSubjects(ctx context.Context, sourceIDs []string) (map[string][]AlbumSummary, error) {
+	out := map[string][]AlbumSummary{}
+	if len(sourceIDs) == 0 {
+		return out, nil
+	}
+	args := make([]any, len(sourceIDs))
+	for i, v := range sourceIDs {
+		args[i] = v
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT w.source_id, a.album_id FROM album_subjects a JOIN works w ON w.id = a.work_id
+		WHERE w.source = 'bangumi' AND w.source_id IN (?`+strings.Repeat(", ?", len(args)-1)+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	bySubject := map[int64]string{}
+	var ids []any
+	for rows.Next() {
+		var sid string
+		var album int64
+		if err := rows.Scan(&sid, &album); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		bySubject[album] = sid
+		ids = append(ids, album)
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return out, nil
+	}
+	albums, err := scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id IN (?`+strings.Repeat(", ?", len(ids)-1)+`) GROUP BY al.id `+listed, ids...))
+	if err != nil {
+		return nil, err
+	}
+	for _, a := range albums {
+		out[bySubject[a.ID]] = append(out[bySubject[a.ID]], a)
+	}
+	return out, nil
+}
+
+func (e *editor) currentSubject(album int64) (*string, bool, error) {
+	var one int
+	if err := e.tx.QueryRowContext(e.ctx, `SELECT 1 FROM albums WHERE id = ?`, album).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		return nil, false, nil
+	} else if err != nil {
+		return nil, false, err
+	}
+	var w int64
+	err := e.tx.QueryRowContext(e.ctx, `SELECT work_id FROM album_subjects WHERE album_id = ?`, album).Scan(&w)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, true, nil
+	}
+	return num(w), err == nil, err
+}
+
+func (e *editor) writeSubject(album int64, v *string) error {
+	if _, err := e.tx.ExecContext(e.ctx, `DELETE FROM album_subjects WHERE album_id = ?`, album); err != nil || v == nil {
+		return err
+	}
+	w, _ := strconv.ParseInt(*v, 10, 64)
+	_, err := e.tx.ExecContext(e.ctx, `INSERT INTO album_subjects (album_id, work_id, added_at) SELECT ?, id, ? FROM works WHERE id = ?`, album, db.Now(), w)
+	return err
+}
+
+// SetAlbumSubject makes an album this work (a music subject) in Bangumi, or none (work 0), as one
+// edit.
+func (s *Store) SetAlbumSubject(ctx context.Context, album, work int64) (int64, error) {
+	title, err := s.name(ctx, "album", album)
+	if err != nil {
+		return 0, err
+	}
+	summary := fmt.Sprintf("解除「%s」的 Bangumi 條目", title)
+	var v *string
+	if work > 0 {
+		name, err := s.workName(ctx, work)
+		if err != nil {
+			return 0, err
+		}
+		summary, v = fmt.Sprintf("將「%s」綁定 Bangumi 條目「%s」", title, name), num(work)
+	}
+	return s.edit(ctx, SourceUser, summary, func(e *editor) error {
+		cur, ok, err := e.currentSubject(album)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: album %d", ErrNotFound, album)
+		}
+		if same(cur, v) {
+			return nil
+		}
+		if err := e.writeSubject(album, v); err != nil {
+			return err
+		}
+		return e.record("album", album, "subject", cur, v)
+	})
+}
+
+// moveSubject gives an album merged away its Bangumi entry, when the other has none.
+func (e *editor) moveSubject(from, to int64) error {
+	moving, _, err := e.currentSubject(from)
+	if err != nil || moving == nil {
+		return err
+	}
+	have, _, err := e.currentSubject(to)
+	if err != nil {
+		return err
+	}
+	if have == nil {
+		if err := e.writeSubject(to, moving); err != nil {
+			return err
+		}
+		if err := e.record("album", to, "subject", nil, moving); err != nil {
+			return err
+		}
+	}
+	if err := e.writeSubject(from, nil); err != nil {
+		return err
+	}
+	return e.record("album", from, "subject", moving, nil)
+}

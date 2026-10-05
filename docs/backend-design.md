@@ -570,6 +570,15 @@ DIR/
 - 讀取：專輯頁、作品頁（`#/work/{id}`）、曲庫「作品」分頁、搜尋結果都只讀資料庫，不等 Bangumi；作品頁發現資料超過 30 天時在背景重新取得。Bangumi 連不上時搜尋與更新回 503（附 Retry-After），已存過的作品照樣能關聯。圖片由伺服器代抓並存進封面縮圖快取（`bgm-` 開頭，共用 256 MB 上限），網頁的 CSP 不需開外部圖片。
 - API：`GET /bangumi/search?q=&types=&offset=&album=`、`GET /bangumi/subjects/{sid}/image`、`GET /works`、`GET /works/{id}`、`GET /works/{id}/image`、`POST /works/{id}/refresh`、`POST /albums/{id}/works`（`source_id`、`replace`）、`DELETE /albums/{id}/works/{work}`、`PUT /tracks/{id}/works`。
 
+### Bangumi 音樂條目與收藏（2026-10-05，#94，遷移 37：`album_subjects`、`bangumi_links`）
+
+- 專輯自己的 Bangumi 條目（音樂類，type 3）：和作品分開，一張專輯一個，存成 `works` 的一列並以 `album_subjects` 對應；綁定、改綁、解除走修改紀錄（專輯的 `subject` 欄位），可以撤回；合併時若目標沒有條目就移過去。綁定對話框和作品共用，預設只搜音樂類，非音樂條目不能綁成專輯條目（請用「關聯作品」）。
+- Bangumi 帳號：設定頁填 Bangumi 應用程式（bgm.tv/dev/app）的 App ID 與 App Secret（Secret 只寫入），回調地址 `<public_url>/oauth/bangumi/callback`；OAuth 授權碼流程（`bgm.tv/oauth/authorize`、`/oauth/access_token`），token 一週有效，剩不到一天時更新；被拒（401 或更新失敗）時標成失效，請使用者重新連結。Bangumi 沒有撤銷授權的 API，解除連結只刪除 Kanade 這邊的 token。
+- 收藏：專輯頁讀取時向 Bangumi 查（`GET /v0/users/{username}/collections/{id}`），附上條目的常用標籤與自己在音樂收藏用過的標籤（掃最多 500 筆收藏，快取 10 分鐘）；只有按「儲存到 Bangumi」才寫入（`POST /v0/users/-/collections/{id}`：狀態 1–5、評分 0–10、吐槽、僅自己可見、最多 10 個不含空白的標籤）。播放、瀏覽都不會改動 Bangumi。
+- 我的收藏清單：曲庫「Bangumi」分頁依狀態列出自己的音樂收藏（每頁 30），標出綁定了該條目的曲庫專輯；沒有的可以直接到 RSS 資源搜尋。不依名稱自動配對。
+- API：`PUT|DELETE /albums/{id}/subject`、`GET|PUT /albums/{id}/collection`、`GET /bangumi/account`、`PUT /bangumi/app`、`POST|DELETE /bangumi/link`、`GET /bangumi/collections?type=&offset=`；`GET /bangumi/search` 的候選多一個 `subject`（是否為這張專輯的條目）。
+- 驗證：Go 測試用假的 Bangumi（OAuth、me、單一收藏讀寫、收藏清單）驗證連結、state、非音樂條目被拒、讀取不寫入、寫入內容、標籤檢查、清單對應曲庫、撤回綁定、授權失效；Chromium 用真的 Bangumi 公開 API 測綁定，收藏讀寫以模擬的伺服器回應測介面與送出內容。沒有用真的 Bangumi 帳號實測寫入。
+
 ### Discord 狀態（2026-10-05，#135，遷移 36：`discord_links`）
 
 - 做法：由伺服器回報，顯示在使用者自己的 Discord 個人狀態（像 Spotify）。使用者用 Discord OAuth 連結一次，授權範圍是 `openid sdk.social_layer_presence identify`；`sdk.social_layer_presence` 是 Discord Social SDK 的權限，應用程式要先在 Developer Portal 開啟 Social SDK（填 Getting Started 表單），但 Kanade 不用 SDK 程式本身：`internal/discord` 用這個 OAuth token 連 Discord Gateway（`wss://gateway.discord.gg/?v=10`，IDENTIFY 的 token 為 `Bearer <access token>`、intents 0），READY 後用 op 3 設定 activity（type 2 Listening、name Kanade、details 歌名、state 歌手、assets 圖示與專輯、timestamps 進度）。這一步不在 Discord 公開文件裡（是 Social SDK 內部的做法，開源的 Discord-Social-RPC 也這樣做），Discord 可能改變；不使用帳號 token，不是 self-bot。

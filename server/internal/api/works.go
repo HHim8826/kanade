@@ -40,6 +40,7 @@ type candidate struct {
 	NSFW     bool    `json:"nsfw,omitempty"`
 	WorkID   int64   `json:"work_id,omitempty"` // kept as this work already
 	Linked   bool    `json:"linked"`            // the album asked about is linked to it
+	Subject  bool    `json:"subject"`           // the album asked about is this subject
 	ByID     bool    `json:"by_id,omitempty"`   // found by the number asked for, not by name
 }
 
@@ -120,7 +121,13 @@ func (s *Server) bangumiSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	linked := map[int64]bool{}
+	var own *library.Work
 	if album > 0 {
+		var err error
+		if own, err = s.lib.AlbumSubject(ctx, album); err != nil {
+			s.internal(w, r, err)
+			return
+		}
 		works, err := s.lib.AlbumWorks(ctx, album)
 		if err != nil {
 			s.internal(w, r, err)
@@ -143,6 +150,7 @@ func (s *Server) bangumiSearch(w http.ResponseWriter, r *http.Request) {
 		} else if wk != nil {
 			c.WorkID, c.Linked = wk.ID, linked[wk.ID]
 		}
+		c.Subject = own != nil && own.SourceID == c.SourceID
 		out = append(out, c)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"total": total, "offset": offset, "page_size": bangumi.PageSize, "subjects": out})

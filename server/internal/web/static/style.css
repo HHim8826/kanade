@@ -937,3 +937,27 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .command { display: flex; align-items: center; gap: 8px; margin: 6px 0; padding: 4px 4px 4px 12px; border-radius: var(--radius-s);
   background: var(--surface-container-high); }
 .command code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }
+/* Bangumi collections (review #94) */
+.album-categories .chip.on { background: var(--secondary-container); color: var(--on-secondary-container); }
+.collection-head { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+.collection-head a.title { color: inherit; font-weight: 500; }
+.collection-type { margin: 4px 0 16px; }
+.stars { display: flex; align-items: center; flex-wrap: wrap; gap: 2px; }
+.stars button { border: 0; background: none; padding: 2px; cursor: pointer; font-size: 26px; line-height: 1; color: var(--outline-variant); }
+.stars button.on { color: #f5a623; }
+.stars .star-clear { display: grid; place-items: center; width: 30px; height: 30px; color: var(--on-surface-variant); }
+.stars .sub { margin-left: 8px; }
+.tag-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -8px 0 12px; }
+.tag-picks .sub { min-width: 4.5em; }
+.check-row { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; cursor: pointer; }
+.check-row input { width: 18px; height: 18px; margin: 0; }
+.collections li { flex-wrap: nowrap; gap: 12px; padding: 10px 0; }
+.collections a.title { color: inherit; }
+.collections .track-text .sub { white-space: normal; }
+.collection-albums { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 4px; max-width: 45%; }
+.collection-albums .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; text-decoration: none; color: var(--on-surface); }
+@media (max-width: 600px) { .collections li { flex-wrap: wrap; } .collection-albums { max-width: none; justify-content: flex-start; } }
+.seg.collection-type { display: grid; grid-template-columns: repeat(5, 1fr); width: 100%; }
+.seg.collection-type label { justify-content: center; padding: 8px 4px; }
+.seg.collection-type label + label { border-left: 1px solid var(--outline); }
+@media (max-width: 480px) { .stars button { font-size: 21px; padding: 1px; } .stars .star-clear { width: 24px; height: 24px; } }
