@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,5 +76,35 @@ func TestLoginRefusesOtherSites(t *testing.T) {
 	// An app sends no Origin and asks for the token.
 	if rec := send("/api/v1/login", `{"username":"admin","password":"correct horse battery"}`, nil); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "token") {
 		t.Fatalf("app login %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Through a proxy on this machine that passes on the client's own headers (review #148): an
+// address made up in each request is no new client, and passkey requests are never used up.
+func TestSpoofedAddressesAreOneClient(t *testing.T) {
+	s, h := newTestServer(t)
+	if err := s.auth.CreateUser(context.Background(), "admin", "correct horse battery", false); err != nil {
+		t.Fatal(err)
+	}
+	send := func(path, body string, i int) int {
+		req := httptest.NewRequest("POST", path, strings.NewReader(body))
+		req.RemoteAddr = "127.0.0.1:40000"
+		req.Header.Set("CF-Connecting-IP", fmt.Sprintf("192.0.2.%d", i))
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("198.51.100.%d, 127.0.0.1", i))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	codes := []int{}
+	for i := range 7 {
+		codes = append(codes, send("/api/v1/login", `{"username":"admin","password":"wrong password!"}`, i))
+	}
+	if codes[5] != http.StatusTooManyRequests || codes[6] != http.StatusTooManyRequests {
+		t.Fatalf("rotating addresses: %v", codes)
+	}
+	for i := range 300 {
+		if code := send("/api/v1/passkeys/login/options", `{}`, i); code != http.StatusOK {
+			t.Fatalf("passkey request %d: %d", i, code)
+		}
 	}
 }

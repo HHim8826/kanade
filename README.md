@@ -49,11 +49,11 @@ Afterwards `sudo kanade-manager` opens the same menu:
 | `kanade-manager status` / `start` / `stop` / `restart` / `log [-f]` | Status also says whether Kanade starts at boot. |
 | `kanade-manager autostart [on\|off]` | Start at boot or not (systemd, OpenRC, SysV or cron, whichever the machine uses); without an argument it shows the setting and asks. |
 | `kanade-manager password` | Reset a password (random or your own); every login of that account ends. |
-| `kanade-manager config` | Change the public address and the listen address. |
+| `kanade-manager config` | Change the public address, the listen address, and the proxy in front (Cloudflare, or Nginx or Caddy on the machine): only the proxy named there is believed about a client's address, which the login throttle goes by. |
 | `kanade-manager backup` / `restore` | Backups go to `data/backups/`; a restore saves the current database first. |
 | `kanade-manager tools` | Install aria2 and FFmpeg later, when they were skipped or the packages had none. |
 
-Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=https://music.example.com bash kanade.sh install`; the header of `scripts/kanade.sh` lists the other settings, such as `KANADE_INIT=systemd|openrc|sysv|none`.
+Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=https://music.example.com KANADE_TRUSTED_PROXY=cloudflare bash kanade.sh install`; the header of `scripts/kanade.sh` lists the other settings, such as `KANADE_INIT=systemd|openrc|sysv|none`.
 
 **Connecting Google Drive.** Kanade reaches Drive with your own OAuth client from Google Cloud; the settings page walks through creating it and shows the redirect URI to register. Google sends the browser back only to https domains (or localhost): behind a domain with https (Cloudflare Tunnel, Caddy, Nginx) it returns to Kanade by itself; reached by an IP address, Kanade registers `http://localhost/oauth/google/callback` and you paste the address the browser ends on. Passkeys need https in any case, and over plain http the password is sent unencrypted.
 

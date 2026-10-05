@@ -21,6 +21,7 @@
 #   KANADE_YES=1                 全部採用預設或下列設定
 #   KANADE_PUBLIC_URL=https://…  公開網址
 #   KANADE_LISTEN=127.0.0.1:8080 監聽位址
+#   KANADE_TRUSTED_PROXY=…       前面的代理：cloudflare、loopback（本機的 Nginx、Caddy）或代理的位址
 #   KANADE_ADMIN=admin           管理員帳號
 #   KANADE_GH_PROXY=https://…/   GitHub 下載代理（結尾要有 /）
 #   KANADE_VERSION=v1.2.3        指定版本（預設最新）
@@ -426,6 +427,29 @@ installed_version() {
 # setting KEY: from the data directory's config.json.
 setting() {
   kanade config 2>/dev/null | sed -n "s/^ *\"$1\": \"\(.*\)\",\{0,1\}$/\1/p"
+}
+
+# ask_trusted_proxy: which proxy in front tells a client's address, for the login throttle (the
+# trusted_proxy setting); prints it.
+ask_trusted_proxy() {
+  if [ -n "${KANADE_YES:-}" ]; then
+    printf '%s' "${KANADE_TRUSTED_PROXY:-}"
+    return 0
+  fi
+  {
+    echo
+    info "前面是哪一種代理？"
+    echo "  Kanade 用它分辨登入來自哪裡：選錯時，別人可以假冒來源不斷猜密碼；不選時，所有人算同一個來源，"
+    echo "  一個人猜錯幾次密碼就會讓所有人 15 分鐘內無法用密碼登入。"
+    echo "  1) Cloudflare：Cloudflare Tunnel，或經 Cloudflare 代理（橘色雲朵）到這台的 Nginx、Caddy"
+    echo "  2) 這台機器上的 Nginx、Caddy 等（前面沒有 Cloudflare）"
+    echo "  3) 其他或不確定（之後可用 kanade-manager config 設定）"
+  } >&2
+  case "$(ask "請選擇" "3")" in
+  1) printf 'cloudflare' ;;
+  2) printf 'loopback' ;;
+  *) printf '' ;;
+  esac
 }
 
 local_url() {
@@ -888,7 +912,7 @@ do_install() {
   BIN="$INSTALL_DIR/kanade"
 
   # How it is reached decides the address it listens on and the address it calls itself.
-  local listen public port mode
+  local listen public port mode trusted="${KANADE_TRUSTED_PROXY:-}"
   echo
   info "Kanade 怎麼被連到？"
   echo "  1) 透過網域：Cloudflare Tunnel、Nginx、Caddy 等反向代理（建議）"
@@ -912,6 +936,7 @@ do_install() {
       public=$(ask "公開網址（例如 https://music.example.com）" "")
       [ -n "${KANADE_YES:-}" ] && [ -z "$public" ] && die "請用 KANADE_PUBLIC_URL 指定公開網址。"
     done
+    trusted=$(ask_trusted_proxy)
   fi
   if (exec 3<>"/dev/tcp/127.0.0.1/${listen##*:}") 2>/dev/null; then
     die "連接埠 ${listen##*:} 已被其他程式使用，請換一個。"
@@ -948,6 +973,7 @@ do_install() {
 
   kanade config set listen "$listen" >/dev/null || die "設定監聽位址失敗。"
   kanade config set public_url "$public" >/dev/null || die "設定公開網址失敗。"
+  kanade config set trusted_proxy "$trusted" >/dev/null || die "設定代理失敗。"
   # Installed again where the data was kept: its accounts stay.
   local password=""
   if [ -s "$DATA_DIR/db.sqlite" ]; then
@@ -1037,6 +1063,19 @@ update_manager() {
   install_manager "$tmp/kanade.sh" && info "已更新 kanade-manager（Kanade 沒有變動，服務沒有重新啟動）。"
 }
 
+# proxy_hint: an installation behind a proxy on this machine that does not say which one counts
+# every client as one for the login throttle (the setting is new in 0.1.24, review #148).
+proxy_hint() {
+  local listen
+  listen=$(setting listen)
+  case "${listen%:*}" in
+  127.* | localhost | "[::1]") ;;
+  *) return 0 ;;
+  esac
+  [ -n "$(setting trusted_proxy)" ] && return 0
+  warn "沒有設定前面的代理：所有登入都算同一個來源，一個人猜錯幾次密碼就會擋住所有人。請執行 kanade-manager config 選「修改信任的代理」。"
+}
+
 do_update() {
   check_root
   require_installed
@@ -1101,6 +1140,7 @@ do_update() {
   if service_start && wait_up && serving && [ "$(installed_version)" = "$latest" ]; then
     rm -f "$BIN.old"
     info "已更新到 $latest。"
+    proxy_hint
     if [ ! -s "$tmp/kanade.sh" ]; then
       warn "無法下載這個版本的管理腳本，kanade-manager 沒有更新；之後可再執行 kanade-manager update。"
     elif ! install_manager "$tmp/kanade.sh"; then
@@ -1365,15 +1405,18 @@ do_config() {
   detect_init
   echo "公開網址：$(setting public_url)"
   echo "監聽：$(setting listen)"
+  echo "信任的代理：$(setting trusted_proxy | sed 's/^$/（無）/')"
   echo
   echo "  1) 修改公開網址"
   echo "  2) 修改監聽位址"
+  echo "  3) 修改信任的代理"
   echo "  0) 返回"
   local choice value key
   choice=$(ask "請選擇" "0")
   case "$choice" in
   1) key=public_url value=$(ask "新的公開網址（例如 https://music.example.com）" "$(setting public_url)") ;;
   2) key=listen value=$(ask "新的監聽位址（只給本機用 127.0.0.1:8080；對外 0.0.0.0:8080）" "$(setting listen)") ;;
+  3) key=trusted_proxy value=$(ask_trusted_proxy) ;;
   *) return 0 ;;
   esac
   kanade config set "$key" "$value" >/dev/null || return 1

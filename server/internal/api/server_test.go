@@ -108,15 +108,22 @@ func TestPublicPagesAndForgedCallback(t *testing.T) {
 	}
 }
 
-func TestClientIPTrustsProxyHeadersOnlyFromLoopback(t *testing.T) {
+// A proxy's headers are believed only as trusted_proxy says (review #148; the cases are in
+// clientip): by default the throttle sees the connection's address.
+func TestClientIPFollowsTrustedProxy(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("CF-Connecting-IP", "203.0.113.9")
 	r.RemoteAddr = "127.0.0.1:5000"
-	if got := clientIP(r); got != "203.0.113.9" {
-		t.Fatalf("via tunnel: %s", got)
+	s := New(Deps{Config: config.Config{}})
+	if got := s.clientIP(r); got != "127.0.0.1" {
+		t.Fatalf("no proxy set: %s", got)
+	}
+	s = New(Deps{Config: config.Config{TrustedProxy: "cloudflare"}})
+	if got := s.clientIP(r); got != "203.0.113.9" {
+		t.Fatalf("via the tunnel: %s", got)
 	}
 	r.RemoteAddr = "198.51.100.7:5000"
-	if got := clientIP(r); got != "198.51.100.7" {
+	if got := s.clientIP(r); got != "198.51.100.7" {
 		t.Fatalf("direct client spoofing the header: %s", got)
 	}
 }

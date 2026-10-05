@@ -48,11 +48,7 @@ func withPasskey(t *testing.T, s *Service, dev *webauthntest.Authenticator) {
 // answer is dev's answer to a new login challenge.
 func answer(t *testing.T, s *Service, dev *webauthntest.Authenticator) (cd, ad, sig []byte) {
 	t.Helper()
-	ch, err := s.LoginChallenge("1.1.1.1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return dev.Get(rp.ID, rp.Origin, ch)
+	return dev.Get(rp.ID, rp.Origin, s.LoginChallenge())
 }
 
 func TestSessionsEndAfterTheirLifetime(t *testing.T) {
@@ -111,7 +107,7 @@ func TestThrottleCountsChecksUnderWay(t *testing.T) {
 	}
 
 	// A right password is not a failure, and a check under way is held only while it runs.
-	done, err := s.attempt("7.7.7.7")
+	done, err := s.attempt("7.7.7.7", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +178,7 @@ func TestPasskeyChallenges(t *testing.T) {
 	if err := add(1, ch); !errors.Is(err, ErrPasskeyRequest) {
 		t.Fatalf("a request used by the try above: %v", err)
 	}
-	login, _ := s.LoginChallenge("1.1.1.1")
+	login := s.LoginChallenge()
 	if err := add(1, login); !errors.Is(err, ErrPasskeyRequest) {
 		t.Fatalf("a login challenge for adding: %v", err)
 	}

@@ -2,22 +2,24 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/binary"
 	"errors"
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/webauthn"
 )
 
 // Passkeys: an account can add passkeys (after typing its password) and then log in with one
-// instead of the password. Each request for a passkey gets a one-time challenge, kept here for
-// five minutes.
+// instead of the password. Each request for a passkey gets a one-time challenge, good for five
+// minutes. Those to add a passkey are kept here; those to log in are not (anyone can ask for
+// them, from any number of addresses, review #148): they carry when they expire and a MAC, and
+// only those used are remembered.
 
 type Passkey struct {
 	ID         int64  `json:"id"`
@@ -35,8 +37,8 @@ var (
 
 const (
 	challengeTTL  = 5 * time.Minute
-	maxChallenges = 256
-	maxPerClient  = 8 // pending requests from one address, so one client cannot crowd out the rest
+	maxChallenges = 256 // pending requests to add a passkey
+	maxPerClient  = 8   // of them from one address, so one client cannot crowd out the rest
 	maxPasskeys   = 20
 )
 
@@ -50,15 +52,51 @@ type challenge struct {
 	password string
 }
 
-// LoginChallenge makes a one-time challenge for logging in with a passkey, asked from clientIP.
-func (s *Service) LoginChallenge(clientIP string) ([]byte, error) {
-	return s.newChallenge(challenge{purpose: "login", client: clientIP})
+// LoginChallenge makes a one-time challenge for logging in with a passkey: 16 random bytes, when it
+// expires, and their MAC.
+func (s *Service) LoginChallenge() []byte {
+	raw := make([]byte, 16, 16+8+sha256.Size)
+	rand.Read(raw)
+	raw = binary.BigEndian.AppendUint64(raw, uint64(time.Now().Add(challengeTTL).Unix()))
+	return s.loginMAC(raw)
+}
+
+func (s *Service) loginMAC(raw []byte) []byte {
+	mac := hmac.New(sha256.New, s.key)
+	mac.Write([]byte("login"))
+	mac.Write(raw)
+	return mac.Sum(raw)
+}
+
+// loginChallengeOK reports whether ch is a login challenge made here that has not expired.
+func (s *Service) loginChallengeOK(ch []byte) bool {
+	if len(ch) != 16+8+sha256.Size || !hmac.Equal(s.loginMAC(ch[:24:24]), ch) {
+		return false
+	}
+	return time.Now().Unix() < int64(binary.BigEndian.Uint64(ch[16:24]))
+}
+
+// useLoginChallenge uses up a login challenge, once a passkey answered it: false if it was used.
+func (s *Service) useLoginChallenge(ch []byte) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for k, exp := range s.used {
+		if now.After(exp) {
+			delete(s.used, k)
+		}
+	}
+	if _, ok := s.used[string(ch)]; ok {
+		return false
+	}
+	s.used[string(ch)] = time.Unix(int64(binary.BigEndian.Uint64(ch[16:24])), 0)
+	return true
 }
 
 // RegisterChallenge confirms the account's password, then makes a one-time challenge for adding a
 // passkey to it. Wrong passwords count towards the login throttle.
 func (s *Service) RegisterChallenge(ctx context.Context, userID int64, password, clientIP string) (ch []byte, err error) {
-	done, err := s.attempt(clientIP)
+	done, err := s.attempt(clientIP, true)
 	if err != nil {
 		return nil, err
 	}
@@ -67,8 +105,8 @@ func (s *Service) RegisterChallenge(ctx context.Context, userID int64, password,
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
 		return nil, err
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-		return nil, ErrBadCredentials
+	if err := s.compare(ctx, []byte(hash), password); err != nil {
+		return nil, err
 	}
 	return s.newChallenge(challenge{purpose: "register", userID: userID, client: clientIP, password: hash})
 }
@@ -247,7 +285,7 @@ func (s *Service) DeletePasskey(ctx context.Context, userID, id int64) error {
 // Login with the password. Failures count towards the same throttle.
 func (s *Service) PasskeyLogin(ctx context.Context, rp webauthn.RP, credentialID, clientDataJSON, authenticatorData, signature,
 	userHandle []byte, deviceName, clientIP string) (token string, err error) {
-	done, err := s.attempt(clientIP)
+	done, err := s.attempt(clientIP, false)
 	if err != nil {
 		return "", err
 	}
@@ -272,7 +310,7 @@ func (s *Service) checkAssertion(ctx context.Context, rp webauthn.RP, credential
 	if err != nil {
 		return nil, err
 	}
-	if _, ok := s.takeChallenge(ch, "login"); !ok {
+	if !s.loginChallengeOK(ch) {
 		return nil, ErrPasskeyRequest
 	}
 	var a assertion
@@ -289,6 +327,9 @@ func (s *Service) checkAssertion(ctx context.Context, rp webauthn.RP, credential
 	}
 	if a.count, err = rp.Login(a.cred, ch, clientDataJSON, authenticatorData, signature); err != nil {
 		return nil, err
+	}
+	if !s.useLoginChallenge(ch) {
+		return nil, ErrPasskeyRequest
 	}
 	return &a, nil
 }

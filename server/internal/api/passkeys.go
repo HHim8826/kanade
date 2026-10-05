@@ -52,7 +52,7 @@ func (s *Server) passkeyError(w http.ResponseWriter, r *http.Request, err error)
 	case errors.Is(err, auth.ErrPasskeyExists):
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, auth.ErrPasskeyRequest), errors.Is(err, webauthn.ErrInvalid), errors.Is(err, webauthn.ErrCloned):
-		s.log.Warn("passkey refused", "path", r.URL.Path, "ip", clientIP(r), "err", err)
+		s.log.Warn("passkey refused", "path", r.URL.Path, "ip", s.clientIP(r), "err", err)
 		writeError(w, http.StatusUnauthorized, err)
 	default:
 		s.internal(w, r, err)
@@ -87,12 +87,7 @@ func (s *Server) passkeyLoginOptions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("passkeys need the site's https address"))
 		return
 	}
-	ch, err := s.auth.LoginChallenge(clientIP(r))
-	if err != nil {
-		s.passkeyError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"challenge": b64(ch), "rpId": rp.ID, "timeout": 300000,
+	writeJSON(w, http.StatusOK, map[string]any{"challenge": b64(s.auth.LoginChallenge()), "rpId": rp.ID, "timeout": 300000,
 		"userVerification": "required", "allowCredentials": []credRef{}})
 }
 
@@ -120,7 +115,7 @@ func (s *Server) passkeyLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token, err := s.auth.PasskeyLogin(r.Context(), rp, req.ID, req.ClientDataJSON, req.AuthenticatorData, req.Signature,
-		req.UserHandle, req.Device, clientIP(r))
+		req.UserHandle, req.Device, s.clientIP(r))
 	if err != nil {
 		s.passkeyError(w, r, err)
 		return
@@ -158,7 +153,7 @@ func (s *Server) passkeyOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := userID(r)
-	ch, err := s.auth.RegisterChallenge(r.Context(), uid, req.Password, clientIP(r))
+	ch, err := s.auth.RegisterChallenge(r.Context(), uid, req.Password, s.clientIP(r))
 	if err != nil {
 		s.passkeyError(w, r, err)
 		return

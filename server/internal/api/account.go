@@ -21,7 +21,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	err := s.auth.ChangePassword(r.Context(), userID(r), req.Current, req.Password, clientIP(r))
+	err := s.auth.ChangePassword(r.Context(), userID(r), req.Current, req.Password, s.clientIP(r))
 	switch {
 	case errors.Is(err, auth.ErrThrottled):
 		writeError(w, http.StatusTooManyRequests, err)

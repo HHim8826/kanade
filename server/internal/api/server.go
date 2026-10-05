@@ -12,15 +12,16 @@ import (
 	"html"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/auth"
+	"github.com/HHim8826/kanade/server/internal/clientip"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/diskguard"
 	"github.com/HHim8826/kanade/server/internal/downloader"
@@ -88,14 +89,18 @@ type Server struct {
 	disk      *diskguard.Guard
 	sync      *drivesync.Syncer
 	loudness  *loudness.Service
+	proxy     clientip.Policy
 	streamKey []byte
 	log       *slog.Logger
 	version   string
 	started   time.Time
+	unproxied sync.Once // the log said a proxy's headers are not believed
 }
 
+// New makes the server; d.Config.TrustedProxy was checked (clientip.Parse) by the caller.
 func New(d Deps) *Server {
-	return &Server{cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	proxy, _ := clientip.Parse(d.Config.TrustedProxy)
+	return &Server{proxy: proxy, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
@@ -322,21 +327,10 @@ func readJSON(r *http.Request, v any) error {
 	return nil
 }
 
-// clientIP trusts proxy headers only from loopback, i.e. the Cloudflare tunnel on this host.
-func clientIP(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		host = r.RemoteAddr
-	}
-	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-		if v := r.Header.Get("CF-Connecting-IP"); v != "" {
-			return v
-		}
-		if v := r.Header.Get("X-Forwarded-For"); v != "" {
-			return strings.TrimSpace(strings.Split(v, ",")[0])
-		}
-	}
-	return host
+// clientIP is the address r comes from: a proxy's forwarding headers are believed only as the
+// trusted_proxy setting says (review #148).
+func (s *Server) clientIP(r *http.Request) string {
+	return s.proxy.Of(r)
 }
 
 // sessionCookie carries the login token for the web client. It is HttpOnly, so page scripts
@@ -435,8 +429,15 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 		t0 := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
+		if !s.proxy.Set() && clientip.Forwarded(r) {
+			s.unproxied.Do(func() {
+				s.log.Warn("requests come through a proxy on this machine, whose forwarding headers are not believed: every client " +
+					"counts as this machine for the login throttle; say which proxy it is with `kanade config set trusted_proxy " +
+					"cloudflare` (a Cloudflare Tunnel) or `loopback` (Caddy, Nginx), then restart")
+			})
+		}
 		s.log.Info("http", "method", r.Method, "path", r.URL.Path, "status", rec.status,
-			"ms", time.Since(t0).Milliseconds(), "ip", clientIP(r), "ua", r.UserAgent())
+			"ms", time.Since(t0).Milliseconds(), "ip", s.clientIP(r), "ua", r.UserAgent())
 	})
 }
 
@@ -505,7 +506,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !cookieLogin(w, r, req.Cookie) {
 		return
 	}
-	token, err := s.auth.Login(r.Context(), req.Username, req.Password, req.Device, clientIP(r))
+	token, err := s.auth.Login(r.Context(), req.Username, req.Password, req.Device, s.clientIP(r))
 	switch {
 	case errors.Is(err, auth.ErrThrottled):
 		writeError(w, http.StatusTooManyRequests, err)

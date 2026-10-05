@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/HHim8826/kanade/server/internal/clientip"
 )
 
 type Config struct {
@@ -17,6 +19,8 @@ type Config struct {
 	Listen    string // e.g. 127.0.0.1:8080; the tunnel or a TLS front end faces the internet
 	PublicURL string // e.g. https://music.example.com; used for the OAuth redirect URI and passkeys
 	Aria2Path string // path to the aria2c binary
+	// TrustedProxy says whose forwarding headers tell a client's address (clientip.Parse).
+	TrustedProxy string
 }
 
 // File is the settings kept in the data directory (config.json), so the service starts the same
@@ -26,6 +30,8 @@ type File struct {
 	Listen    string `json:"listen,omitempty"`
 	PublicURL string `json:"public_url,omitempty"`
 	Aria2     string `json:"aria2,omitempty"`
+	// TrustedProxy: cloudflare, loopback, or the proxies' addresses (clientip.Parse).
+	TrustedProxy string `json:"trusted_proxy,omitempty"`
 }
 
 func (c Config) filePath() string { return filepath.Join(c.DataDir, "config.json") }
@@ -61,11 +67,12 @@ func (c *Config) Apply() error {
 	if f.Aria2 != "" {
 		c.Aria2Path = f.Aria2
 	}
+	c.TrustedProxy = f.TrustedProxy
 	return nil
 }
 
-// Set changes one setting in the data directory's file: listen, public_url or aria2 ("" removes
-// it, back to the default).
+// Set changes one setting in the data directory's file: listen, public_url, aria2 or
+// trusted_proxy ("" removes it, back to the default).
 func (c Config) Set(key, value string) error {
 	f, err := c.ReadFile()
 	if err != nil {
@@ -87,8 +94,13 @@ func (c Config) Set(key, value string) error {
 		f.PublicURL = value
 	case "aria2":
 		f.Aria2 = value
+	case "trusted_proxy":
+		if _, err := clientip.Parse(value); err != nil {
+			return err
+		}
+		f.TrustedProxy = value
 	default:
-		return fmt.Errorf("unknown setting %q: listen, public_url or aria2", key)
+		return fmt.Errorf("unknown setting %q: listen, public_url, aria2 or trusted_proxy", key)
 	}
 	if err := c.Prepare(); err != nil {
 		return err

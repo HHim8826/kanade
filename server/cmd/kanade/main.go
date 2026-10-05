@@ -53,14 +53,18 @@ const usage = `usage: kanade [-data DIR] <command>
   user add NAME                             create an account (password on stdin)
   user passwd NAME                          set a password (password on stdin)
   config                                    show the settings kept in the data directory
-  config set KEY VALUE                      change one: listen, public_url or aria2 ("" for the default)
+  config set KEY VALUE                      change one: listen, public_url, aria2 or trusted_proxy
+                                            ("" for the default)
   backup FILE                               copy the database to FILE while the service runs
   google client FILE                        load the OAuth client JSON from Google Cloud
   google token FILE                         load an existing OAuth token
   version                                   print the version
 
 The data directory defaults to $KANADE_DATA, then ./data. Its config.json holds the settings;
-the flags of serve override them for one run.
+the flags of serve override them for one run. trusted_proxy says which proxy in front tells the
+client's address (for the login throttle): cloudflare (a Cloudflare Tunnel on this machine),
+loopback (Caddy or Nginx on this machine, by X-Forwarded-For), or the proxies' addresses; by
+default none is believed.
 `
 
 func main() {
@@ -121,6 +125,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	stagingMiB := fs.Int64("staging-mib", 2048, "download staging budget in MiB (plan §6)")
 	reserveGiB := fs.Int64("reserve-gib", 4, "free space to keep on the filesystem in GiB (plan §6)")
 	fs.StringVar(&cfg.Aria2Path, "aria2", cfg.Aria2Path, "path to aria2c")
+	fs.StringVar(&cfg.TrustedProxy, "trusted-proxy", cfg.TrustedProxy, "whose forwarding headers tell a client's address: cloudflare, loopback, or proxy addresses")
 	logPath := fs.String("log", "", `log file, rotated at 10 MB with 5 kept (default "<data>/logs/kanade.log"; "-" for stderr)`)
 	fs.Parse(args)
 	// Resources given as flags win for this run over the settings page's (review #74).
@@ -383,7 +388,7 @@ func configCmd(cfg config.Config, args []string) error {
 			return err
 		}
 		out, _ := json.MarshalIndent(map[string]string{"data": cfg.DataDir, "listen": cfg.Listen, "public_url": cfg.PublicURL,
-			"aria2": cfg.Aria2Path}, "", "  ")
+			"aria2": cfg.Aria2Path, "trusted_proxy": cfg.TrustedProxy}, "", "  ")
 		fmt.Println(string(out))
 		return nil
 	case len(args) == 3 && args[0] == "set":

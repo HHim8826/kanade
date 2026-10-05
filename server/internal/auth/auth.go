@@ -30,6 +30,11 @@ const (
 	minPasswordLen = 10
 	maxFailures    = 5
 	failureWindow  = 15 * time.Minute
+	// From all addresses together (they can change at will, or all be a proxy's), passwords are
+	// checked no more than this (review #148): failures within the window, and checks at a time
+	// (bcrypt takes the CPU; more wait their turn).
+	maxAllFailures = 30
+	maxChecks      = 4
 	// SessionLifetime is how long a login lasts from when it was made, however often it is used;
 	// the web client's cookie lasts as long.
 	SessionLifetime = 90 * 24 * time.Hour
@@ -46,11 +51,34 @@ type Service struct {
 	mu         sync.Mutex
 	failures   map[string][]time.Time // client IP -> recent failed logins
 	checking   map[string]int         // client IP -> passwords and passkeys being checked now
-	challenges map[string]challenge   // pending passkey requests
+	swept      time.Time              // when failures was last cleared of those past the window
+	wrong      []time.Time            // recent wrong passwords, from anyone
+	passwords  int                    // passwords being checked now
+	turns      chan struct{}          // a turn to run bcrypt
+	challenges map[string]challenge   // pending passkey requests to add one
+	key        []byte                 // signs the challenges to log in with a passkey
+	used       map[string]time.Time   // those used, until they expire
 }
 
 func New(d *sql.DB) *Service {
-	return &Service{db: d, failures: map[string][]time.Time{}, checking: map[string]int{}, challenges: map[string]challenge{}}
+	key := make([]byte, 32)
+	rand.Read(key)
+	return &Service{db: d, failures: map[string][]time.Time{}, checking: map[string]int{}, turns: make(chan struct{}, maxChecks),
+		challenges: map[string]challenge{}, key: key, used: map[string]time.Time{}}
+}
+
+// compare checks a password against a hash, when there is a turn for it.
+func (s *Service) compare(ctx context.Context, hash []byte, password string) error {
+	select {
+	case s.turns <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-s.turns }()
+	if bcrypt.CompareHashAndPassword(hash, []byte(password)) != nil {
+		return ErrBadCredentials
+	}
+	return nil
 }
 
 func (s *Service) HasUsers(ctx context.Context) (bool, error) {
@@ -148,7 +176,7 @@ var ErrSamePassword = errors.New("the new password is the current one")
 // (throttled like a login, review #76). As with SetPassword, every login of the account ends,
 // this one too; passkeys stay.
 func (s *Service) ChangePassword(ctx context.Context, userID int64, current, password, clientIP string) (err error) {
-	done, err := s.attempt(clientIP)
+	done, err := s.attempt(clientIP, true)
 	if err != nil {
 		return err
 	}
@@ -157,8 +185,8 @@ func (s *Service) ChangePassword(ctx context.Context, userID int64, current, pas
 	if err := s.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = ?`, userID).Scan(&hash); err != nil {
 		return err
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(current)) != nil {
-		return ErrBadCredentials
+	if err := s.compare(ctx, []byte(hash), current); err != nil {
+		return err
 	}
 	if password == current {
 		return ErrSamePassword
@@ -230,35 +258,61 @@ func (s *Service) EndOtherSessions(ctx context.Context, userID int64, token stri
 
 // attempt lets a client check a password or passkey, unless its recent failures and the checks it
 // has under way reach the limit: checks still running count, so a burst of guesses sent at once is
-// held to the limit too. done ends the check; a refused one is remembered as a failure.
-func (s *Service) attempt(ip string) (done func(err error), err error) {
+// held to the limit too. Passwords are also held to a limit for everyone together. done ends the
+// check; a refused one is remembered as a failure.
+func (s *Service) attempt(ip string, password bool) (done func(err error), err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	recent := s.failures[ip][:0]
-	for _, t := range s.failures[ip] {
-		if time.Since(t) < failureWindow {
-			recent = append(recent, t)
+	now := time.Now()
+	if now.Sub(s.swept) > time.Minute {
+		for k, ts := range s.failures {
+			if len(ts) == 0 || now.Sub(ts[len(ts)-1]) >= failureWindow {
+				delete(s.failures, k)
+			}
 		}
+		s.swept = now
 	}
+	recent := within(s.failures[ip], now)
 	if len(recent) == 0 {
 		delete(s.failures, ip)
 	} else {
 		s.failures[ip] = recent
 	}
-	if len(recent)+s.checking[ip] >= maxFailures {
+	s.wrong = within(s.wrong, now)
+	if len(recent)+s.checking[ip] >= maxFailures || (password && len(s.wrong)+s.passwords >= maxAllFailures) {
 		return nil, ErrThrottled
 	}
 	s.checking[ip]++
+	if password {
+		s.passwords++
+	}
 	return func(err error) {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if s.checking[ip]--; s.checking[ip] <= 0 {
 			delete(s.checking, ip)
 		}
+		if password {
+			s.passwords--
+		}
 		if refused(err) {
 			s.failures[ip] = append(s.failures[ip], time.Now())
+			if password {
+				s.wrong = append(s.wrong, time.Now())
+			}
 		}
 	}, nil
+}
+
+// within keeps the times still in the failure window (in place).
+func within(ts []time.Time, now time.Time) []time.Time {
+	recent := ts[:0]
+	for _, t := range ts {
+		if now.Sub(t) < failureWindow {
+			recent = append(recent, t)
+		}
+	}
+	return recent
 }
 
 // refused tells a wrong password or passkey (a failure for the throttle) from a failure here.
@@ -269,7 +323,7 @@ func refused(err error) bool {
 
 // Login checks the password and returns a new login token. clientIP is used for throttling.
 func (s *Service) Login(ctx context.Context, username, password, deviceName, clientIP string) (token string, err error) {
-	done, err := s.attempt(clientIP)
+	done, err := s.attempt(clientIP, true)
 	if err != nil {
 		return "", err
 	}
@@ -288,14 +342,16 @@ func (s *Service) checkLogin(ctx context.Context, username, password string) (in
 	err := s.db.QueryRowContext(ctx, `SELECT id, password_hash FROM users WHERE username = ?`, username).Scan(&id, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Spend the same time as a real comparison so usernames cannot be probed by timing.
-		bcrypt.CompareHashAndPassword(dummyHash(), []byte(password))
+		if err := s.compare(ctx, dummyHash(), password); !errors.Is(err, ErrBadCredentials) && err != nil {
+			return 0, "", err
+		}
 		return 0, "", ErrBadCredentials
 	}
 	if err != nil {
 		return 0, "", err
 	}
-	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) != nil {
-		return 0, "", ErrBadCredentials
+	if err := s.compare(ctx, []byte(hash), password); err != nil {
+		return 0, "", err
 	}
 	return id, hash, nil
 }
