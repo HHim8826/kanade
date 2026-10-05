@@ -339,6 +339,21 @@ func IsNotFound(err error) bool {
 	return errors.As(err, &e) && e.Status == http.StatusNotFound
 }
 
+// Explain names why reading from Drive failed, for a player to say (review #167): not_connected,
+// auth_expired, gone (the file is no longer there), or drive (anything else); lasting when trying
+// again soon cannot help.
+func Explain(err error) (reason string, lasting bool) {
+	switch {
+	case errors.Is(err, ErrNotConnected):
+		return "not_connected", true
+	case errors.Is(err, ErrAuthExpired):
+		return "auth_expired", true
+	case IsNotFound(err):
+		return "gone", true
+	}
+	return "drive", false
+}
+
 func parseAPIError(status int, body []byte) *APIError {
 	var v struct {
 		Error struct {

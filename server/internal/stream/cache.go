@@ -9,6 +9,7 @@ package stream
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,7 +32,14 @@ const (
 	fillerReach = 2 << 20
 	maxFillers  = 3 // per file
 	idleGrace   = 30 * time.Second
+	// A prefetch waits its turn: with this many downloads running it is skipped (review #153).
+	// Those a request waits for always start.
+	busyFills = 3
 )
+
+// retryAfter is how long a download waits before trying again after n failures in a row
+// (review #167): 0.5 s, then 1 s, 2 s.
+func retryAfter(n int) time.Duration { return 500 * time.Millisecond << min(n-1, 4) }
 
 // Source opens a byte range of a remote file; end < 0 means to the end of the file.
 type Source interface {
@@ -54,12 +62,18 @@ type Cache struct {
 	// OnWhole, when set, is told of a file once it is wholly cached (its id), from a goroutine of
 	// its own: a copy that can be read through (Hold) without fetching it again.
 	OnWhole func(id string)
+	// Explain, when set, names why the source failed, for a player to say (review #167): a short
+	// code, and whether trying again later can help.
+	Explain func(err error) (reason string, lasting bool)
 
 	mu      sync.Mutex
 	files   map[string]*file
 	retired map[*file]bool // forgotten while being read; still counted until the last reader leaves
 	seq     int64          // names cache files, so a new copy never reuses an old one's
 	lean    atomic.Bool    // low disk: keep only what is being played
+	// The file requested last and the one prefetched last: the song playing and the next one,
+	// which keep downloading when no request holds them (review #153).
+	current, next string
 }
 
 // NewCache starts with an empty cache directory: block maps are not persisted, so a
@@ -171,6 +185,42 @@ func (c *Cache) release(cf *file) {
 	if drop {
 		c.dropLocked(cf)
 	}
+	c.settleLocked()
+}
+
+// settleLocked stops the downloads of files nobody plays any more (review #153): no request holds
+// them, and they are neither the file requested last nor the one prefetched last (a song skipped
+// after a few seconds). What they have stays; a request later goes on from there.
+func (c *Cache) settleLocked() {
+	for _, cf := range c.files {
+		if cf.id == c.current || cf.id == c.next {
+			continue
+		}
+		cf.mu.Lock()
+		if cf.readers == 0 {
+			for _, fl := range cf.fillers {
+				fl.cancel()
+				fl.done = true
+			}
+			cf.fillers = nil
+		}
+		cf.mu.Unlock()
+	}
+}
+
+// fillingLocked is how many downloads are running.
+func (c *Cache) fillingLocked() int {
+	n := 0
+	for _, cf := range c.files {
+		cf.mu.Lock()
+		for _, fl := range cf.fillers {
+			if !fl.done {
+				n++
+			}
+		}
+		cf.mu.Unlock()
+	}
+	return n
 }
 
 // usedLocked is the space taken by every cached file, forgotten ones still being read included.
@@ -296,6 +346,14 @@ func (c *Cache) Prefetch(id string, size int64) error {
 	if c.lean.Load() {
 		return nil
 	}
+	c.mu.Lock()
+	c.next = id
+	c.settleLocked()
+	busy := c.fillingLocked() >= busyFills
+	c.mu.Unlock()
+	if busy {
+		return nil
+	}
 	cf, err := c.acquire(id, size)
 	if errors.Is(err, errFull) {
 		return nil // no room: the track will be passed through when played
@@ -357,6 +415,19 @@ func (cf *file) fill(ctx context.Context, fl *filler) {
 		cf.mu.Unlock()
 		fl.cancel()
 	}()
+	cf.mu.Lock()
+	failed := cf.failures
+	cf.mu.Unlock()
+	if failed > 0 {
+		t := time.NewTimer(retryAfter(failed))
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			err = ctx.Err()
+			return
+		}
+	}
 	cf.c.Stats.SourceRequests.Add(1)
 	resp, err := cf.c.src.OpenRange(ctx, cf.id, fl.pos, -1)
 	if err != nil {
@@ -395,37 +466,50 @@ func (cf *file) fill(ctx context.Context, fl *filler) {
 	}
 }
 
-// copyRange writes bytes [start, end] to w as they become available.
-// The caller holds the file (acquire).
-func (cf *file) copyRange(ctx context.Context, w io.Writer, start, end int64) error {
+// await waits until block blk is cached, starting a download for it when none will reach it, and
+// gives up when the downloads keep failing or ctx ends. The caller holds the file (acquire).
+func (cf *file) await(ctx context.Context, blk int64) error {
 	stop := context.AfterFunc(ctx, func() {
 		cf.mu.Lock()
 		cf.cond.Broadcast()
 		cf.mu.Unlock()
 	})
 	defer stop()
+	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	for !cf.have[blk] {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !cf.coveredLocked(blk) {
+			if cf.failures >= 3 {
+				err := cf.lastErr
+				cf.failures = 0 // let a later request try again
+				return &sourceError{err}
+			}
+			cf.startFillerLocked(blk)
+		}
+		cf.cond.Wait()
+	}
+	cf.lastUse = time.Now()
+	return nil
+}
+
+// sourceError is Drive failing again and again.
+type sourceError struct{ err error }
+
+func (e *sourceError) Error() string { return "drive keeps failing: " + e.err.Error() }
+func (e *sourceError) Unwrap() error { return e.err }
+
+// copyRange writes bytes [start, end] to w as they become available.
+// The caller holds the file (acquire).
+func (cf *file) copyRange(ctx context.Context, w io.Writer, start, end int64) error {
 	buf := make([]byte, blockSize)
 	for off := start; off <= end; {
 		blk := off / blockSize
-		cf.mu.Lock()
-		for !cf.have[blk] {
-			if err := ctx.Err(); err != nil {
-				cf.mu.Unlock()
-				return err
-			}
-			if !cf.coveredLocked(blk) {
-				if cf.failures >= 3 {
-					err := cf.lastErr
-					cf.failures = 0 // let a later request try again
-					cf.mu.Unlock()
-					return fmt.Errorf("drive keeps failing: %w", err)
-				}
-				cf.startFillerLocked(blk)
-			}
-			cf.cond.Wait()
+		if err := cf.await(ctx, blk); err != nil {
+			return err
 		}
-		cf.lastUse = time.Now()
-		cf.mu.Unlock()
 		n := min((blk+1)*blockSize, end+1) - off
 		if _, err := cf.f.ReadAt(buf[:n], off); err != nil {
 			return err
@@ -502,16 +586,47 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 		return
 	}
 	if err != nil {
-		h.Del("Content-Length")
-		h.Del("Content-Range")
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		c.unavailable(w, err)
 		return
 	}
 	defer c.release(cf)
+	c.mu.Lock()
+	c.current = id
+	c.settleLocked()
+	c.mu.Unlock()
+	// The answer waits for its first bytes (review #167): Drive failing is a 503 that says why,
+	// not a 200 cut short.
+	if err := cf.await(r.Context(), start/blockSize); err != nil {
+		if r.Context().Err() == nil {
+			c.log.Warn("stream", "file", id, "err", err)
+			c.unavailable(w, err)
+		}
+		return
+	}
 	w.WriteHeader(status)
 	if err := cf.copyRange(r.Context(), w, start, end); err != nil && r.Context().Err() == nil {
 		c.log.Warn("stream", "file", id, "err", err)
 	}
+}
+
+// unavailable answers 503 for a file that cannot be read now, with why as JSON ({"error",
+// "reason"}) and, unless the reason lasts (Drive not connected, the file gone), when to try again.
+func (c *Cache) unavailable(w http.ResponseWriter, err error) {
+	h := w.Header()
+	for _, k := range []string{"Content-Length", "Content-Range", "ETag", "Accept-Ranges"} {
+		h.Del(k)
+	}
+	h.Set("Cache-Control", "no-store")
+	h.Set("Content-Type", "application/json")
+	reason, lasting := "", false
+	if c.Explain != nil {
+		reason, lasting = c.Explain(err)
+	}
+	if !lasting {
+		h.Set("Retry-After", "5")
+	}
+	w.WriteHeader(http.StatusServiceUnavailable) // not 502: Cloudflare replaces those
+	json.NewEncoder(w).Encode(map[string]string{"error": err.Error(), "reason": reason})
 }
 
 // passThrough serves a range straight from Drive, without caching, when the cache has no room.
@@ -519,10 +634,9 @@ func (c *Cache) passThrough(w http.ResponseWriter, r *http.Request, id string, s
 	c.Stats.SourceRequests.Add(1)
 	resp, err := c.src.OpenRange(r.Context(), id, start, end)
 	if err != nil {
-		h := w.Header()
-		h.Del("Content-Length")
-		h.Del("Content-Range")
-		http.Error(w, err.Error(), http.StatusServiceUnavailable) // not 502: Cloudflare replaces those
+		if r.Context().Err() == nil {
+			c.unavailable(w, err)
+		}
 		return
 	}
 	defer resp.Body.Close()

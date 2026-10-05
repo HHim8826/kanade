@@ -198,6 +198,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	loud := &loudness.Service{Lib: lib, FF: imp.FFmpeg, Source: drive, Hold: cache.Hold, Temp: cfg.Path(config.DirStaging, "loudness"),
 		Every: 6 * time.Hour, Log: log}
 	cache.OnWhole = loud.Cached
+	cache.Explain = gdrive.Explain
 	imp.Measure = loud.File
 	streamKey, err := db.Secret(ctx, d, "stream_signing_key", 32)
 	if err != nil {

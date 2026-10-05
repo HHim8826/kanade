@@ -3,6 +3,7 @@ package stream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -317,5 +319,158 @@ func TestWholeFilesCanBeHeld(t *testing.T) {
 		}
 		t.Fatal("told of a again")
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// slowBody gives its bytes a little at a time, like a long download.
+type slowBody struct {
+	ctx  context.Context
+	data []byte
+}
+
+func (b *slowBody) Read(p []byte) (int, error) {
+	if len(b.data) == 0 {
+		return 0, io.EOF
+	}
+	select {
+	case <-time.After(5 * time.Millisecond):
+	case <-b.ctx.Done():
+		return 0, b.ctx.Err()
+	}
+	n := copy(p[:min(len(p), 16<<10)], b.data)
+	b.data = b.data[n:]
+	return n, nil
+}
+
+func (b *slowBody) Close() error { return nil }
+
+type slowSource struct{ data []byte }
+
+func (s *slowSource) OpenRange(ctx context.Context, _ string, start, end int64) (*http.Response, error) {
+	if end < 0 {
+		end = int64(len(s.data)) - 1
+	}
+	return &http.Response{StatusCode: 206, Body: &slowBody{ctx, s.data[start : end+1]}}, nil
+}
+
+// Songs skipped after a few seconds stop downloading (review #153): only the one played last and
+// the one prefetched last go on; what the others have stays.
+func TestSkippedSongsStopDownloading(t *testing.T) {
+	const size = 64 * blockSize
+	src := &slowSource{data: make([]byte, size)}
+	c, err := NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 10 {
+		id := fmt.Sprint("song", i)
+		if rec := get(c, id, size, "bytes=0-1000"); rec.Code != 206 {
+			t.Fatalf("%s: %d", id, rec.Code)
+		}
+		c.Prefetch(fmt.Sprint("song", i+1), size)
+	}
+	c.mu.Lock()
+	running := map[string]int{}
+	for id, cf := range c.files {
+		cf.mu.Lock()
+		for _, fl := range cf.fillers {
+			if !fl.done {
+				running[id]++
+			}
+		}
+		if id != "song9" && id != "song10" && cf.missing == 0 {
+			t.Errorf("%s was downloaded whole", id)
+		}
+		cf.mu.Unlock()
+	}
+	c.mu.Unlock()
+	if len(running) > 2 || (len(running) == 2 && (running["song9"] == 0 || running["song10"] == 0)) {
+		t.Fatalf("downloading %v", running)
+	}
+	// The one playing goes on to the end without a request holding it.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, release, ok := c.Hold("song9"); ok {
+			release()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the song playing stopped downloading")
+}
+
+// A prefetch waits while downloads are running; a request never does.
+func TestPrefetchWaitsItsTurn(t *testing.T) {
+	const size = 64 * blockSize
+	src := &slowSource{data: make([]byte, size)}
+	c, _ := NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	get(c, "a", size, "bytes=0-10")
+	get(c, "a", size, fmt.Sprintf("bytes=%d-%d", 20*blockSize, 20*blockSize+10))
+	get(c, "a", size, fmt.Sprintf("bytes=%d-%d", 40*blockSize, 40*blockSize+10))
+	c.Prefetch("b", size)
+	c.mu.Lock()
+	_, started := c.files["b"]
+	c.mu.Unlock()
+	if started {
+		t.Fatal("prefetched beside 3 downloads")
+	}
+	if rec := get(c, "b", size, "bytes=0-10"); rec.Code != 206 {
+		t.Fatalf("a request waited: %d", rec.Code)
+	}
+}
+
+type failingSource struct {
+	fail  int // first calls that fail
+	err   error
+	calls atomic.Int64
+	data  []byte
+}
+
+func (s *failingSource) OpenRange(ctx context.Context, _ string, start, end int64) (*http.Response, error) {
+	if s.calls.Add(1) <= int64(s.fail) {
+		return nil, s.err
+	}
+	if end < 0 {
+		end = int64(len(s.data)) - 1
+	}
+	return &http.Response{StatusCode: 206, Body: io.NopCloser(bytes.NewReader(s.data[start : end+1]))}, nil
+}
+
+// Drive failing is answered before any header goes out (review #167): a 503 that says why, after
+// tries spaced out; a failure that passes is not seen at all.
+func TestDriveFailureIsAnswered(t *testing.T) {
+	const size = 4 * blockSize
+	notConnected := fmt.Errorf("google drive is not connected")
+	src := &failingSource{fail: 100, err: notConnected, data: make([]byte, size)}
+	c, _ := NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	c.Explain = func(err error) (string, bool) {
+		if errors.Is(err, notConnected) {
+			return "not_connected", true
+		}
+		return "drive", false
+	}
+	t0 := time.Now()
+	rec := get(c, "f", size, "bytes=0-")
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Content-Length") != "" || rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("status %d, headers %v", rec.Code, rec.Header())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"reason":"not_connected"`) || rec.Header().Get("Retry-After") != "" {
+		t.Fatalf("body %s, Retry-After %q", body, rec.Header().Get("Retry-After"))
+	}
+	if n := src.calls.Load(); n != 3 {
+		t.Fatalf("%d tries", n)
+	}
+	if d := time.Since(t0); d < 1400*time.Millisecond {
+		t.Fatalf("3 tries in %v: not spaced out", d)
+	}
+
+	src = &failingSource{fail: 2, err: fmt.Errorf("drive 503"), data: make([]byte, size)}
+	for i := range src.data {
+		src.data[i] = byte(i)
+	}
+	c, _ = NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	rec = get(c, "f", size, "")
+	if rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), src.data) {
+		t.Fatalf("after two failures: %d", rec.Code)
 	}
 }
