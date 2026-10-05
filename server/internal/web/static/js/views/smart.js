@@ -11,7 +11,7 @@ import { Field, changed, useRunner } from './organize.js';
 
 export const fields = [
   ['category', '分類'], ['album', '專輯'], ['artist', '歌手'], ['kind', '類型'], ['favorite', '收藏'],
-  ['plays', '播放次數'], ['played_within', '最近播放'], ['never_played', '從未播放'], ['finished', '播完過'],
+  ['plays', '播放次數'], ['played_within', '最近播放'], ['never_played', '播放紀錄'], ['finished', '播完紀錄'],
 ];
 const ops = {
   category: [['is', '在其中之一'], ['not', '不在']], album: [['is', '是其中之一'], ['not', '不是']],
