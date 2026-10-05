@@ -356,24 +356,37 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 			return res, nil
 		}
 	}
-	pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
-	ids := map[string][]any{}
-	rows, err := s.db.QueryContext(ctx, `SELECT kind, ref_id FROM search_index WHERE text LIKE ? ESCAPE '\' LIMIT 500`, pattern)
-	if err != nil {
-		return nil, err
+	// The trigram index serves LIKE and GLOB, but not LIKE with ESCAPE (review #163): a pattern
+	// escapes only when the words have the characters it would have to.
+	match, pattern := `text LIKE ?`, "%"+q+"%"
+	switch {
+	case !strings.ContainsAny(q, `%_\`):
+	case !strings.ContainsAny(q, `*?[]`):
+		match, pattern = `text GLOB ?`, "*"+q+"*" // the text is folded to lower case, as q is
+	default:
+		match, pattern = `text LIKE ? ESCAPE '\'`, "%"+strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)+"%"
 	}
-	for rows.Next() {
-		var kind string
-		var id int64
-		if err := rows.Scan(&kind, &id); err != nil {
-			rows.Close()
+	// Each kind its own limit: common words do not leave albums and artists out behind songs.
+	ids := map[string][]any{}
+	for _, kind := range []string{"track", "album", "artist"} {
+		rows, err := s.db.QueryContext(ctx, `SELECT ref_id FROM search_index WHERE `+match+` AND kind = ? LIMIT ?`, pattern, kind, limit)
+		if err != nil {
 			return nil, err
 		}
-		if len(ids[kind]) < limit {
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
 			ids[kind] = append(ids[kind], id)
 		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
 	}
-	rows.Close()
+	var err error
 	in := func(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
 	if v := ids["track"]; len(v) > 0 {
 		if res.Tracks, err = scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id IN (`+in(len(v))+`) ORDER BY t.title`, v...)); err != nil {

@@ -492,6 +492,19 @@ func aliasNames(ctx context.Context, q querier, target string, id int64) ([]stri
 
 // reindex rebuilds one object's search text from its names and aliases.
 func reindex(ctx context.Context, tx *sql.Tx, kind string, id int64) error {
+	parts, err := indexParts(ctx, tx, kind, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return unindex(ctx, tx, kind, id)
+	}
+	if err != nil || parts == nil {
+		return err
+	}
+	return index(ctx, tx, kind, id, parts...)
+}
+
+// indexParts is what an object is found by: its title or name, its artist, its aliases. nil for a
+// kind not searched; sql.ErrNoRows when the object is gone.
+func indexParts(ctx context.Context, tx *sql.Tx, kind string, id int64) ([]string, error) {
 	var parts []string
 	var err error
 	switch kind {
@@ -508,20 +521,16 @@ func reindex(ctx context.Context, tx *sql.Tx, kind string, id int64) error {
 		err = tx.QueryRowContext(ctx, `SELECT name FROM artists WHERE id = ?`, id).Scan(&name)
 		parts = []string{name}
 	default:
-		return nil
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.ExecContext(ctx, `DELETE FROM search_index WHERE kind = ? AND ref_id = ?`, kind, id)
-		return err
+		return nil, nil
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	aliases, err := aliasNames(ctx, tx, kind, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return index(ctx, tx, kind, id, append(parts, aliases...)...)
+	return append(parts, aliases...), nil
 }
 
 // name is an object's title or name, for summaries.
@@ -1383,8 +1392,8 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) ([]string, error) {
 		`UPDATE import_items SET track_id = NULL WHERE track_id = ?1`,
 		`DELETE FROM album_entries WHERE track_id = ?1`,
 		`DELETE FROM aliases WHERE target = 'track' AND target_id = ?1`,
-		`DELETE FROM search_index WHERE kind = 'track' AND ref_id = ?1`,
-		`DELETE FROM tracks WHERE id = ?1`, // cascades to links, plays, favorites, playlist items, lyrics
+		`DELETE FROM search_index WHERE rowid = ?1 * 4 + 1`, // indexRow("track", id)
+		`DELETE FROM tracks WHERE id = ?1`,                  // cascades to links, plays, favorites, playlist items, lyrics
 	} {
 		if _, err := tx.ExecContext(ctx, q, id); err != nil {
 			return nil, err

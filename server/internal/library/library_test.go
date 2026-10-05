@@ -2,8 +2,11 @@ package library
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -162,5 +165,84 @@ func TestAlbumDetailOrdersByDiscAndTrack(t *testing.T) {
 	}
 	if d.Tracks != 3 || d.DurationMS != 180000 {
 		t.Fatalf("summary = %+v", d.AlbumSummary)
+	}
+}
+
+// Searching uses the trigram index unless the words hold what LIKE and GLOB both treat as
+// wildcards; each object's row is found by its rowid; and each kind has its own limit (review
+// #163).
+func TestSearchUsesTheIndex(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	for i := range 30 {
+		s.Publish(ctx, verifiedAsset(t, s, fmt.Sprint("s", i)), EntryInput{Title: fmt.Sprint("Common song ", i), Artist: "x"})
+	}
+	s.Publish(ctx, verifiedAsset(t, s, "al"), EntryInput{Title: "t", Artist: "Common singer", Album: "Common album", AlbumArtist: "Z"})
+	s.Publish(ctx, verifiedAsset(t, s, "st"), EntryInput{Title: "a*b_c", Artist: "y"})
+	plan := func(match, pattern string) string {
+		t.Helper()
+		var id, parent, unused int
+		var detail string
+		if err := s.db.QueryRow(`EXPLAIN QUERY PLAN SELECT ref_id FROM search_index WHERE `+match+` AND kind = 'track'`, pattern).
+			Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		return detail
+	}
+	if p := plan(`text LIKE ?`, "%common%"); !strings.Contains(p, ":L") {
+		t.Errorf("LIKE: %s", p)
+	}
+	if p := plan(`text GLOB ?`, "*100%*"); !strings.Contains(p, ":G") {
+		t.Errorf("GLOB: %s", p)
+	}
+	r, err := s.Search(ctx, "common", 20)
+	if err != nil || len(r.Tracks) != 20 || len(r.Albums) != 1 || len(r.Artists) != 1 {
+		t.Fatalf("common: %d %d %d %v", len(r.Tracks), len(r.Albums), len(r.Artists), err)
+	}
+	for _, q := range []string{"a*b_c", "b_c", "a*b"} {
+		if r, _ := s.Search(ctx, q, 20); len(r.Tracks) != 1 {
+			t.Errorf("%q: %d", q, len(r.Tracks))
+		}
+	}
+	// A renamed object is found by its new name only: its old row was replaced.
+	var id int64
+	s.db.QueryRow(`SELECT id FROM tracks WHERE title = 'Common song 3'`).Scan(&id)
+	if _, err := s.ApplyChanges(ctx, SourceUser, "rename", []Change{{"track", id, "title", Str("Renamed tune")}}); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.Search(ctx, "renamed", 20); len(r.Tracks) != 1 {
+		t.Fatalf("new name: %d", len(r.Tracks))
+	}
+	if r, _ := s.Search(ctx, "common song 3", 20); len(r.Tracks) != 0 {
+		t.Fatalf("old name still found: %+v", r.Tracks)
+	}
+	var rows int
+	s.db.QueryRow(`SELECT count(*) FROM search_index WHERE kind = 'track' AND ref_id = ?`, id).Scan(&rows)
+	if rows != 1 {
+		t.Fatalf("%d rows for the track", rows)
+	}
+}
+
+// Rebuilding a large index takes seconds, not minutes.
+func TestSearchIndexRebuild(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	tx, _ := s.db.Begin()
+	for i := range 20000 {
+		tx.Exec(`INSERT INTO tracks (id, title, artist, created_at, updated_at) VALUES (?, ?, 'x', 0, 0)`, i+1, fmt.Sprint("song ", i))
+	}
+	tx.Commit()
+	s.db.Exec(`DELETE FROM settings WHERE key = 'search_index'`)
+	t0 := time.Now()
+	if err := s.EnsureSearchIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(t0); d > 20*time.Second {
+		t.Fatalf("rebuilt in %v", d)
+	}
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM search_index WHERE text LIKE '%song19999%' AND rowid = ?`, indexRow("track", 20000)).Scan(&n)
+	if n != 1 {
+		t.Fatal("not found after the rebuild")
 	}
 }

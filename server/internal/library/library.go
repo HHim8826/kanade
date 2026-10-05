@@ -132,15 +132,32 @@ func fold(s string, strip bool) string {
 	return b.String()
 }
 
-// indexVersion changes whenever Normalize does; EnsureSearchIndex then rebuilds the index.
-const indexVersion = "3"
+// indexVersion changes whenever Normalize or the index's layout does; EnsureSearchIndex then
+// rebuilds the index.
+const indexVersion = "4"
+
+// indexRow is where an object's row is in the search index (review #163): its rowid, so it is found
+// by the table's own key, not by a scan of its unindexed columns.
+func indexRow(kind string, id int64) int64 {
+	return id*4 + map[string]int64{"track": 1, "album": 2, "artist": 3}[kind]
+}
+
+// unindex drops an object from the search index.
+func unindex(ctx context.Context, tx *sql.Tx, kind string, id int64) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM search_index WHERE rowid = ?`, indexRow(kind, id))
+	return err
+}
 
 // index stores the search text of one object. Parts are normalized one by one and kept on separate
 // lines, so a query never matches across the end of a title and the start of a name.
 func index(ctx context.Context, tx *sql.Tx, kind string, id int64, parts ...string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM search_index WHERE kind = ? AND ref_id = ?`, kind, id); err != nil {
+	if err := unindex(ctx, tx, kind, id); err != nil {
 		return err
 	}
+	return putIndex(ctx, tx, kind, id, parts...)
+}
+
+func putIndex(ctx context.Context, tx *sql.Tx, kind string, id int64, parts ...string) error {
 	var lines []string
 	for _, p := range parts {
 		if n := Normalize(p); n != "" {
@@ -150,12 +167,13 @@ func index(ctx context.Context, tx *sql.Tx, kind string, id int64, parts ...stri
 			lines = append(lines, l) // keeps symbols: see Search
 		}
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO search_index (kind, ref_id, text) VALUES (?, ?, ?)`,
-		kind, id, strings.Join(lines, "\n"))
+	_, err := tx.ExecContext(ctx, `INSERT INTO search_index (rowid, kind, ref_id, text) VALUES (?, ?, ?, ?)`,
+		indexRow(kind, id), kind, id, strings.Join(lines, "\n"))
 	return err
 }
 
-// EnsureSearchIndex rebuilds the search index when it was built by an older Normalize.
+// EnsureSearchIndex rebuilds the search index when it was built by an older Normalize, or laid out
+// otherwise: emptied, then each object put in (review #163: not looked for first).
 func (s *Store) EnsureSearchIndex(ctx context.Context) error {
 	var v string
 	s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = 'search_index'`).Scan(&v)
@@ -176,7 +194,11 @@ func (s *Store) EnsureSearchIndex(ctx context.Context) error {
 			return err
 		}
 		for _, id := range ids {
-			if err := reindex(ctx, tx, kind, id); err != nil {
+			parts, err := indexParts(ctx, tx, kind, id)
+			if err != nil {
+				return err
+			}
+			if err := putIndex(ctx, tx, kind, id, parts...); err != nil {
 				return err
 			}
 		}
