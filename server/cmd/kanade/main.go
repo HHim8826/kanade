@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -318,7 +319,11 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 		log.Warn("no account yet: create one with `user add`, or POST /api/v1/setup with the code in " + srv.SetupCodePath())
 	}
 
-	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	// Requests have a context of their own that stopping ends (review #166).
+	reqCtx, endRequests := context.WithCancel(context.WithoutCancel(ctx))
+	defer endRequests()
+	hs := &http.Server{Addr: cfg.Listen, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return reqCtx }}
 	errc := make(chan error, 1)
 	go func() { errc <- hs.ListenAndServe() }()
 	log.Info("listening", "addr", cfg.Listen, "public_url", cfg.PublicURL, "data", cfg.DataDir)
@@ -328,9 +333,15 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	case <-ctx.Done():
 	}
 	log.Info("shutting down")
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Short requests finish. Long ones (a song streaming, an upload) are why stopping was asked
+	// for, not a failure (review #166): their context ends after a moment, then their connections.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err = hs.Shutdown(shutdownCtx)
+	time.AfterFunc(2*time.Second, endRequests)
+	if err := hs.Shutdown(shutdownCtx); err != nil {
+		log.Info("requests still open were cut", "err", err)
+		hs.Close()
+	}
 	// Wait for aria2 to save its session and exit; an orphan would linger as a zombie
 	// on hosts whose init does not reap (this container's PID 1 does not).
 	select {
@@ -338,7 +349,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	case <-time.After(15 * time.Second):
 		log.Warn("aria2 did not stop in time")
 	}
-	return err
+	return nil
 }
 
 func readPassword() (string, error) {
