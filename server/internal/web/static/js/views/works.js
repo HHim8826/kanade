@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { fromTrack, playQueue } from '../player.js';
-import { href } from '../router.js';
+import { href, keepInAddress, parseHash } from '../router.js';
 import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumGrid, TrackList } from './common.js';
 import { done, useLibRev, useRunner } from './organize.js';
@@ -45,19 +45,26 @@ export function WorkGrid({ works }) {
   </a>`)}</div>`;
 }
 
-// WorksTab is the library's works: those an album or a song is linked to.
+// WorksTab is the library's works: those an album or a song is linked to. The type and the order
+// are in the address (#/library/works?type=2&sort=date), so back from a work they are as they were
+// (review #187).
 export function WorksTab({ data }) {
-  const [type, setType] = useState(0);
-  const [byDate, setByDate] = useState(false);
+  const [type, setType] = useState(() => Number(parseHash().query.get('type')) || 0);
+  const [byDate, setByDate] = useState(() => parseHash().query.get('sort') === 'date');
+  useEffect(() => {
+    const q = [type && `type=${type}`, byDate && 'sort=date'].filter(Boolean).join('&');
+    keepInAddress('library/works' + (q ? '?' + q : ''));
+  }, [type, byDate]);
   if (!data.length) {
     return html`<${Empty} icon="work">還沒有關聯作品。在專輯頁的「關聯作品」從 Bangumi 找出它所屬的動畫、遊戲或書籍，就會出現在這裡。<//>`;
   }
   const types = Object.keys(typeNames).map(Number).filter((t) => data.some((w) => w.type === t));
-  let list = type ? data.filter((w) => w.type === type) : data;
+  const shownType = types.includes(type) ? type : 0; // one the address names that no work is any more: all
+  let list = shownType ? data.filter((w) => w.type === shownType) : data;
   if (byDate) list = [...list].sort((a, b) => (b.date || '').localeCompare(a.date || '') || a.name.localeCompare(b.name));
   return html`<div class="list-tools">
       ${types.length > 1 && html`<nav class="seg" aria-label="類型">${[[0, '全部'], ...types.map((t) => [t, typeNames[t]])].map(([k, label]) => html`<button key=${k}
-        class=${k === type ? 'on' : ''} aria-pressed=${k === type} onClick=${() => setType(k)}>${label}</button>`)}</nav>`}
+        class=${k === shownType ? 'on' : ''} aria-pressed=${k === shownType} onClick=${() => setType(k)}>${label}</button>`)}</nav>`}
       <nav class="seg" aria-label="排序">${[[false, '名稱'], [true, '年份']].map(([k, label]) => html`<button key=${label}
         class=${k === byDate ? 'on' : ''} aria-pressed=${k === byDate} onClick=${() => setByDate(k)}>${label}</button>`)}</nav>
     </div>

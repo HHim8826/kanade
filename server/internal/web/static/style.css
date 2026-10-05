@@ -277,7 +277,9 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
   background: var(--surface-container-high); border-radius: var(--radius-xl); padding: 24px;
 }
 .dialog.wide { width: min(1120px, 100%); }
-.dialog h2 { margin: 0 0 16px; font-size: 22px; font-weight: 500; }
+.dialog h2 { margin: 0 0 16px; font-size: 22px; font-weight: 500;
+  /* a long name (a song's) takes two lines at most, the whole of it in its title (review #188) */
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; overflow-wrap: anywhere; }
 /* The scrolling part reserves its scrollbar's room and pads its edges, so focus rings, corners and
    resize handles are never cut off (review #29). */
 .dialog-body { overflow: auto; flex: 1; scrollbar-gutter: stable; padding: 4px 6px; margin: -4px -6px; }

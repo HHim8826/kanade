@@ -404,7 +404,7 @@ export function Dialog({ title, onClose, children, actions, wide }) {
   }, [onClose]);
   return html`<div class="scrim" onClick=${(e) => e.target === e.currentTarget && onClose()}>
     <div class=${'dialog' + (wide ? ' wide' : '')} role="dialog" aria-modal="true" aria-label=${title} ref=${box}>
-      <h2>${title}</h2>
+      <h2 title=${typeof title === 'string' ? title : undefined}>${title}</h2>
       <div class="dialog-body">${children}</div>
       ${actions && html`<div class="dialog-actions">${actions}</div>`}
     </div>
