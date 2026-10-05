@@ -208,6 +208,29 @@ func TestKnownBrowserLogsIn(t *testing.T) {
 	}
 }
 
+// The web player's preload of the next song is a preload (review #175): the cache keeps the song
+// playing, and takes the next as next.
+func TestPrefetchIsNoPlay(t *testing.T) {
+	ctx := context.Background()
+	s, h := newTestServer(t)
+	token := loginToken(t, s, h)
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "b1", Size: 1 << 20, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "d-b")
+	path := fmt.Sprintf("/api/v1/stream/%d/prefetch", a.ID)
+	if rec := do(t, h, "POST", path, "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no auth: %d", rec.Code)
+	}
+	if rec := do(t, h, "POST", path, token, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("prefetch: %d %s", rec.Code, rec.Body)
+	}
+	if cur, next := s.cache.Playing(); cur != "" || next != "d-b" {
+		t.Fatalf("playing %q, next %q", cur, next)
+	}
+	if rec := do(t, h, "POST", "/api/v1/stream/999/prefetch", token, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("no such song: %d", rec.Code)
+	}
+}
+
 func TestImportPathMustStayInsideRoots(t *testing.T) {
 	s, h := newTestServer(t)
 	token := loginToken(t, s, h)

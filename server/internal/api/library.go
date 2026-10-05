@@ -195,6 +195,26 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	s.cache.Serve(w, r, a.DriveFileID, a.Size, contentType(a.Format), a.SHA256)
 }
 
+// prefetchStream starts filling the cache with a song a player will play next: a preload, which
+// leaves the song playing its download (a stream request is the song played; review #175), and
+// which the cache skips when the disk is low or downloads are busy.
+func (s *Server) prefetchStream(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a, err := s.lib.StreamTarget(r.Context(), id)
+	if err != nil || a == nil {
+		w.WriteHeader(http.StatusNoContent) // nothing to preload: played, it says why
+		return
+	}
+	if err := s.cache.Prefetch(a.DriveFileID, a.Size); err != nil {
+		s.log.Info("prefetch", "asset", id, "err", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func contentType(format string) string {
 	switch format {
 	case "flac":

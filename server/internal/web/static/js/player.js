@@ -207,6 +207,7 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (!item) return;
   if (session) report(); // close out the track we are leaving
   loads++;
+  prefetched = 0; // the next one is preloaded again for this one
   session = { id: crypto.randomUUID(), item, heard: 0, last: null, played: false };
   // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
   // 0 is a place too, the start, which the settings' resuming does not override (review #106).
@@ -239,8 +240,10 @@ function load(index, autoplay = true, again = false, lazy = false) {
 }
 
 function seekWhenReady(ms) {
-  if (audio.readyState >= 1 && !deferred) audio.currentTime = ms / 1000;
-  else pendingSeek = ms;
+  if (audio.readyState >= 1 && !deferred) {
+    audio.currentTime = ms / 1000;
+    pendingSeek = null;
+  } else pendingSeek = ms;
 }
 
 on('loadedmetadata', () => {
@@ -776,8 +779,13 @@ export const playAt = (i) => load(i);
 export const seek = (sec) => {
   if (!isFinite(sec) || !current()) return;
   seeks++;
-  if (deferred) pendingSeek = Math.round(sec * 1000); // not loaded yet: it starts there
-  else audio.currentTime = sec;
+  // Not loaded yet, or not far enough to seek: it starts there, whatever place was asked for before
+  // (0 too). Loaded: there now, and no place asked for before is gone to later (review #174).
+  if (deferred || audio.readyState < 1) pendingSeek = Math.round(sec * 1000);
+  else {
+    audio.currentTime = sec;
+    pendingSeek = null;
+  }
   player.set({ scrub: null });
   clock.set({ time: sec });
   savePlace();
@@ -791,12 +799,17 @@ export const endScrub = (commit) => {
 };
 
 // Warm the server's stream cache for the next track (plan §5: preload at most the next one),
-// unless the settings turned it off (review #78).
+// unless the settings turned it off (review #78). Asked as a preload, not played: the song playing
+// keeps its download (review #175).
+let prefetched = 0;
 function prefetchNext() {
   const s = player.get();
   if (!s.preload) return;
   const n = s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
-  if (n) fetch(streamURL(n.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' }).catch(() => {});
+  if (n && n.assetId !== prefetched) {
+    prefetched = n.assetId;
+    post(`/stream/${n.assetId}/prefetch`).catch(() => { prefetched = 0; });
+  }
 }
 
 let lastTick = 0;

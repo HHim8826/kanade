@@ -338,6 +338,14 @@ func (c *Cache) SetBudget(n int64) {
 	c.evictLocked(0, false)
 }
 
+// Playing is what the cache goes on downloading without a request: the file played last and the
+// one preloaded last.
+func (c *Cache) Playing() (current, next string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.current, c.next
+}
+
 // SetLean keeps the cache to the files being played while the disk is low; prefetching stops.
 func (c *Cache) SetLean(on bool) { c.lean.Store(on) }
 
