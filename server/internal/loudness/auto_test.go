@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,9 +34,11 @@ func TestScanByItselfOnlyWhenOn(t *testing.T) {
 	s.Every = time.Hour
 	id := add("a.flac", "d1", testdata(t, "tone.flac"))
 	ctx, cancel := context.WithCancel(context.Background())
-	go s.Run(ctx)
+	ran := make(chan struct{})
+	go func() { s.Run(ctx); close(ran) }()
 	time.Sleep(200 * time.Millisecond)
 	cancel()
+	<-ran // its stopping is over before the scan below starts
 	if s.Auto(context.Background()) != AutoUnset || len(measured(t, lib, id)) != 0 {
 		t.Fatal("scanned before anyone asked")
 	}
@@ -61,12 +64,12 @@ func (f failing) OpenRange(context.Context, string, int64, int64) (*http.Respons
 // counting counts the records logged at Warn and above.
 type counting struct {
 	slog.Handler
-	n *int
+	n *atomic.Int32
 }
 
 func (c counting) Handle(ctx context.Context, r slog.Record) error {
 	if r.Level >= slog.LevelWarn {
-		*c.n++
+		c.n.Add(1)
 	}
 	return nil
 }
@@ -86,13 +89,14 @@ func TestDriveDownEndsTheScan(t *testing.T) {
 		for i := range 20 {
 			add(filepath.Join(string(rune('a'+i))+".flac"), string(rune('a'+i)), testdata(t, "tone.flac"))
 		}
-		warns := 0
+		var warns atomic.Int32
 		s.Log = slog.New(counting{slog.NewTextHandler(io.Discard, nil), &warns})
 		s.Source = failing{c.err}
 		s.Scan(false)
 		st := waitScan(t, s)
-		if st.Failed != c.failed || st.Done != 0 || st.Reason != c.reason || warns != 1 {
-			t.Fatalf("%v: %+v, %d warnings", c.err, st, warns)
+		time.Sleep(100 * time.Millisecond) // the scan's line is written as it ends
+		if st.Failed != c.failed || st.Done != 0 || st.Reason != c.reason || warns.Load() != 1 {
+			t.Fatalf("%v: %+v, %d warnings", c.err, st, warns.Load())
 		}
 	}
 }
