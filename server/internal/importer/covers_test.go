@@ -37,6 +37,13 @@ func albumCover(t *testing.T, im *Importer, title string) string {
 	return sha
 }
 
+func must[T any](v T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 func shaOf(data []byte) string {
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
@@ -90,6 +97,13 @@ func TestInboxRootCoverIsPerBatch(t *testing.T) {
 	}
 	red, blue := pngOf(t, color.RGBA{200, 0, 0, 255}), pngOf(t, color.RGBA{0, 0, 200, 255})
 	drop("first.mp3", "First", red)
+	// The first image is gone from the inbox by then (moved to 已處理).
+	done := dd.add(inbox, "done", nil)
+	for _, f := range must(dd.Children(ctx, inbox)) {
+		if f.Name == "cover.png" {
+			dd.Move(ctx, f.ID, done, []string{inbox})
+		}
+	}
 	drop("second.mp3", "Second", blue)
 	if got := albumCover(t, im, "First"); got != shaOf(red) {
 		t.Fatalf("first album: %q", got)

@@ -36,7 +36,7 @@ func (s *Server) getLoudness(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	st, err := s.lib.LoudnessStatus(ctx)
+	median, err := s.lib.LoudnessMedian(ctx)
 	if err != nil {
 		s.internal(w, r, err)
 		return
@@ -46,10 +46,11 @@ func (s *Server) getLoudness(w http.ResponseWriter, r *http.Request) {
 		Albums map[int64]library.AlbumLoudness `json:"albums"`
 		Median *float64                        `json:"median"`
 	}
-	writeJSON(w, http.StatusOK, out{Assets: assets, Albums: albums, Median: st.Median})
+	writeJSON(w, http.StatusOK, out{Assets: assets, Albums: albums, Median: median})
 }
 
-// loudnessScan is how much of the library is measured, and the scan's state.
+// loudnessScan is how much of the library is measured, the scan's state, and whether the library
+// is scanned by itself (auto: "", "on" or "off").
 func (s *Server) loudnessScan(w http.ResponseWriter, r *http.Request) {
 	st, err := s.lib.LoudnessStatus(r.Context())
 	if err != nil {
@@ -57,18 +58,22 @@ func (s *Server) loudnessScan(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var scan loudness.ScanState
+	auto := loudness.AutoUnset
 	if s.loudness != nil {
 		scan = s.loudness.State()
+		auto = s.loudness.Auto(r.Context())
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": st, "scan": scan, "available": s.loudness.Available()})
+	writeJSON(w, http.StatusOK, map[string]any{"status": st, "scan": scan, "available": s.loudness.Available(), "auto": auto})
 }
 
-// runLoudnessScan starts ({"run": true}, with "failed": true also the files that could not be
-// measured) or stops ({"run": false}) measuring the library.
+// runLoudnessScan turns scanning by itself on ({"auto": true}, which starts a scan now) or off
+// ({"auto": false}, which stops the one running); or starts one scan ({"run": true}, with
+// "failed": true also the files that could not be measured), or stops it ({"run": false}).
 func (s *Server) runLoudnessScan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Run    bool `json:"run"`
-		Failed bool `json:"failed"`
+		Auto   *bool `json:"auto"`
+		Run    bool  `json:"run"`
+		Failed bool  `json:"failed"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -78,13 +83,18 @@ func (s *Server) runLoudnessScan(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("FFmpeg is not installed, so loudness cannot be measured"))
 		return
 	}
-	if req.Run {
-		if err := s.loudness.Scan(req.Failed); err != nil {
-			writeError(w, http.StatusConflict, err)
-			return
-		}
-	} else {
+	var err error
+	switch {
+	case req.Auto != nil:
+		err = s.loudness.SetAuto(r.Context(), *req.Auto)
+	case req.Run:
+		err = s.loudness.Scan(req.Failed)
+	default:
 		s.loudness.Stop()
+	}
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
 	}
 	s.loudnessScan(w, r)
 }

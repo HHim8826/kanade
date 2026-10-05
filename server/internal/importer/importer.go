@@ -870,10 +870,6 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 			return out, err
 		}
 	}
-	if im.Measure != nil { // while the file is here (one measured already is left as it is)
-		im.Measure(ctx, asset.ID, it.path)
-	}
-
 	// Covers and lyrics lie next to the original, not next to a converted or cut copy.
 	beside := it.path
 	if it.sourcePath != "" {
@@ -908,6 +904,9 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		im.importLyrics(ctx, it.path, res.TrackID, info) // a song cut from an image has no .lrc of its own
 	default:
 		im.importLyrics(ctx, beside, res.TrackID, info)
+	}
+	if im.Measure != nil { // while the file is here, once the song is in the library (one measured already is left as it is)
+		im.Measure(ctx, asset.ID, it.path)
 	}
 	out.state = StatePublished
 	if !res.Created {

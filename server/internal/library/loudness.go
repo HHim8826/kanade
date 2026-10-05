@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"math"
-	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -142,39 +142,70 @@ type LoudnessStatus struct {
 	Measured int      `json:"measured"`
 	Failed   int      `json:"failed"`
 	Files    int      `json:"files"`
+	Pending  int64    `json:"pending_bytes"`    // the size of the files not measured or tried yet: what a scan reads from Drive
 	Median   *float64 `json:"median,omitempty"` // the measured files' median loudness: what an unmeasured one is taken for
 }
 
+// LoudnessStatus counts; its median is LoudnessMedian's.
 func (s *Store) LoudnessStatus(ctx context.Context) (*LoudnessStatus, error) {
 	st := &LoudnessStatus{}
-	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(l.lufs IS NOT NULL), 0), coalesce(sum(l.lufs IS NULL AND l.asset_id IS NOT NULL), 0)
-		FROM assets a LEFT JOIN loudness l ON l.asset_id = a.id WHERE a.state = 'verified'`).Scan(&st.Files, &st.Measured, &st.Failed)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(l.lufs IS NOT NULL), 0), coalesce(sum(l.lufs IS NULL AND l.asset_id IS NOT NULL), 0),
+		coalesce(sum(CASE WHEN l.asset_id IS NULL THEN a.size END), 0)
+		FROM assets a LEFT JOIN loudness l ON l.asset_id = a.id WHERE a.state = 'verified'`).Scan(&st.Files, &st.Measured, &st.Failed, &st.Pending)
 	if err != nil {
 		return nil, err
 	}
-	if st.Measured > 0 {
-		var all []float64
-		rows, err := s.db.QueryContext(ctx, `SELECT l.lufs FROM loudness l JOIN assets a ON a.id = l.asset_id WHERE a.state = 'verified' AND l.lufs IS NOT NULL`)
+	st.Median, err = s.LoudnessMedian(ctx)
+	return st, err
+}
+
+// medianFor is how long a median is used before it is worked out again: it reads every measured
+// file, and hardly moves (review #146).
+const medianFor = time.Minute
+
+// LoudnessMedian is the measured files' median loudness (nil while none is), worked out at most
+// once a minute.
+func (s *Store) LoudnessMedian(ctx context.Context) (*float64, error) {
+	s.medianMu.Lock()
+	defer s.medianMu.Unlock()
+	if !s.medianAt.IsZero() && time.Since(s.medianAt) < medianFor {
+		return s.median, nil
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM loudness l JOIN assets a ON a.id = l.asset_id
+		WHERE a.state = 'verified' AND l.lufs IS NOT NULL`).Scan(&n); err != nil {
+		return nil, err
+	}
+	var median *float64
+	if n > 0 {
+		// The middle one or two, in order: SQLite walks the sorted values without keeping them.
+		rows, err := s.db.QueryContext(ctx, `SELECT l.lufs FROM loudness l JOIN assets a ON a.id = l.asset_id
+			WHERE a.state = 'verified' AND l.lufs IS NOT NULL ORDER BY l.lufs LIMIT ? OFFSET ?`, 2-n%2, (n-1)/2)
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
+		var sum float64
+		k := 0
 		for rows.Next() {
 			var v float64
 			if err := rows.Scan(&v); err != nil {
+				rows.Close()
 				return nil, err
 			}
-			all = append(all, v)
+			sum += v
+			k++
 		}
-		sort.Float64s(all)
-		m := all[len(all)/2]
-		if len(all)%2 == 0 {
-			m = (all[len(all)/2-1] + m) / 2
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
 		}
-		m = math.Round(m*10) / 10
-		st.Median = &m
+		if k > 0 {
+			m := math.Round(sum/float64(k)*10) / 10
+			median = &m
+		}
 	}
-	return st, nil
+	s.median, s.medianAt = median, time.Now()
+	return median, nil
 }
 
 // Unmeasured is a file still to be measured.

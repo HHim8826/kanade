@@ -2,8 +2,10 @@ package library
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // An album's loudness is its measured songs' taken together by power, each weighed by its length,
@@ -67,5 +69,40 @@ func TestAlbumLoudness(t *testing.T) {
 	got, _ = s.AlbumLoudness(ctx, []int64{A})
 	if a := got[A]; a.Measured != 3 || a.LUFS >= want {
 		t.Fatalf("after the merge, album A = %+v", a)
+	}
+}
+
+// The median is the middle measurement (or the mean of the middle two), worked out at most once a
+// minute however often it is asked for (review #146).
+func TestLoudnessMedian(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	f := fixture{t, s}
+	set := func(sha string, lufs float64) {
+		t.Helper()
+		e := f.song(sha, sha, "Album", 1, 1)
+		var id int64
+		s.db.QueryRow(`SELECT asset_id FROM album_entries WHERE id = ?`, e.EntryID).Scan(&id)
+		if err := s.SetLoudness(ctx, id, lufs, 0, MethodEBUR128); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if m, err := s.LoudnessMedian(ctx); err != nil || m != nil {
+		t.Fatalf("none measured: %v %v", m, err)
+	}
+	s.medianAt = time.Time{}
+	for _, v := range []float64{-20, -8, -14} {
+		set(fmt.Sprint(v), v)
+	}
+	if m, _ := s.LoudnessMedian(ctx); m == nil || *m != -14 {
+		t.Fatalf("odd: %v", m)
+	}
+	set("-9", -9)
+	if m, _ := s.LoudnessMedian(ctx); *m != -14 {
+		t.Fatalf("worked out again within the minute: %v", *m)
+	}
+	s.medianAt = s.medianAt.Add(-medianFor)
+	if m, _ := s.LoudnessMedian(ctx); *m != -11.5 {
+		t.Fatalf("even: %v", *m)
 	}
 }

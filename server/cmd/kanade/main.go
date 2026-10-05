@@ -193,9 +193,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 		return err
 	}
 	// Songs' loudness for the volume balance (review #136): measured as they are imported, once
-	// playing has cached them whole, and the rest by a scan of the library a minute after starting
-	// (then every six hours, or when asked).
-	loud := &loudness.Service{Lib: lib, FF: imp.FFmpeg, Source: drive, Hold: cache.Hold, Temp: cfg.Path(config.DirStaging, "loudness"),
+	// playing has cached them whole, and the rest by a scan of the library when asked, or by itself
+	// (a minute after starting, then every six hours) once the balance was turned on (review #155).
+	loud := &loudness.Service{Lib: lib, DB: d, FF: imp.FFmpeg, Source: drive, Hold: cache.Hold, Temp: cfg.Path(config.DirStaging, "loudness"),
 		Every: 6 * time.Hour, Log: log}
 	cache.OnWhole = loud.Cached
 	cache.Explain = gdrive.Explain
@@ -236,6 +236,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	// One shared staging budget (plan §6) for downloads, client uploads and the importer's work
 	// folder, with the free-space reserve; checks and reservations are atomic across them (review #4).
 	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}
+	loud.Budget = budget
 	downloads.ShareBudget(budget)
 	ups.ShareBudget(budget)
 	budget.Use(staging.OnDisk(imp.WorkCommitted))

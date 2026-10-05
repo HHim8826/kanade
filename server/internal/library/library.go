@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync"
+	"time"
 	"unicode"
 
 	"golang.org/x/text/unicode/norm"
@@ -13,7 +15,13 @@ import (
 	"github.com/HHim8826/kanade/server/internal/db"
 )
 
-type Store struct{ db *sql.DB }
+type Store struct {
+	db *sql.DB
+
+	medianMu sync.Mutex
+	median   *float64  // the measured files' median loudness, as last worked out
+	medianAt time.Time // when (review #146)
+}
 
 func New(d *sql.DB) *Store { return &Store{db: d} }
 

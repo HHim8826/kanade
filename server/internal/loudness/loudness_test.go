@@ -82,7 +82,7 @@ func setup(t *testing.T) (*Service, *library.Store, *drive, func(name, driveID s
 		src.files[driveID] = data
 		return a.ID
 	}
-	s := &Service{Lib: lib, FF: ff, Source: src, Temp: t.TempDir(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	s := &Service{Lib: lib, DB: d, FF: ff, Source: src, Temp: t.TempDir(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	return s, lib, src, add
 }
 
