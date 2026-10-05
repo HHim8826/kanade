@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { coverURL } from '../api.js';
-import { Icon, IconButton, Spinner, html, showDialog } from '../ui.js';
+import { Icon, IconButton, Spinner, html, showDialog, useLayer } from '../ui.js';
 
 // ---- the cover, whole (review #134) ----
 // An album's cover over everything else, uncropped: fitted to the window first, zoomed and moved by
@@ -91,21 +91,15 @@ function CoverViewer({ id, title, close }) {
     el.style.transform = `translate(-50%, -50%) translate(${view2.x}px, ${view2.y}px) scale(${view2.s})`;
   });
 
-  // Going back (a phone's back gesture) closes it, without leaving the page.
+  // A layer like the dialogs (review #159): going back (a phone's back gesture) closes it without
+  // leaving the page, and focus goes back to what opened it.
+  const root = useRef(null);
+  useLayer(root, close, closeBtn);
   useEffect(() => {
-    const opener = document.activeElement;
     const wasLocked = document.body.classList.contains('locked');
     document.body.classList.add('locked');
-    history.pushState({ kanadeCover: true }, '');
-    let gone = false;
-    const onPop = () => { gone = true; close(); };
-    addEventListener('popstate', onPop);
-    closeBtn.current && closeBtn.current.focus();
     return () => {
-      removeEventListener('popstate', onPop);
-      if (!gone && history.state && history.state.kanadeCover) history.back();
       if (!wasLocked && !document.querySelector('.now-playing')) document.body.classList.remove('locked');
-      if (opener && opener.focus && document.contains(opener)) opener.focus({ preventScroll: true });
     };
   }, []);
 
@@ -191,7 +185,7 @@ function CoverViewer({ id, title, close }) {
     } catch { /* this time only */ }
   };
   const retry = () => { setFailed(false); setSrc(coverURL(id, 600)); setTries((n) => n + 1); };
-  return html`<div class=${'cover-view' + (light ? ' light' : '')} role="dialog" aria-modal="true" aria-label=${`封面：${title || ''}`}>
+  return html`<div class=${'cover-view' + (light ? ' light' : '')} role="dialog" aria-modal="true" aria-label=${`封面：${title || ''}`} ref=${root}>
     <div class="cover-bar">
       <div class="cover-title">
         <div class="title">${title}</div>

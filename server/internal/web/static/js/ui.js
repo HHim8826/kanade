@@ -1,5 +1,5 @@
 import { h } from '../vendor/preact.module.js';
-import { useEffect, useErrorBoundary, useRef, useState } from '../vendor/hooks.module.js';
+import { useEffect, useErrorBoundary, useLayoutEffect, useRef, useState } from '../vendor/hooks.module.js';
 import htm from '../vendor/htm.module.js';
 import { coverURL } from './api.js';
 import { createStore, useStore } from './store.js';
@@ -281,6 +281,85 @@ export function MenuHost() {
   </div>`;
 }
 
+// ---- layers: dialogs, now playing, the cover viewer (review #159) ----
+// A layer covers the app: while one is open, going back (a phone's back gesture, the browser's
+// button) closes the top one, not the page under it; focus goes into it and Tab stays there; what
+// is under it is inert; closing it gives focus back to what opened it; and going to another page
+// closes them all. However many are open, they take one entry of the history.
+
+const layers = []; // open, the top one last: { el, close, opener, popped }
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+function inertUnderTop() {
+  const top = layers[layers.length - 1];
+  const shell = document.querySelector('.shell');
+  for (const el of [shell, ...layers.map((l) => l.el)]) {
+    if (el) el.inert = !!top && el !== top.el;
+  }
+}
+
+addEventListener('popstate', () => {
+  const top = layers[layers.length - 1];
+  if (!top) return;
+  top.popped = true;
+  if (layers.length > 1) history.pushState({ kanadeLayer: true }, ''); // the rest keep their entry
+  top.close();
+});
+addEventListener('hashchange', () => { // another page: nothing stays over it
+  for (const l of [...layers].reverse()) {
+    l.popped = true; // its entry is under the new page's: nothing to take back
+    l.close();
+  }
+});
+addEventListener('keydown', (e) => { // Tab goes round the top layer
+  const top = layers[layers.length - 1];
+  if (e.key !== 'Tab' || !top || !top.el || document.activeElement?.closest('.menu')) return;
+  const list = [...top.el.querySelectorAll(FOCUSABLE)].filter((x) => x.offsetParent !== null || x === document.activeElement);
+  if (!list.length) {
+    e.preventDefault();
+    return;
+  }
+  const i = list.indexOf(document.activeElement);
+  if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === list.length - 1)) {
+    e.preventDefault();
+    list[e.shiftKey ? (i <= 0 ? list.length - 1 : i - 1) : (i < 0 || i === list.length - 1 ? 0 : i + 1)].focus();
+  }
+});
+
+// useLayer makes the element of ref a layer while the component is shown; close closes it. focus,
+// when given, is where focus goes (else the first element marked autofocus, else the layer).
+export function useLayer(ref, close, focus) {
+  const closing = useRef(close);
+  closing.current = close;
+  // In the commit, before any timer: one dialog replacing another is open before the first one's
+  // entry would be taken back.
+  useLayoutEffect(() => {
+    const layer = { el: ref.current, close: () => closing.current(), opener: document.activeElement, popped: false };
+    layers.push(layer);
+    if (!(history.state && history.state.kanadeLayer)) history.pushState({ kanadeLayer: true }, '');
+    inertUnderTop();
+    const target = (focus && focus.current) || layer.el?.querySelector('[autofocus]') || layer.el;
+    if (target) {
+      if (target === layer.el && !target.hasAttribute('tabindex')) target.tabIndex = -1;
+      target.focus({ preventScroll: true });
+    }
+    return () => {
+      const i = layers.indexOf(layer);
+      if (i >= 0) layers.splice(i, 1);
+      inertUnderTop();
+      const back = layer.opener;
+      if (back && back.focus && document.contains(back) && !back.closest('[inert]')) back.focus({ preventScroll: true });
+      // The last one closed by itself takes its entry back, unless another opens at once (one
+      // dialog replacing another).
+      if (!layers.length && !layer.popped) {
+        setTimeout(() => {
+          if (!layers.length && history.state && history.state.kanadeLayer) history.back();
+        }, 0);
+      }
+    };
+  }, []);
+}
+
 // ---- dialog ----
 // showDialog(render) puts one dialog on screen; render receives close().
 
@@ -296,13 +375,15 @@ export function DialogHost() {
 }
 
 export function Dialog({ title, onClose, children, actions, wide }) {
+  const box = useRef(null);
+  useLayer(box, onClose);
   useEffect(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
   }, [onClose]);
   return html`<div class="scrim" onClick=${(e) => e.target === e.currentTarget && onClose()}>
-    <div class=${'dialog' + (wide ? ' wide' : '')} role="dialog" aria-modal="true" aria-label=${title}>
+    <div class=${'dialog' + (wide ? ' wide' : '')} role="dialog" aria-modal="true" aria-label=${title} ref=${box}>
       <h2>${title}</h2>
       <div class="dialog-body">${children}</div>
       ${actions && html`<div class="dialog-actions">${actions}</div>`}

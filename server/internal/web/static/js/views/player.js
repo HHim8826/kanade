@@ -8,7 +8,7 @@ import {
 import { go, href } from '../router.js';
 import { DragHandle, useReorder } from './common.js';
 import { createStore, useStore } from '../store.js';
-import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
+import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtQuality, fmtTime, html, openMenu, showDialog, toast, useLayer, useLoad } from '../ui.js';
 import { BookmarkDialog, BookmarkList } from './bookmarks.js';
 import { viewCover } from './coverview.js';
 import { showEffects } from './effects.js';
@@ -113,14 +113,22 @@ const showQueue = () => {
 };
 
 export function NowPlaying() {
-  const s = useStore(player);
-  const { tab } = useStore(panel);
-  const item = current();
-  const shown = s.nowPlayingOpen && !!item;
+  const shown = useStore(player, (s) => s.nowPlayingOpen && !!s.queue[s.index]);
   useEffect(() => { // the page underneath must not scroll while this covers it
     document.body.classList.toggle('locked', shown);
   }, [shown]);
-  if (!shown) return null;
+  return shown ? html`<${NowPlayingView} />` : null;
+}
+
+// NowPlayingView is now playing open: a layer over the app (review #159), which going back closes
+// without leaving the page under it.
+function NowPlayingView() {
+  const s = useStore(player);
+  const { tab } = useStore(panel);
+  const item = current();
+  const root = useRef(null);
+  useLayer(root, () => open(false));
+  if (!item) return null;
   const menu = (e) => openMenu(e, [
     item.trackId && { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist([item]) },
     item.albumId && { icon: 'album', label: '前往專輯', onClick: () => go('album/' + item.albumId) },
@@ -128,7 +136,7 @@ export function NowPlaying() {
     item.coverId && { icon: 'image', label: '檢視封面', onClick: () => viewCover(item.coverId, item.album || item.title) },
     { icon: 'equalizer', label: '音效…', onClick: showEffects },
   ]);
-  return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放">
+  return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放" ref=${root}>
     <div class="np-top">
       <${IconButton} icon="expand" label="收起" onClick=${() => open(false)} />
       <${IconButton} icon="more" label="更多" onClick=${menu} />
