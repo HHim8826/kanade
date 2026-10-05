@@ -149,8 +149,14 @@ func scanPlaylists(rows *sql.Rows, err error) ([]Playlist, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) Playlists(ctx context.Context) ([]Playlist, error) {
-	list, err := scanPlaylists(s.db.QueryContext(ctx, playlistSQL+` ORDER BY p.updated_at DESC`))
+// Playlists lists the playlists, the latest changed first; with plain, only those songs are added
+// to (not smart ones).
+func (s *Store) Playlists(ctx context.Context, plain bool) ([]Playlist, error) {
+	where := ``
+	if plain {
+		where = ` WHERE p.rules IS NULL`
+	}
+	list, err := scanPlaylists(s.db.QueryContext(ctx, playlistSQL+where+` ORDER BY p.updated_at DESC`))
 	if err != nil {
 		return nil, err
 	}
@@ -162,14 +168,8 @@ func (s *Store) Playlists(ctx context.Context) ([]Playlist, error) {
 		if err != nil || r == nil {
 			continue
 		}
-		if tracks, _, err := s.SmartTracks(ctx, *r, nil, 0); err == nil {
-			list[i].Tracks = len(tracks)
-			for _, t := range tracks {
-				if t.CoverID != 0 {
-					list[i].CoverID = t.CoverID
-					break
-				}
-			}
+		if n, cover, err := s.SmartSummary(ctx, *r); err == nil {
+			list[i].Tracks, list[i].CoverID = n, cover
 		}
 	}
 	return list, nil

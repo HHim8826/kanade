@@ -105,7 +105,7 @@ func TestPlaylists(t *testing.T) {
 	if got := titles(d); len(got) != 3 || got[0] != "One" || got[1] != "Alone" || got[2] != "One" {
 		t.Fatalf("after reorder and remove: %v", got)
 	}
-	list, _ := s.Playlists(ctx)
+	list, _ := s.Playlists(ctx, false)
 	if len(list) != 1 || list[0].Tracks != 3 || list[0].Name != "Drive" {
 		t.Fatalf("list %+v", list)
 	}

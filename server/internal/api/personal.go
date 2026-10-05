@@ -59,8 +59,9 @@ func (s *Server) setFavorite(kind string) http.HandlerFunc {
 	}
 }
 
+// playlists lists the playlists; ?plain=1 only those songs can be added to (review #162).
 func (s *Server) playlists(w http.ResponseWriter, r *http.Request) {
-	list, err := s.lib.Playlists(r.Context())
+	list, err := s.lib.Playlists(r.Context(), r.URL.Query().Get("plain") == "1")
 	if err != nil {
 		s.internal(w, r, err)
 		return

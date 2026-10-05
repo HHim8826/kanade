@@ -217,6 +217,42 @@ func (s *Store) SmartTracks(ctx context.Context, r Rules, exclude []int64, upTo 
 	return tracks, matches, nil
 }
 
+// SmartSummary is what a list of playlists shows of a smart one (review #162): how many songs it
+// holds and a cover. It is worked out cheaply, and the same each time: the songs are taken in the
+// order they came into the library, whatever the playlist's own order, so with a length limit the
+// count is as near as that order gives.
+func (s *Store) SmartSummary(ctx context.Context, r Rules) (tracks int, cover int64, err error) {
+	cond, args, err := r.where(db.Now())
+	if err != nil {
+		return 0, 0, err
+	}
+	limit := maxSmart
+	if r.Limit > 0 {
+		limit = r.Limit
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT a.duration_ms, coalesce(fa.cover_id, 0) `+trackFrom+` WHERE `+cond+` ORDER BY t.id LIMIT ?`,
+		append(args, limit)...)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	var total int64
+	for rows.Next() {
+		var ms, c int64
+		if err := rows.Scan(&ms, &c); err != nil {
+			return 0, 0, err
+		}
+		if total += ms; r.Minutes > 0 && total > int64(r.Minutes)*60_000 && tracks > 0 { // whole songs while they fit
+			break
+		}
+		tracks++
+		if cover == 0 {
+			cover = c
+		}
+	}
+	return tracks, cover, rows.Err()
+}
+
 // SmartNext picks the next n songs of rules played on and on, leaving out the songs of not (the
 // latest first: those queued to come, the one playing, then those played). When the rules match
 // only songs of not, it goes round again rather than stop (review #105).

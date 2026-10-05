@@ -136,12 +136,29 @@ func TestSmartRules(t *testing.T) {
 	if err := s.SetPlaylistRules(ctx, id, Rules{Conditions: []Condition{{Field: "favorite", Op: "is"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if list, _ := s.Playlists(ctx); len(list) != 1 || !list[0].Smart || list[0].Tracks != 1 {
+	if list, _ := s.Playlists(ctx, false); len(list) != 1 || !list[0].Smart || list[0].Tracks != 1 {
 		t.Fatalf("listed %+v", list)
 	}
 	plain, _ := s.CreatePlaylist(ctx, "plain", "")
 	if err := s.SetPlaylistRules(ctx, plain, Rules{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("rules on an ordinary playlist: %v", err)
+	}
+	// What songs can be added to (review #162): the ordinary ones only.
+	if list, _ := s.Playlists(ctx, true); len(list) != 1 || list[0].ID != plain {
+		t.Fatalf("plain only: %+v", list)
+	}
+	// The list's count is the playlist's, and its cover the same each time, also in random order.
+	if err := s.SetPlaylistRules(ctx, id, Rules{Sort: "random"}); err != nil {
+		t.Fatal(err)
+	}
+	full, _ := s.Playlist(ctx, id)
+	for range 5 {
+		list, _ := s.Playlists(ctx, false)
+		for _, l := range list {
+			if l.ID == id && (l.Tracks != full.Tracks || l.Tracks == 0) {
+				t.Fatalf("listed %d songs, the playlist has %d", l.Tracks, full.Tracks)
+			}
+		}
 	}
 }
 

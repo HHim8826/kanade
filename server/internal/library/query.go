@@ -187,7 +187,10 @@ type TrackItem struct {
 const trackSQL = `SELECT t.id, t.title, t.artist,
 	coalesce(fa.title, ''), coalesce(fa.id, 0), coalesce(fa.cover_id, 0), t.kind,
 	` + briefCols + `
-	FROM tracks t
+	` + trackFrom
+
+// trackFrom is the songs that can be played, each with its file (a) and first album (fa).
+const trackFrom = `FROM tracks t
 	JOIN assets a ON a.id = (SELECT ta.asset_id FROM track_assets ta JOIN assets x ON x.id = ta.asset_id
 		WHERE ta.track_id = t.id AND x.state = 'verified' ORDER BY ta.asset_id LIMIT 1)
 	LEFT JOIN albums fa ON fa.id = (SELECT e.album_id FROM album_entries e WHERE e.track_id = t.id ORDER BY e.id LIMIT 1)`

@@ -61,7 +61,7 @@ export function addToPlaylist(items) {
 }
 
 function AddToPlaylist({ items, close }) {
-  const lists = useLoad(() => get('/playlists'), []);
+  const lists = useLoad(() => get('/playlists?plain=1'), []); // smart playlists pick their songs themselves (review #162)
   const [name, setName] = useState('');
   const [busy, setBusy] = useState(false);
   const payload = items.map((q) => ({ track_id: q.trackId, album_id: q.albumId || 0, asset_id: q.assetId }));
