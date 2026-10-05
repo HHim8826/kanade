@@ -25,17 +25,23 @@ func kindCond(kind string) (string, []any) {
 	return "", nil
 }
 
-// albumRoots follows each album listened from in a period (its first two arguments, from and to)
-// to the album it was merged into, however many merges along (review #109): roots(src, id). A loop
-// or a merge into a missing album ends the walk. Only the period's albums are followed, found
-// through the bucket index, so a short period does not read the whole history (review #129).
-const albumRoots = `WITH RECURSIVE up(src, cur, depth) AS (
-		SELECT id, id, 0 FROM albums WHERE id IN (SELECT album_id FROM listening WHERE bucket >= ? AND bucket < ?)
+// rootsOf follows each album of src (album IDs: a query, or a list of placeholders) to the album it
+// was merged into, however many merges along (review #109, #152): roots(src, id). A loop or a
+// merge into a missing album ends the walk.
+func rootsOf(src string) string {
+	return `WITH RECURSIVE up(src, cur, depth) AS (
+		SELECT id, id, 0 FROM albums WHERE id IN (` + src + `)
 		UNION ALL
 		SELECT up.src, a.merged_into, up.depth + 1 FROM up JOIN albums a ON a.id = up.cur
 			JOIN albums t ON t.id = a.merged_into WHERE up.depth < 32
 	), roots(src, id) AS (SELECT src, cur FROM (SELECT src, cur, max(depth) FROM up GROUP BY src))
 	`
+}
+
+// albumRoots follows the albums listened from in a period (its first two arguments, from and to):
+// only those, found through the bucket index, so a short period does not read the whole history
+// (review #129).
+var albumRoots = rootsOf(`SELECT album_id FROM listening WHERE bucket >= ? AND bucket < ?`)
 
 type spanRow struct {
 	bucket, track, album, ms int64

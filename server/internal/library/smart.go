@@ -73,7 +73,8 @@ func (r *Rules) where(now int64) (string, []any, error) {
 				q = `EXISTS (SELECT 1 FROM album_entries e JOIN albums al ON al.id = e.album_id JOIN album_categories ac ON ac.album_id = al.id
 					WHERE e.track_id = t.id AND ac.category_id IN (` + in + `))`
 			} else {
-				q = `EXISTS (SELECT 1 FROM album_entries e WHERE e.track_id = t.id AND e.album_id IN (` + in + `))`
+				// An album merged since is the album it went into (review #152).
+				q = `EXISTS (SELECT 1 FROM album_entries e WHERE e.track_id = t.id AND e.album_id IN (` + rootsOf(in) + `SELECT id FROM roots))`
 			}
 			for _, id := range c.IDs {
 				args = append(args, id)

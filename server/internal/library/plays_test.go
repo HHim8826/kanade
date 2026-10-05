@@ -3,6 +3,7 @@ package library
 import (
 	"context"
 	"fmt"
+	"slices"
 	"testing"
 	"time"
 )
@@ -227,4 +228,60 @@ func TestDelayedFirstReportKeepsItsTime(t *testing.T) {
 	if latest() != "new" {
 		t.Fatalf("the phone's newer report lost to the fast laptop: %s", latest())
 	}
+}
+
+// Played from an album merged since (review #152): the home rows and the smart playlists find the
+// album it went into, however many merges along, and undo puts them back.
+func TestPlayedAlbumsFollowMerges(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	album := func(name string, kind string) (int64, int64) {
+		t.Helper()
+		asset := assetWithDuration(t, s, name, 1_800_000)
+		res, err := s.Publish(ctx, asset, EntryInput{Title: name, Album: name + " album", AlbumArtist: "X", Kind: kind})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var id int64
+		s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&id)
+		return asset, id
+	}
+	drama, A := album("drama", "spoken")
+	_, B := album("b", "")
+	_, C := album("c", "")
+	s.RecordPlay(ctx, PlayReport{Session: "a", AssetID: drama, AlbumID: A, PositionMS: 600_000, ListenedMS: 600_000})
+	rules := Rules{Match: "all", Sort: "album", Conditions: []Condition{{Field: "album", Op: "is", IDs: []int64{A}}}}
+	check := func(when string, want int64) {
+		t.Helper()
+		recent, _ := s.RecentlyPlayedAlbums(ctx, 10)
+		if len(recent) != 1 || recent[0].ID != want {
+			t.Fatalf("%s: recent albums %+v", when, recent)
+		}
+		if c, _ := s.Continue(ctx); c == nil || c.AlbumID != want {
+			t.Fatalf("%s: continue %+v", when, c)
+		}
+		if spoken, _ := s.UnfinishedSpoken(ctx, 10); len(spoken) != 1 || spoken[0].AlbumID != want {
+			t.Fatalf("%s: unfinished %+v", when, spoken)
+		}
+		if tracks, _, err := s.SmartTracks(ctx, rules, nil, 100); err != nil || !slices.ContainsFunc(tracks, func(it TrackItem) bool { return it.Title == "drama" }) {
+			t.Fatalf("%s: album rule %+v %v", when, tracks, err)
+		}
+	}
+	check("before", A)
+	g1, err := s.MergeAlbum(ctx, A, B)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("merged into B", B)
+	g2, err := s.MergeAlbum(ctx, B, C)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check("then into C", C)
+	for _, g := range []int64{g2, g1} {
+		if _, conflicts, err := s.Undo(ctx, g); err != nil || len(conflicts) != 0 {
+			t.Fatalf("undo: %v %+v", err, conflicts)
+		}
+	}
+	check("undone", A)
 }

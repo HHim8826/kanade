@@ -237,10 +237,13 @@ func (s *Store) resumeItem(ctx context.Context, trackID, pos, albumID int64) (*R
 	}
 	it := ResumeItem{TrackItem: items[0], PositionMS: pos}
 	if albumID != 0 {
+		// The album as it is now, merged or not (review #152), as long as the song is in it.
 		var title string
 		var cover int64
-		if s.db.QueryRowContext(ctx, `SELECT title, coalesce(cover_id, 0) FROM albums WHERE id = ?`, albumID).Scan(&title, &cover) == nil {
-			it.AlbumID, it.Album, it.CoverID = albumID, title, cover
+		if now, _, err := s.AlbumNow(ctx, albumID); err == nil && now != 0 &&
+			s.db.QueryRowContext(ctx, `SELECT title, coalesce(cover_id, 0) FROM albums al WHERE id = ?
+				AND EXISTS (SELECT 1 FROM album_entries e WHERE e.album_id = al.id AND e.track_id = ?)`, now, trackID).Scan(&title, &cover) == nil {
+			it.AlbumID, it.Album, it.CoverID = now, title, cover
 		}
 	}
 	return &it, nil
@@ -272,10 +275,11 @@ func (s *Store) UnfinishedSpoken(ctx context.Context, limit int) ([]ResumeItem, 
 	return s.unfinished(ctx, "AND t.kind = 'spoken'", limit)
 }
 
-// RecentlyPlayedAlbums orders albums by their latest playback.
+// RecentlyPlayedAlbums orders albums by their latest playback: played from an album that was merged
+// since, the album it went into (review #152).
 func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSummary, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT album_id FROM plays WHERE album_id IS NOT NULL
-		GROUP BY album_id ORDER BY max(updated_at) DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, rootsOf(`SELECT DISTINCT album_id FROM plays WHERE album_id IS NOT NULL`)+
+		`SELECT r.id FROM plays p JOIN roots r ON r.src = p.album_id GROUP BY r.id ORDER BY max(p.updated_at) DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
