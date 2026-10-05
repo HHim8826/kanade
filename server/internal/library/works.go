@@ -384,7 +384,9 @@ func (e *editor) setWorks(target string, id int64, v *string) error {
 }
 
 // albumSongsUse changes what the album's songs are to a work: to another work (to > 0), keeping
-// what they say of it already, or to none.
+// what they say of it already, or to none. A song also in another album still linked to the work
+// (a single and a collection share it) keeps what it is to the work, for that album; to another
+// work, it says the same of that one too (review #173).
 func (e *editor) albumSongsUse(album, from, to int64) error {
 	tracks, err := idsTx(e.ctx, e.tx, `SELECT DISTINCT track_id FROM album_entries WHERE album_id = ? ORDER BY track_id`, album)
 	if err != nil {
@@ -399,8 +401,17 @@ func (e *editor) albumSongsUse(album, from, to int64) error {
 		if i < 0 {
 			continue
 		}
+		var elsewhere int
+		if err := e.tx.QueryRowContext(e.ctx, `SELECT count(*) FROM album_entries e JOIN album_works aw ON aw.album_id = e.album_id
+			WHERE e.track_id = ? AND e.album_id != ? AND aw.work_id = ?`, t, album, from).Scan(&elsewhere); err != nil {
+			return err
+		}
 		moved := list[i]
-		list = slices.Delete(list, i, i+1)
+		if elsewhere == 0 {
+			list = slices.Delete(list, i, i+1)
+		} else if to <= 0 {
+			continue
+		}
 		if to > 0 && !slices.ContainsFunc(list, func(w TrackWork) bool { return w.Work == to }) {
 			moved.Work = to
 			list = append(list, moved)

@@ -204,3 +204,83 @@ func TestWorks(t *testing.T) {
 		t.Fatalf("no games: %+v", list)
 	}
 }
+
+// A song a single and a collection share (review #173): unlinking the work from one album leaves
+// what the song is to it, for the other still linked; a link corrected on one says the same of the
+// new work, keeping the old for the other; undo takes each back.
+func TestSharedSongsKeepTheirUses(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	asset := verifiedAsset(t, s, "shared")
+	one, err := s.Publish(ctx, asset, EntryInput{Title: "Undine", Artist: "x", Album: "Single", AlbumArtist: "y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	two, err := s.Publish(ctx, asset, EntryInput{Title: "Undine", Artist: "x", Album: "Collection", AlbumArtist: "y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var single, coll, t1, t2 int64
+	s.db.QueryRow(`SELECT album_id, track_id FROM album_entries WHERE id = ?`, one.EntryID).Scan(&single, &t1)
+	s.db.QueryRow(`SELECT album_id, track_id FROM album_entries WHERE id = ?`, two.EntryID).Scan(&coll, &t2)
+	if t1 != t2 || single == coll {
+		t.Fatalf("not one song in two albums: tracks %d %d, albums %d %d", t1, t2, single, coll)
+	}
+	anim, _ := s.PutWork(ctx, WorkData{Source: SourceBangumi, SourceID: "1", Type: 2, Name: "ARIA"})
+	other, _ := s.PutWork(ctx, WorkData{Source: SourceBangumi, SourceID: "2", Type: 2, Name: "ARIA The NATURAL"})
+	for _, a := range []int64{single, coll} {
+		if _, err := s.LinkWork(ctx, a, anim, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.SetTrackWorks(ctx, t1, []TrackWork{{Work: anim, Use: "op", Note: "episodes 1-13"}}); err != nil {
+		t.Fatal(err)
+	}
+	uses := func() string {
+		t.Helper()
+		var out []string
+		rows, _ := s.db.Query(`SELECT work_id, use, note FROM track_works WHERE track_id = ? ORDER BY work_id`, t1)
+		defer rows.Close()
+		for rows.Next() {
+			var w int64
+			var use, note string
+			rows.Scan(&w, &use, &note)
+			out = append(out, fmt.Sprintf("%d:%s:%s", w, use, note))
+		}
+		return strings.Join(out, " ")
+	}
+	want := fmt.Sprintf("%d:op:episodes 1-13", anim)
+	g, err := s.UnlinkWork(ctx, single, anim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uses(); got != want {
+		t.Fatalf("unlinked from the single: %q", got)
+	}
+	if d, _ := s.Album(ctx, coll); len(d.Works) != 1 || len(d.Entries) != 1 || len(d.Entries[0].Works) != 1 || d.Entries[0].Works[0].Use != "op" {
+		t.Fatalf("the collection: %+v", d)
+	}
+	if _, _, err := s.Undo(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	// Corrected on the single: the song is the same to the new work, and still to the old.
+	g, err = s.LinkWork(ctx, single, other, anim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := uses(); got != want+fmt.Sprintf(" %d:op:episodes 1-13", other) {
+		t.Fatalf("corrected on the single: %q", got)
+	}
+	if _, _, err := s.Undo(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if got := uses(); got != want {
+		t.Fatalf("undone: %q", got)
+	}
+	// Unlinked from both: nothing left.
+	s.UnlinkWork(ctx, single, anim)
+	s.UnlinkWork(ctx, coll, anim)
+	if got := uses(); got != "" {
+		t.Fatalf("unlinked from both: %q", got)
+	}
+}
