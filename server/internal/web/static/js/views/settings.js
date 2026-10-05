@@ -5,6 +5,8 @@ import { EffectsPanel } from './effects.js';
 import { confirmDialog, textDialog } from './organize.js';
 import { showShortcuts } from '../shortcuts.js';
 import { player, resetPlayer, setMode, setPrefs } from '../player.js';
+import { fromAgent } from '../presence.js';
+import { DiscordSettings } from './discord.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
@@ -341,14 +343,6 @@ function Appearance() {
           onClick=${() => choose({ mode: k })}>${label}</button>`)}
       </div>
     </div>`;
-}
-
-// fromAgent names a device by its browser's user agent: "Windows · Chrome".
-function fromAgent(ua) {
-  const os = /iPhone|iPad/.test(ua) ? 'iPhone' : /Android/.test(ua) ? 'Android' : /Mac OS X/.test(ua) ? 'Mac'
-    : /Windows/.test(ua) ? 'Windows' : /Linux/.test(ua) ? 'Linux' : '';
-  const browser = /Edg\//.test(ua) ? 'Edge' : /Firefox\//.test(ua) ? 'Firefox' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : '';
-  return [os, browser].filter(Boolean).join(' · ');
 }
 
 // deviceName guesses a name for a passkey made on this device.
@@ -729,6 +723,7 @@ function SettingsPage({ first, onLogout }) {
     <h2 class="section-title">音效</h2>
     <div class="card pad"><${EffectsPanel} /></div>
     <${Appearance} />
+    <${DiscordSettings} />
     <${StatsTimeZone} />
     <${DownloadSettings} conf=${conf} />
     <h2 class="section-title">服務</h2>

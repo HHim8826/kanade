@@ -25,6 +25,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/bangumi"
 	"github.com/HHim8826/kanade/server/internal/clientip"
 	"github.com/HHim8826/kanade/server/internal/config"
+	"github.com/HHim8826/kanade/server/internal/discord"
 	"github.com/HHim8826/kanade/server/internal/diskguard"
 	"github.com/HHim8826/kanade/server/internal/downloader"
 	"github.com/HHim8826/kanade/server/internal/drivesync"
@@ -34,6 +35,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
+	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
@@ -64,13 +66,15 @@ type Deps struct {
 	Disk      *diskguard.Guard
 	Sync      *drivesync.Syncer
 	Loudness  *loudness.Service
-	Thumbs    *thumbs.Store   // covers made for the web client; nil: one in the data directory
-	Backup    *backup.Service // copies of the database in Drive; nil: none
-	Bangumi   *bangumi.Client // works' descriptions (review #94); nil: one for this version
-	Settings  *settings.Store // the service settings the settings page changes
-	Staging   *staging.Budget // shared by downloads, uploads and the importer
-	Pinned    map[string]bool // resources given as serve flags: they win until the next start
-	StreamKey []byte          // HMAC key for signed stream URLs
+	Thumbs    *thumbs.Store    // covers made for the web client; nil: one in the data directory
+	Backup    *backup.Service  // copies of the database in Drive; nil: none
+	Bangumi   *bangumi.Client  // works' descriptions (review #94); nil: one for this version
+	Presence  *presence.Hub    // what web players play (review #135); nil: one of its own
+	Discord   *discord.Service // shows it as the Discord status; nil: one that is not run
+	Settings  *settings.Store  // the service settings the settings page changes
+	Staging   *staging.Budget  // shared by downloads, uploads and the importer
+	Pinned    map[string]bool  // resources given as serve flags: they win until the next start
+	StreamKey []byte           // HMAC key for signed stream URLs
 	Log       *slog.Logger
 	Version   string
 }
@@ -98,6 +102,8 @@ type Server struct {
 	thumbs    *thumbs.Store
 	backup    *backup.Service
 	bgm       *bangumi.Client
+	presence  *presence.Hub
+	discord   *discord.Service
 	proxy     clientip.Policy
 	streamKey []byte
 	log       *slog.Logger
@@ -120,20 +126,30 @@ func New(d Deps) *Server {
 	if d.Bangumi == nil {
 		d.Bangumi = bangumi.New(d.Version)
 	}
-	return &Server{proxy: proxy, bgm: d.Bangumi, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	if d.Presence == nil {
+		d.Presence = presence.NewHub()
+	}
+	if d.Discord == nil {
+		d.Discord = discord.New(d.DB, d.Presence, d.Config.PublicURL, d.Log)
+	}
+	return &Server{proxy: proxy, bgm: d.Bangumi, presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
 
 type ctxKey int
 
-const userKey ctxKey = 0
+const (
+	userKey    ctxKey = 0
+	sessionKey ctxKey = 1 // the login's ID
+)
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", s.page("pages/index.html"))
 	mux.HandleFunc("GET /privacy", s.page("pages/privacy.html"))
 	mux.HandleFunc("GET /oauth/google/callback", s.oauthCallback)
+	mux.HandleFunc("GET /oauth/discord/callback", s.discordCallback)
 	mux.Handle("GET /app/", web.Handler())
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 
@@ -265,6 +281,14 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/albums/{id}/works", s.authed(s.linkWork))
 	mux.Handle("DELETE /api/v1/albums/{id}/works/{work}", s.authed(s.unlinkWork))
 	mux.Handle("PUT /api/v1/tracks/{id}/works", s.authed(s.setTrackWorks))
+	mux.Handle("GET /api/v1/presence", s.authed(s.presenceInfo))
+	mux.Handle("PUT /api/v1/presence/players/{pid}", s.authed(s.reportPlayer))
+	mux.Handle("DELETE /api/v1/presence/players/{pid}", s.authed(s.removePlayer))
+	mux.Handle("GET /api/v1/discord", s.authed(s.discordInfo))
+	mux.Handle("PUT /api/v1/discord/app", s.authed(s.setDiscordApp))
+	mux.Handle("POST /api/v1/discord/link", s.authed(s.beginDiscordLink))
+	mux.Handle("PATCH /api/v1/discord/link", s.authed(s.changeDiscordLink))
+	mux.Handle("DELETE /api/v1/discord/link", s.authed(s.unlinkDiscord))
 	mux.Handle("POST /api/v1/stream/{id}/url", s.authed(s.streamURL))
 	mux.HandleFunc("GET /api/v1/stream/{id}", s.stream) // header token or signed URL, checked inside
 	mux.HandleFunc("HEAD /api/v1/stream/{id}", s.stream)
@@ -424,7 +448,7 @@ func (s *Server) authed(next http.HandlerFunc) http.Handler {
 			writeError(w, http.StatusForbidden, errors.New("missing "+csrfHeader+" header"))
 			return
 		}
-		uid, err := s.auth.Authenticate(r.Context(), token)
+		uid, sid, err := s.auth.SessionOf(r.Context(), token)
 		if errors.Is(err, auth.ErrNoSession) {
 			writeError(w, http.StatusUnauthorized, err)
 			return
@@ -433,7 +457,7 @@ func (s *Server) authed(next http.HandlerFunc) http.Handler {
 			s.internal(w, r, err)
 			return
 		}
-		next(w, r.WithContext(context.WithValue(r.Context(), userKey, uid)))
+		next(w, r.WithContext(context.WithValue(context.WithValue(r.Context(), userKey, uid), sessionKey, sid)))
 	})
 }
 
@@ -567,6 +591,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
+	s.presence.EndSessions(userID(r), 0, sessionID(r))
 	s.clearCookie(w)
 	w.WriteHeader(http.StatusNoContent)
 }

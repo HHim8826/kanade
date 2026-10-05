@@ -397,28 +397,34 @@ func newSession(ctx context.Context, tx *sql.Tx, id int64, deviceName string) (s
 
 // Authenticate resolves a login token to a user ID. A login ends SessionLifetime after it was made.
 func (s *Service) Authenticate(ctx context.Context, token string) (int64, error) {
+	user, _, err := s.SessionOf(ctx, token)
+	return user, err
+}
+
+// SessionOf resolves a login token to its user and the login's ID.
+func (s *Service) SessionOf(ctx context.Context, token string) (user, session int64, err error) {
 	if token == "" {
-		return 0, ErrNoSession
+		return 0, 0, ErrNoSession
 	}
 	sum := sha256.Sum256([]byte(token))
 	var userID, sessionID, created, lastUsed int64
-	err := s.db.QueryRowContext(ctx, `SELECT id, user_id, created_at, last_used_at FROM sessions WHERE token_hash = ?`, sum[:]).
+	err = s.db.QueryRowContext(ctx, `SELECT id, user_id, created_at, last_used_at FROM sessions WHERE token_hash = ?`, sum[:]).
 		Scan(&sessionID, &userID, &created, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNoSession
+		return 0, 0, ErrNoSession
 	}
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	now := db.Now()
 	if now-created >= SessionLifetime.Milliseconds() {
 		s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID)
-		return 0, ErrNoSession
+		return 0, 0, ErrNoSession
 	}
 	if now-lastUsed > int64(time.Hour/time.Millisecond) { // avoid a write on every request
 		s.db.ExecContext(ctx, `UPDATE sessions SET last_used_at = ? WHERE id = ?`, now, sessionID)
 	}
-	return userID, nil
+	return userID, sessionID, nil
 }
 
 func (s *Service) Logout(ctx context.Context, token string) error {

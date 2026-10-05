@@ -128,6 +128,12 @@ func userID(r *http.Request) int64 {
 	return id
 }
 
+// sessionID is the ID of the login a request was made with.
+func sessionID(r *http.Request) int64 {
+	id, _ := r.Context().Value(sessionKey).(int64)
+	return id
+}
+
 func (s *Server) listPasskeys(w http.ResponseWriter, r *http.Request) {
 	list, err := s.auth.Passkeys(r.Context(), userID(r))
 	if err != nil {

@@ -3,6 +3,7 @@ import { useEffect, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
 import { player, resetPlayer, restoreSession } from './player.js';
+import { checkPresence } from './presence.js';
 import './scrollbars.js';
 import './shortcuts.js';
 import { href, useRoute } from './router.js';
@@ -72,6 +73,7 @@ function App() {
     if (auth !== 'in') return;
     loadFavorites();
     restoreSession(); // the queue this browser had, paused where it was
+    checkPresence(); // whether to tell a companion what plays (review #135)
   }, [auth]);
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;

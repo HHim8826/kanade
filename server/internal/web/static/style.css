@@ -926,3 +926,14 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
   border-radius: var(--radius-s); padding: 6px 8px; }
 .work-uses .note { flex: 1 1 180px; min-width: 0; }
 @media (max-width: 600px) { .candidate-detail { padding-left: 8px; } .work-search .btn { padding: 0 12px; } }
+/* Discord's status (review #135) */
+.discord-settings .companion { border-top: 1px solid var(--outline-variant); margin-top: 12px; padding-top: 8px; }
+.discord-settings select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline);
+  border-radius: var(--radius-s); padding: 6px 8px; max-width: 100%; }
+.app-setup { margin: 12px 0 4px; }
+.app-setup summary { cursor: pointer; font-weight: 500; padding: 4px 0; }
+.steps { margin: 8px 0; padding-left: 20px; font-size: 14px; line-height: 1.6; }
+.steps li { margin-bottom: 8px; }
+.command { display: flex; align-items: center; gap: 8px; margin: 6px 0; padding: 4px 4px 4px 12px; border-radius: var(--radius-s);
+  background: var(--surface-container-high); }
+.command code { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; }

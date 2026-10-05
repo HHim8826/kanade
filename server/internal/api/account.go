@@ -32,6 +32,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.internal(w, r, err)
 	default:
+		s.presence.EndSessions(userID(r), -1) // every login ended with the old password
 		s.clearCookie(w)
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -65,6 +66,7 @@ func (s *Server) endSession(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.internal(w, r, err)
 	default:
+		s.presence.EndSessions(userID(r), 0, id)
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
@@ -77,5 +79,6 @@ func (s *Server) endOtherSessions(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
+	s.presence.EndSessions(userID(r), sessionID(r))
 	writeJSON(w, http.StatusOK, map[string]int{"ended": n})
 }

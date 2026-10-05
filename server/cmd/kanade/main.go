@@ -28,6 +28,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/backup"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/discord"
 	"github.com/HHim8826/kanade/server/internal/diskguard"
 	"github.com/HHim8826/kanade/server/internal/downloader"
 	"github.com/HHim8826/kanade/server/internal/drivesync"
@@ -39,6 +40,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/logfile"
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
+	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/staging"
@@ -297,10 +299,14 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	applyDrive(dr)
 	store.OnDrive = applyDrive
 
+	players := presence.NewHub() // what web players play, shown as the Discord status (review #135)
+	go players.Run(ctx)
+	status := discord.New(d, players, cfg.PublicURL, log)
+	go status.Run(ctx)
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
-		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Backup: backups})
+		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Backup: backups, Presence: players, Discord: status})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()

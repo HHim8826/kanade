@@ -570,6 +570,17 @@ DIR/
 - 讀取：專輯頁、作品頁（`#/work/{id}`）、曲庫「作品」分頁、搜尋結果都只讀資料庫，不等 Bangumi；作品頁發現資料超過 30 天時在背景重新取得。Bangumi 連不上時搜尋與更新回 503（附 Retry-After），已存過的作品照樣能關聯。圖片由伺服器代抓並存進封面縮圖快取（`bgm-` 開頭，共用 256 MB 上限），網頁的 CSP 不需開外部圖片。
 - API：`GET /bangumi/search?q=&types=&offset=&album=`、`GET /bangumi/subjects/{sid}/image`、`GET /works`、`GET /works/{id}`、`GET /works/{id}/image`、`POST /works/{id}/refresh`、`POST /albums/{id}/works`（`source_id`、`replace`）、`DELETE /albums/{id}/works/{work}`、`PUT /tracks/{id}/works`。
 
+### Discord 狀態（2026-10-05，#135，遷移 36：`discord_links`）
+
+- 做法：由伺服器回報，顯示在使用者自己的 Discord 個人狀態（像 Spotify）。使用者用 Discord OAuth 連結一次，授權範圍是 `openid sdk.social_layer_presence identify`；`sdk.social_layer_presence` 是 Discord Social SDK 的權限，應用程式要先在 Developer Portal 開啟 Social SDK（填 Getting Started 表單），但 Kanade 不用 SDK 程式本身：`internal/discord` 用這個 OAuth token 連 Discord Gateway（`wss://gateway.discord.gg/?v=10`，IDENTIFY 的 token 為 `Bearer <access token>`、intents 0），READY 後用 op 3 設定 activity（type 2 Listening、name Kanade、details 歌名、state 歌手、assets 圖示與專輯、timestamps 進度）。這一步不在 Discord 公開文件裡（是 Social SDK 內部的做法，開源的 Discord-Social-RPC 也這樣做），Discord 可能改變；不使用帳號 token，不是 self-bot。
+- 只在有東西要顯示時連線：播放或（使用者選擇顯示時）暫停時連上，清空後送出空的 activities，2 分鐘後斷線，避免 Kanade 讓使用者一直顯示上線。狀態更新至少間隔 5 秒（Discord 有限制），只送最新的；連線中斷時以 5 秒起、最多 5 分鐘的間隔重連；4004（token 被拒）時先換新 token，換不到就把連結標成失效，設定頁請使用者重新連結。token 在到期前 1 小時內自動更新；解除連結時向 Discord 撤銷。
+- 播放狀態（`internal/presence`，記憶體）：網頁每個分頁在真正播放後才回報（`PUT /presence/players/{pid}`：裝置、歌名、歌手、專輯、長度、位置、序號），換歌、播放／暫停、跳轉（位置和時鐘差 2 秒以上）時回報，播放中每 30 秒再報一次；還原的暫停佇列、預載、瀏覽都不回報；關閉分頁送 DELETE，90 秒沒消息視為離開；登出、結束其他登入、改密碼時清掉那些登入的分頁。沒有連結 Discord 時不保存任何狀態（回報的回應 `publish:false`，網頁就停止回報）。選哪個分頁：跟隨的瀏覽器（或任何裝置）中，播放中的優先，其中最後開始播放的；都暫停時取最後變更的；心跳不會讓分頁輪流顯示。
+- 顯示選項（每個帳號）：歌手、專輯、進度、暫停時顯示「已暫停」或清除、播放時的線上狀態（閒置／線上／請勿打擾，預設閒置）、跟隨哪個瀏覽器。不送封面、音檔網址或登入資訊；圖示只用設定頁填的 Art Asset 名稱或 https 網址。
+- 設定：Discord 應用程式的 Client ID、Client Secret（只寫入，API 不回傳）與圖示存在 settings；OAuth token 存在 `discord_links`（也會進每天的資料庫備份）。OAuth 回呼 `GET /oauth/discord/callback` 不靠登入 cookie（SameSite=Strict 不會帶），靠 10 分鐘內有效、只能用一次的 state 對應帳號，完成後導回 `#/settings?discord=linked|denied|expired|scope|refused|failed`。
+- API：`GET /presence`、`PUT|DELETE /presence/players/{pid}`、`GET /discord`、`PUT /discord/app`、`POST /discord/link`（回傳授權網址）、`PATCH /discord/link`、`DELETE /discord/link`。
+- 另一個做法（在使用者電腦上執行、透過本機 Discord RPC 的 `kanade-presence`）已寫好但沒有發佈，放在本機分支 `presence-companion`。
+- 驗證：Go 測試用假的 Discord（OAuth API 與 Gateway WebSocket）驗證連結、只有播放時才連線、送出的 activity、改設定、暫停、清除後斷線、token 被拒後更新、無法更新時停止、缺少權限範圍時不建立連結、解除時撤銷；Chromium 驗證設定頁、授權網址、回呼結果與網頁的回報時機。沒有用真的 Discord 帳號實測。
+
 ## 使用方式（開發環境）
 
 ```bash
