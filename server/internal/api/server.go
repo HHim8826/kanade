@@ -133,9 +133,11 @@ func New(d Deps) *Server {
 	if d.Discord == nil {
 		d.Discord = discord.New(d.DB, d.Presence, d.Config.PublicURL, d.Log)
 	}
-	return &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
+	d.Discord.CoverURL = srv.publicCoverURL
+	return srv
 }
 
 type ctxKey int
@@ -152,6 +154,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/google/callback", s.oauthCallback)
 	mux.HandleFunc("GET /oauth/discord/callback", s.discordCallback)
 	mux.HandleFunc("GET /oauth/bangumi/callback", s.bgmCallback)
+	mux.HandleFunc("GET /pub/covers/{id}/{file}", s.publicCover)
 	mux.Handle("GET /app/", web.Handler())
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 

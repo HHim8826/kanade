@@ -153,3 +153,27 @@ func (o *OAuth) Me(ctx context.Context, access string) (id, name string, err err
 	}
 	return u.ID, name, nil
 }
+
+// ExternalAsset has Discord take a public picture for an application's activities: what to give
+// as the activity's image ("mp:external/…"). Discord's media proxy fetches the address itself.
+func (o *OAuth) ExternalAsset(ctx context.Context, appID, access, picture string) (string, error) {
+	body, _ := json.Marshal(map[string]any{"urls": []string{picture}})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.API+"/applications/"+url.PathEscape(appID)+"/external-assets", strings.NewReader(string(body)))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+access)
+	resp, err := o.HTTP.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("%w (%v)", ErrUnavailable, err)
+	}
+	defer resp.Body.Close()
+	var list []struct {
+		Path string `json:"external_asset_path"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&list) != nil || len(list) == 0 || list[0].Path == "" {
+		return "", fmt.Errorf("Discord did not take the picture (HTTP %d)", resp.StatusCode)
+	}
+	return "mp:" + list[0].Path, nil
+}

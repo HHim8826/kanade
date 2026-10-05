@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -57,12 +58,15 @@ type Service struct {
 	Log       *slog.Logger
 	PublicURL string
 	Grace     time.Duration // how long a connection stays once there is nothing to show
+	// CoverURL is a public address of an album's picture (all: Kanade's own too), or "".
+	CoverURL func(ctx context.Context, album int64, all bool) string
 
 	mu      sync.Mutex
 	ctx     context.Context // Run's; nil until it runs
 	follows map[int64]context.CancelFunc
 	states  map[int64]State
 	pending map[string]pendingLink // OAuth states, to a user
+	assets  map[string]string      // pictures Discord took, by application and address
 }
 
 type pendingLink struct {
@@ -72,7 +76,8 @@ type pendingLink struct {
 
 func New(d *sql.DB, hub *presence.Hub, publicURL string, log *slog.Logger) *Service {
 	return &Service{DB: d, Hub: hub, OAuth: NewOAuth(), Gateway: NewGateway(), Log: log, PublicURL: strings.TrimRight(publicURL, "/"),
-		Grace: 2 * time.Minute, follows: map[int64]context.CancelFunc{}, states: map[int64]State{}, pending: map[string]pendingLink{}}
+		Grace: 2 * time.Minute, follows: map[int64]context.CancelFunc{}, states: map[int64]State{}, pending: map[string]pendingLink{},
+		assets: map[string]string{}}
 }
 
 // RedirectURI is where Discord sends the person back: it goes in the application's OAuth2 redirects.
@@ -223,6 +228,9 @@ func (s *Service) Change(ctx context.Context, user int64, follow, followName *st
 	if show != nil {
 		if show.Paused != "show" {
 			show.Paused = "clear"
+		}
+		if !slices.Contains(presence.Covers, show.Cover) {
+			show.Cover = "none"
 		}
 		l.Show = *show
 	}
@@ -408,8 +416,16 @@ func (s *Service) follow(ctx context.Context, user int64) {
 		}
 		p := s.Hub.Pick(user, l.Follow)
 		shown := presence.ShownBy(p, l.Show)
-		act := Activity(shown, s.Image(ctx), time.Now())
-		key, _ := json.Marshal([]any{shown.State, shown.Title, shown.Artist, shown.Album, shown.DurationMS > 0, l.Status})
+		image := s.Image(ctx)
+		if shown.AlbumID > 0 && s.CoverURL != nil {
+			if u := s.CoverURL(ctx, shown.AlbumID, l.Show.Cover == "all"); u != "" {
+				if mp := s.asset(ctx, user, u); mp != "" {
+					image = mp
+				}
+			}
+		}
+		act := Activity(shown, image, time.Now())
+		key, _ := json.Marshal([]any{shown.State, shown.Title, shown.Artist, shown.Album, shown.DurationMS > 0, l.Status, image})
 		if p != nil {
 			key = fmt.Appendf(key, "|%d|%s", p.Changed, p.Player)
 		}
@@ -442,6 +458,37 @@ func (s *Service) follow(ctx context.Context, user int64) {
 			}
 		}
 	}
+}
+
+// asset is what Discord calls a public picture, for the user's application; "" when it will not
+// take it (the activity then shows the application's own picture). Kept once taken.
+func (s *Service) asset(ctx context.Context, user int64, picture string) string {
+	app := s.App(ctx).ClientID
+	key := app + " " + picture
+	s.mu.Lock()
+	mp, ok := s.assets[key]
+	s.mu.Unlock()
+	if ok {
+		return mp
+	}
+	token, err := s.token(ctx, user)
+	if err != nil {
+		return ""
+	}
+	actx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	mp, err = s.OAuth.ExternalAsset(actx, app, token, picture)
+	if err != nil {
+		s.Log.Info("discord: picture", "err", err)
+		return ""
+	}
+	s.mu.Lock()
+	if len(s.assets) > 2000 {
+		clear(s.assets)
+	}
+	s.assets[key] = mp
+	s.mu.Unlock()
+	return mp
 }
 
 // connection keeps a connection to Discord's gateway for a user, connecting again when it drops,

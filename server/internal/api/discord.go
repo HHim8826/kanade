@@ -1,12 +1,21 @@
 package api
 
 import (
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/HHim8826/kanade/server/internal/discord"
+	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/presence"
+	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
 
 // Discord's status (review #135): web players tell what they play; the server shows it as the
@@ -151,4 +160,65 @@ func (s *Server) discordError(w http.ResponseWriter, r *http.Request, err error)
 	default:
 		s.internal(w, r, err)
 	}
+}
+
+// publicCoverURL is a public address of an album's picture for Discord: its Bangumi entry's, which
+// is public already; else, with all (the owner chose it), Kanade's own cover through publicCover.
+func (s *Server) publicCoverURL(ctx context.Context, album int64, all bool) string {
+	if sub, err := s.lib.AlbumSubject(ctx, album); err == nil && sub != nil && sub.Image {
+		if u, err := s.lib.WorkImage(ctx, sub.ID); err == nil && strings.HasPrefix(u, "https://") {
+			return u
+		}
+	}
+	if !all || !strings.HasPrefix(s.cfg.PublicURL, "https://") {
+		return ""
+	}
+	var cover int64
+	if err := s.db.QueryRowContext(ctx, `SELECT coalesce(cover_id, 0) FROM albums WHERE id = ?`, album).Scan(&cover); err != nil || cover == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s/pub/covers/%d/%s.jpg", strings.TrimRight(s.cfg.PublicURL, "/"), cover, s.coverSig(cover))
+}
+
+func (s *Server) coverSig(cover int64) string {
+	m := hmac.New(sha256.New, s.streamKey)
+	fmt.Fprintf(m, "public-cover|%d", cover)
+	return base64.RawURLEncoding.EncodeToString(m.Sum(nil)[:16])
+}
+
+// publicCover serves a cover without a login, at an address only Kanade makes (signed), while an
+// account shows Kanade's own covers in Discord: Discord's media proxy fetches it. Only the picture.
+func (s *Server) publicCover(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	sig := strings.TrimSuffix(r.PathValue("file"), ".jpg")
+	if err != nil || !hmac.Equal([]byte(sig), []byte(s.coverSig(id))) {
+		http.NotFound(w, r)
+		return
+	}
+	var one int
+	if s.db.QueryRowContext(r.Context(), `SELECT 1 FROM discord_links WHERE json_extract(show, '$.cover') = 'all' LIMIT 1`).Scan(&one) != nil {
+		http.NotFound(w, r)
+		return
+	}
+	c, err := s.lib.Cover(r.Context(), id)
+	if err != nil || c == nil || c.DriveFileID == "" {
+		http.NotFound(w, r)
+		return
+	}
+	data, err := s.thumbs.Get(r.Context(), c.SHA256, thumbs.Size(512), func(ctx context.Context) (io.ReadCloser, error) {
+		resp, err := s.drive.Do(ctx, http.MethodGet, gdrive.MediaURL(c.DriveFileID), nil, nil)
+		if err != nil {
+			return nil, err
+		}
+		return resp.Body, nil
+	})
+	if err != nil {
+		if r.Context().Err() == nil {
+			http.Error(w, "the cover cannot be read now", http.StatusServiceUnavailable)
+		}
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Write(data)
 }

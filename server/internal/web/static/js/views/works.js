@@ -13,6 +13,7 @@ import { done, useLibRev, useRunner } from './organize.js';
 
 export const typeNames = { 1: '書籍', 2: '動畫', 3: '音樂', 4: '遊戲', 6: '三次元' };
 const pickTypes = [[2, '動畫'], [4, '遊戲'], [1, '書籍'], [6, '三次元'], [3, '音樂']];
+const collectNames = { 1: '想聽', 2: '聽過', 3: '在聽', 4: '擱置', 5: '拋棄' };
 export const useNames = { op: '片頭曲', ed: '片尾曲', insert: '插曲', theme: '主題曲', character: '角色歌', bgm: '配樂', other: '其他' };
 // Bangumi's names of platforms that only repeat the type.
 const sameAsType = new Set(['游戏', '书籍', '音乐', '三次元']);
@@ -97,6 +98,21 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
   const [open, setOpen] = useState(null); // the candidate shown in full
   const [busy, run] = useRunner();
   const input = useRef(null);
+  // Binding the album's own entry can collect it in Bangumi too, as asked (kept in this browser).
+  const [account, setAccount] = useState(null);
+  const [collect, setCollect] = useState(() => {
+    try {
+      const v = JSON.parse(localStorage.getItem('kanade.bgm.collect') || 'null');
+      if (v && typeof v.on === 'boolean' && v.type >= 1 && v.type <= 5) return v;
+    } catch { /* storage blocked */ }
+    return { on: true, type: 2 };
+  });
+  const keepCollect = (v) => {
+    setCollect(v);
+    try { localStorage.setItem('kanade.bgm.collect', JSON.stringify(v)); } catch { /* this dialog only */ }
+  };
+  useEffect(() => { if (subject) get('/bangumi/account').then(setAccount, () => setAccount({})); }, []);
+  const linkedBgm = account && account.link && !account.link.error;
   const search = async (more) => {
     const words = more ? found.q : q.trim();
     const kinds = more ? found.types : [...types];
@@ -117,7 +133,12 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
   const link = (c) => run(async () => {
     if (subject) {
       if (c.type !== 3) throw new Error('這個條目不是音樂：動畫、遊戲請用「關聯作品」。');
-      done(await api('PUT', `/albums/${albumId}/subject`, { source_id: c.source_id }), `已綁定 Bangumi 條目「${c.name}」`);
+      const res = await api('PUT', `/albums/${albumId}/subject`, { source_id: c.source_id, collect: linkedBgm && collect.on ? collect.type : 0 });
+      const said = {
+        added: `，並加入收藏：${collectNames[res.status]}`, kept: `；Bangumi 上已收藏（${collectNames[res.status]}），沒有變更`,
+        not_linked: '；Bangumi 帳號連結失效，沒有加入收藏', failed: '；加入 Bangumi 收藏失敗，可稍後在收藏裡再試',
+      }[res.collected] || '';
+      done(res, `已綁定 Bangumi 條目「${c.name}」${said}`);
       return;
     }
     const res = await post(`/albums/${albumId}/works`, { source_id: c.source_id, replace: replacing ? replacing.id : 0 });
@@ -159,6 +180,13 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
       </label>
       <button class="btn tonal" type="submit" disabled=${loading || !q.trim()}>搜尋</button>
     </form>
+    ${subject && account && (linkedBgm ? html`<div class="collect-on-bind">
+        <label class="check-row"><input type="checkbox" checked=${collect.on} onChange=${(e) => keepCollect({ ...collect, on: e.target.checked })} />綁定時加入我的 Bangumi 收藏</label>
+        <select value=${collect.type} disabled=${!collect.on} onChange=${(e) => keepCollect({ ...collect, type: Number(e.target.value) })} aria-label="加入收藏的狀態">
+          ${Object.entries(collectNames).map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
+        </select>
+        <span class="hint tight">已經收藏過的條目不會改動。</span>
+      </div>` : html`<p class="hint tight">在設定連結 Bangumi 帳號後，綁定時可以一併加入收藏。</p>`)}
     <div class="chips" role="group" aria-label="類型">${pickTypes.map(([t, label]) => html`<label key=${t} class="chip-check">
       <input type="checkbox" checked=${types.has(t)} onChange=${() => toggleType(t)} />${label}</label>`)}</div>
     ${error && html`<${ErrorBox} error=${{ message: unavailable(error) }} onRetry=${() => search(false)} />`}

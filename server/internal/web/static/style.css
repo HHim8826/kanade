@@ -961,3 +961,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .seg.collection-type label { justify-content: center; padding: 8px 4px; }
 .seg.collection-type label + label { border-left: 1px solid var(--outline); }
 @media (max-width: 480px) { .stars button { font-size: 21px; padding: 1px; } .stars .star-clear { width: 24px; height: 24px; } }
+.collect-on-bind { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 12px 0 0; padding: 8px 12px; border-radius: var(--radius-s);
+  background: var(--surface-container-high); }
+.collect-on-bind .check-row { margin: 0; }
+.collect-on-bind select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s); padding: 4px 8px; }

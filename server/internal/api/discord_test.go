@@ -1,10 +1,13 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/HHim8826/kanade/server/internal/library"
 )
 
 // The Discord endpoints (review #135): the secret never comes back; players tell nothing while the
@@ -55,5 +58,47 @@ func TestDiscordEndpoints(t *testing.T) {
 	}
 	if rec := do(t, h, "PATCH", "/api/v1/discord/link", tok, map[string]string{"status": "idle"}); rec.Code != http.StatusNotFound {
 		t.Fatalf("change without a link: %d", rec.Code)
+	}
+}
+
+// The album's picture for Discord (review #135): its Bangumi entry's when it has one; Kanade's own
+// only when chosen, at a signed address that serves nothing unless some link shows Kanade's covers.
+func TestPublicCover(t *testing.T) {
+	ctx := context.Background()
+	s, h := newTestServer(t)
+	loginToken(t, s, h) // user 1
+	s.cfg.PublicURL = "https://music.example"
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "c1", Size: 1, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "d-c1")
+	pub, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: "A", AlbumArtist: "y"})
+	var album int64
+	s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub.EntryID).Scan(&album)
+	res, _ := s.db.Exec(`INSERT INTO covers (sha256, drive_file_id, mime, created_at) VALUES ('cov', 'd-cov', 'image/jpeg', 0)`)
+	cover, _ := res.LastInsertId()
+	s.db.Exec(`UPDATE albums SET cover_id = ? WHERE id = ?`, cover, album)
+
+	if u := s.publicCoverURL(ctx, album, false); u != "" {
+		t.Fatalf("Kanade's cover without choosing it: %q", u)
+	}
+	u := s.publicCoverURL(ctx, album, true)
+	if !strings.HasPrefix(u, "https://music.example/pub/covers/"+itoa(cover)+"/") || !strings.HasSuffix(u, ".jpg") {
+		t.Fatalf("own %q", u)
+	}
+	path := strings.TrimPrefix(u, "https://music.example")
+	if rec := do(t, h, "GET", path, "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("served while no link shows Kanade's covers: %d", rec.Code)
+	}
+	s.db.Exec(`INSERT INTO discord_links (user_id, discord_id, access_token, refresh_token, expires_at, show, linked_at) VALUES (1, '42', 'a', 'r', 0, '{"cover":"all"}', 0)`)
+	if rec := do(t, h, "GET", strings.Replace(path, ".jpg", "x.jpg", 1), "", nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("a forged address: %d", rec.Code)
+	}
+	if rec := do(t, h, "GET", path, "", nil); rec.Code == http.StatusNotFound || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("not served: %d", rec.Code) // Drive is not connected here: 503, past the checks
+	}
+	// Its Bangumi entry's picture first.
+	w, _ := s.lib.PutWork(ctx, library.WorkData{Source: "bangumi", SourceID: "9001", Type: 3, Name: "A", Image: "https://lain.bgm.tv/pic/a.jpg"})
+	s.lib.SetAlbumSubject(ctx, album, w)
+	if u := s.publicCoverURL(ctx, album, false); u != "https://lain.bgm.tv/pic/a.jpg" {
+		t.Fatalf("Bangumi's %q", u)
 	}
 }

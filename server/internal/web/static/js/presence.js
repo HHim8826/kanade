@@ -43,7 +43,7 @@ function now() {
   const it = s.queue[s.index];
   if (!it) return { state: 'stopped' };
   return {
-    state: s.playing ? 'playing' : 'paused', title: it.title || '', artist: it.artist || '', album: it.album || '',
+    state: s.playing ? 'playing' : 'paused', title: it.title || '', artist: it.artist || '', album: it.album || '', album_id: it.albumId || 0,
     duration_ms: Math.round(s.duration ? s.duration * 1000 : it.durationMs || 0), position_ms: Math.round(clock.get().time * 1000),
   };
 }

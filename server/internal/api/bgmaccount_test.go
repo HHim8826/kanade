@@ -147,9 +147,13 @@ func TestBangumiAccount(t *testing.T) {
 	if code := call("PUT", path+"/subject", map[string]string{"source_id": "531"}, nil); code != http.StatusBadRequest {
 		t.Fatalf("an anime as the album's subject: %d", code)
 	}
-	var set struct{ Group int64 }
-	if code := call("PUT", path+"/subject", map[string]string{"source_id": "https://bgm.tv/subject/9001"}, &set); code != 200 || set.Group == 0 {
-		t.Fatalf("subject: %d", code)
+	var set struct {
+		Group     int64
+		Collected string
+		Status    int
+	}
+	if code := call("PUT", path+"/subject", map[string]string{"source_id": "https://bgm.tv/subject/9001"}, &set); code != 200 || set.Group == 0 || set.Collected != "" {
+		t.Fatalf("subject: %d %+v", code, set)
 	}
 	var detail library.AlbumDetail
 	if call("GET", path, nil, &detail); detail.Subject == nil || detail.Subject.Name != "Rainbow" || detail.Subject.Score != 7.9 {
@@ -205,7 +209,24 @@ func TestBangumiAccount(t *testing.T) {
 	if call("GET", path, nil, &detail); detail.Subject != nil {
 		t.Fatal("undone subject")
 	}
-	call("PUT", path+"/subject", map[string]string{"source_id": "9001"}, nil)
+	// Bound again, asking to collect it: it is collected already, so it stays as it is.
+	f.mu.Lock()
+	n := len(f.posted)
+	f.mu.Unlock()
+	if call("PUT", path+"/subject", map[string]any{"source_id": "9001", "collect": 1}, &set); set.Collected != "kept" || set.Status != 2 || len(f.posted) != n {
+		t.Fatalf("collected already: %+v, %d posts", set, len(f.posted)-n)
+	}
+	f.mu.Lock()
+	delete(f.collects, "9001")
+	f.mu.Unlock()
+	call("DELETE", path+"/subject", nil, nil)
+	if call("PUT", path+"/subject", map[string]any{"source_id": "9001", "collect": 2}, &set); set.Collected != "added" || set.Status != 2 ||
+		len(f.posted) != n+1 || f.posted[n]["type"] != 2.0 || f.posted[n]["rate"] != nil {
+		t.Fatalf("collected on binding: %+v %v", set, f.posted[len(f.posted)-1])
+	}
+	if code := call("PUT", path+"/subject", map[string]any{"source_id": "9001", "collect": 9}, nil); code != http.StatusBadRequest {
+		t.Fatalf("a collect that is none: %d", code)
+	}
 	// A token no longer accepted (and not renewed: it is not near its end): the link says so.
 	f.mu.Lock()
 	f.expired = true

@@ -74,6 +74,14 @@ func (f *fakeDiscord) serveAPI(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"access_token": access, "refresh_token": "ref", "expires_in": 604800, "scope": f.scope})
 	case "/oauth2/token/revoke":
 		f.revoked.Add(1)
+	case "/applications/123456789012345678/external-assets":
+		var body struct{ URLs []string }
+		json.NewDecoder(r.Body).Decode(&body)
+		if r.Header.Get("Authorization") == "" || len(body.URLs) != 1 {
+			http.Error(w, "{}", 400)
+			return
+		}
+		json.NewEncoder(w).Encode([]map[string]string{{"url": body.URLs[0], "external_asset_path": "external/x/" + strings.TrimPrefix(body.URLs[0], "https://")}})
 	case "/users/@me":
 		f.mu.Lock()
 		ok := r.Header.Get("Authorization") == "Bearer "+f.access
@@ -325,6 +333,40 @@ func TestServiceRefusedLink(t *testing.T) {
 	}
 	if l, _ := s.Link(context.Background(), 1); l.Error == "" || s.Linked(context.Background(), 1) {
 		t.Fatalf("a refused link goes on: %+v %+v", l, s.StateOf(1))
+	}
+}
+
+// The album's picture (review #135): a public address Discord takes as an asset of the application,
+// shown with the album as its caption; none when chosen so.
+func TestServiceShowsCover(t *testing.T) {
+	s, f, hub, _ := setup(t)
+	asked := map[int64]bool{}
+	var mu sync.Mutex
+	s.CoverURL = func(ctx context.Context, album int64, all bool) string {
+		mu.Lock()
+		asked[album] = all
+		mu.Unlock()
+		return "https://lain.bgm.tv/pic/cover/l/rainbow.jpg"
+	}
+	link(t, s)
+	r := playing(1, presence.Playing, "Undine", 0)
+	r.AlbumID = 5
+	hub.Put(1, 7, "tab-a-1234", r)
+	f.next(2)
+	a := f.next(3)["activities"].([]any)[0].(map[string]any)
+	if as := a["assets"].(map[string]any); as["large_image"] != "mp:external/x/lain.bgm.tv/pic/cover/l/rainbow.jpg" || as["large_text"] != "ARIA OST" {
+		t.Fatalf("cover %v", a)
+	}
+	mu.Lock()
+	if all, ok := asked[5]; !ok || all {
+		t.Fatalf("asked %v", asked)
+	}
+	mu.Unlock()
+	show := presence.DefaultShow
+	show.Cover = "none"
+	s.Change(context.Background(), 1, nil, nil, &show, nil)
+	if as := f.next(3)["activities"].([]any)[0].(map[string]any)["assets"].(map[string]any); as["large_image"] != "kanade" {
+		t.Fatalf("no cover: %v", as)
 	}
 }
 

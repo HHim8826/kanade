@@ -94,6 +94,13 @@ export function DiscordSettings() {
           <label class="chip-check"><input type="checkbox" checked=${l.show.paused === 'show'}
             onChange=${(e) => change({ show: { ...l.show, paused: e.target.checked ? 'show' : 'clear' } })} />暫停時顯示「已暫停」</label>
         </div>
+        <label class="field">專輯封面
+          <select value=${l.show.cover || 'bangumi'} onChange=${(e) => change({ show: { ...l.show, cover: e.target.value } })}>
+            <option value="bangumi">只用專輯綁定的 Bangumi 條目封面（公開圖片）</option>
+            <option value="all">也用 Kanade 的封面（會產生公開的封面網址）</option>
+            <option value="none">不顯示封面</option>
+          </select></label>
+        ${l.show.cover === 'all' && html`<p class="hint tight">沒有 Bangumi 條目的專輯，會用一個無法猜到、只有封面圖片的公開網址讓 Discord 抓取；這個網址會出現在 Discord 的狀態資料裡（看得到你的網域）。改回其他選項後網址即失效。</p>`}
         <label class="field">播放時你在 Discord 的線上狀態
           <select value=${l.status} onChange=${(e) => change({ status: e.target.value })}>
             ${statuses.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}

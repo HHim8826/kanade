@@ -29,6 +29,7 @@ type Report struct {
 	Title      string `json:"title"`
 	Artist     string `json:"artist"`
 	Album      string `json:"album"`
+	AlbumID    int64  `json:"album_id"` // the library's album the song is played from, if any
 	DurationMS int64  `json:"duration_ms"`
 	PositionMS int64  `json:"position_ms"`
 }
@@ -53,6 +54,7 @@ type Now struct {
 	Title      string `json:"title"`
 	Artist     string `json:"artist,omitempty"`
 	Album      string `json:"album,omitempty"`
+	AlbumID    int64  `json:"album_id,omitempty"`
 	DurationMS int64  `json:"duration_ms,omitempty"`
 	PositionMS int64  `json:"position_ms"`
 	Changed    int64  `json:"changed"` // when it last changed (ms)
@@ -129,7 +131,7 @@ func (h *Hub) Put(user, session int64, id string, r Report) bool {
 		moved = d > jump || d < -jump
 	}
 	p.Report, p.session, p.at, p.seen = r, session, now, now
-	if !ok || was.State != r.State || was.Title != r.Title || was.Artist != r.Artist || was.Album != r.Album ||
+	if !ok || was.State != r.State || was.Title != r.Title || was.Artist != r.Artist || was.Album != r.Album || was.AlbumID != r.AlbumID ||
 		was.DurationMS != r.DurationMS || moved {
 		p.changed = now
 		h.tell(user)
@@ -236,7 +238,7 @@ func (h *Hub) nowOf(p *player, now time.Time) Now {
 		}
 	}
 	return Now{Player: p.id, Device: p.Device, DeviceName: p.DeviceName, State: p.State, Title: p.Title, Artist: p.Artist, Album: p.Album,
-		DurationMS: p.DurationMS, PositionMS: pos, Changed: p.changed.UnixMilli()}
+		AlbumID: p.AlbumID, DurationMS: p.DurationMS, PositionMS: pos, Changed: p.changed.UnixMilli()}
 }
 
 // Pick is what a companion following device (empty: any) shows: of its players, the one that last

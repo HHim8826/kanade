@@ -574,6 +574,7 @@ DIR/
 
 - 專輯自己的 Bangumi 條目（音樂類，type 3）：和作品分開，一張專輯一個，存成 `works` 的一列並以 `album_subjects` 對應；綁定、改綁、解除走修改紀錄（專輯的 `subject` 欄位），可以撤回；合併時若目標沒有條目就移過去。綁定對話框和作品共用，預設只搜音樂類，非音樂條目不能綁成專輯條目（請用「關聯作品」）。
 - Bangumi 帳號：設定頁填 Bangumi 應用程式（bgm.tv/dev/app）的 App ID 與 App Secret（Secret 只寫入），回調地址 `<public_url>/oauth/bangumi/callback`；OAuth 授權碼流程（`bgm.tv/oauth/authorize`、`/oauth/access_token`），token 一週有效，剩不到一天時更新；被拒（401 或更新失敗）時標成失效，請使用者重新連結。Bangumi 沒有撤銷授權的 API，解除連結只刪除 Kanade 這邊的 token。
+- 綁定時收藏：綁定對話框可勾選「綁定時加入我的 Bangumi 收藏」與狀態（預設勾選「聽過」，記在瀏覽器）；只有該條目還沒收藏時才寫入，已收藏的保持原狀（回應 `collected`：added／kept／not_linked／failed）。這是使用者按下綁定時的動作，播放與瀏覽仍不會改動收藏。
 - 收藏：專輯頁讀取時向 Bangumi 查（`GET /v0/users/{username}/collections/{id}`），附上條目的常用標籤與自己在音樂收藏用過的標籤（掃最多 500 筆收藏，快取 10 分鐘）；只有按「儲存到 Bangumi」才寫入（`POST /v0/users/-/collections/{id}`：狀態 1–5、評分 0–10、吐槽、僅自己可見、最多 10 個不含空白的標籤）。播放、瀏覽都不會改動 Bangumi。
 - 我的收藏清單：曲庫「Bangumi」分頁依狀態列出自己的音樂收藏（每頁 30），標出綁定了該條目的曲庫專輯；沒有的可以直接到 RSS 資源搜尋。不依名稱自動配對。
 - API：`PUT|DELETE /albums/{id}/subject`、`GET|PUT /albums/{id}/collection`、`GET /bangumi/account`、`PUT /bangumi/app`、`POST|DELETE /bangumi/link`、`GET /bangumi/collections?type=&offset=`；`GET /bangumi/search` 的候選多一個 `subject`（是否為這張專輯的條目）。
@@ -587,6 +588,7 @@ DIR/
 - 顯示選項（每個帳號）：歌手、專輯、進度、暫停時顯示「已暫停」或清除、播放時的線上狀態（閒置／線上／請勿打擾，預設閒置）、跟隨哪個瀏覽器。不送封面、音檔網址或登入資訊；圖示只用設定頁填的 Art Asset 名稱或 https 網址。
 - 設定：Discord 應用程式的 Client ID、Client Secret（只寫入，API 不回傳）與圖示存在 settings；OAuth token 存在 `discord_links`（也會進每天的資料庫備份）。OAuth 回呼 `GET /oauth/discord/callback` 不靠登入 cookie（SameSite=Strict 不會帶），靠 10 分鐘內有效、只能用一次的 state 對應帳號，完成後導回 `#/settings?discord=linked|denied|expired|scope|refused|failed`。
 - API：`GET /presence`、`PUT|DELETE /presence/players/{pid}`、`GET /discord`、`PUT /discord/app`、`POST /discord/link`（回傳授權網址）、`PATCH /discord/link`、`DELETE /discord/link`。
+- 專輯封面：Discord 只能顯示公開圖片（由它的 media proxy 抓取），網址先用 `POST /applications/{id}/external-assets`（OAuth token）換成 `mp:external/…` 再放進 activity，換過的會快取。來源依顯示選項（預設 `bangumi`）：專輯綁定的 Bangumi 音樂條目封面（本來就公開）；選 `all` 時，沒有條目的專輯改用 Kanade 自己的封面，網址是 `<public_url>/pub/covers/{id}/{HMAC}.jpg`（512px、只有圖片），只有在某個連結選了 `all` 時才會回應，改回其他選項後即失效；選 `none` 不顯示。網頁回報時帶上專輯 ID。
 - 另一個做法（在使用者電腦上執行、透過本機 Discord RPC 的 `kanade-presence`）已寫好但沒有發佈，放在本機分支 `presence-companion`。
 - 驗證：Go 測試用假的 Discord（OAuth API 與 Gateway WebSocket）驗證連結、只有播放時才連線、送出的 activity、改設定、暫停、清除後斷線、token 被拒後更新、無法更新時停止、缺少權限範圍時不建立連結、解除時撤銷；Chromium 驗證設定頁、授權網址、回呼結果與網頁的回報時機。沒有用真的 Discord 帳號實測。
 

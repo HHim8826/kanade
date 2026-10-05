@@ -97,7 +97,9 @@ func (s *Server) unlinkBgm(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// setAlbumSubject makes an album a Bangumi music subject ({source_id}: its number or link).
+// setAlbumSubject makes an album a Bangumi music subject ({source_id}: its number or link). With
+// collect (1 to 5), the owner asked to collect it too, as that: done only when they have not
+// collected it yet, so what they set in Bangumi stays (collected says how it went).
 func (s *Server) setAlbumSubject(w http.ResponseWriter, r *http.Request) {
 	album, err := pathID(r)
 	if err != nil {
@@ -106,9 +108,14 @@ func (s *Server) setAlbumSubject(w http.ResponseWriter, r *http.Request) {
 	}
 	var req struct {
 		SourceID string `json:"source_id"`
+		Collect  int    `json:"collect"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Collect < 0 || req.Collect > bangumi.Dropped {
+		writeError(w, http.StatusBadRequest, errors.New("collect is from 1 to 5, or 0"))
 		return
 	}
 	sid, ok := bangumi.Ref(req.SourceID)
@@ -144,7 +151,40 @@ func (s *Server) setAlbumSubject(w http.ResponseWriter, r *http.Request) {
 		s.libError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"group": g, "work_id": work})
+	out := map[string]any{"group": g, "work_id": work}
+	if req.Collect > 0 {
+		out["collected"], out["status"] = s.collectOnBinding(r, sid, req.Collect)
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// collectOnBinding collects a subject as typ unless the owner has: "added", "kept" (with how it
+// is collected), "not_linked" or "failed".
+func (s *Server) collectOnBinding(r *http.Request, subject int64, typ int) (string, int) {
+	sess, err := s.bgmAccounts.Session(r.Context(), userID(r))
+	if errors.Is(err, bangumi.ErrNotLinked) {
+		return "not_linked", 0
+	}
+	if err != nil {
+		return "failed", 0
+	}
+	col, err := s.bgm.Collection(r.Context(), sess.Access, sess.Username, subject)
+	if errors.Is(err, bangumi.ErrAuth) {
+		s.bgmAccounts.Failed(userID(r))
+		return "not_linked", 0
+	}
+	if err != nil {
+		return "failed", 0
+	}
+	if col != nil {
+		return "kept", col.Type
+	}
+	if err := s.bgm.SetCollection(r.Context(), sess.Access, subject, bangumi.CollectionChange{Type: &typ}); err != nil {
+		s.log.Info("bangumi: collecting on binding", "err", err)
+		return "failed", 0
+	}
+	s.bgmAccounts.Changed(userID(r))
+	return "added", typ
 }
 
 func (s *Server) clearAlbumSubject(w http.ResponseWriter, r *http.Request) {
