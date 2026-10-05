@@ -1,3 +1,5 @@
+**English** | [繁體中文](README.zh-TW.md)
+
 # Kanade（奏）
 
 A private, self-hosted music library: find releases through BitTorrent, choose the files, download, tidy, store them in your own Google Drive, and play them from a browser on a computer or a phone (an Android app comes later). The interface is in Traditional Chinese.
@@ -16,13 +18,13 @@ A private, self-hosted music library: find releases through BitTorrent, choose t
 
 | | |
 |---|---|
-| ![An album, with quality and categories](docs/images/album.webp) | ![Now playing, with synced lyrics (dark theme)](docs/images/now-playing.webp) |
+| ![An album: quality, categories, its work and Bangumi collection](docs/images/album.webp) | ![Now playing, with synced lyrics (dark theme)](docs/images/now-playing.webp) |
 | ![My listening: heat map and periods](docs/images/stats.webp) | ![A smart playlist and its preview](docs/images/smart-playlist.webp) |
 | ![Tasks: downloads, seeding and imports](docs/images/tasks.webp) | ![Choosing the files of a download](docs/images/downloads.webp) |
 
 ![On a phone: home, now playing, an album (rose dark theme)](docs/images/phone.webp)
 
-The screenshots use a made-up demo library: the albums, artists, lyrics and covers were invented for it.
+The screenshots use a made-up demo library: the albums, artists, lyrics, covers and works were invented for it.
 
 ## Install
 
