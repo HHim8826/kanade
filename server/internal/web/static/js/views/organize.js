@@ -1,5 +1,6 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
+import { forgetAlbums } from '../effects.js';
 import { go, href } from '../router.js';
 import { createStore, useStore } from '../store.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
@@ -11,7 +12,10 @@ import { hasKana, parseVGMdb } from '../vgmdb.js';
 // Bumped after every change, so pages that show library data load it again.
 export const libRev = createStore({ n: 0 });
 export const useLibRev = () => useStore(libRev, (s) => s.n);
-export const changed = () => libRev.set((s) => ({ n: s.n + 1 }));
+export const changed = () => {
+  forgetAlbums(); // an album's loudness is its songs'
+  libRev.set((s) => ({ n: s.n + 1 }));
+};
 
 // done reports a change; the toast offers to undo it right away.
 export function done(res, message) {

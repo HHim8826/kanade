@@ -428,6 +428,7 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .shortcuts > div { display: contents; } /* one grid: the descriptions line up */
 .shortcuts dt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .shortcuts dd { margin: 0; }
+.shortcuts-sub { font-size: 14px; font-weight: 600; margin: 20px 0 10px; color: var(--on-surface-variant); }
 kbd { display: inline-block; min-width: 1.9em; padding: 1px 7px; border: 1px solid var(--outline-variant); border-bottom-width: 2px;
   border-radius: 6px; background: var(--surface-container); font-family: inherit; font-size: 13px; font-weight: 600; line-height: 1.5; text-align: center; }
 @media (max-width: 479px) { .shortcuts { grid-template-columns: 1fr; gap: 4px; } .shortcuts dd { margin-bottom: 8px; } }

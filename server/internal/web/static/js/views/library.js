@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
-import { enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
+import { clock, enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
 import { go, href } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
@@ -35,12 +35,18 @@ function NowCard() {
         <span class="overline">${s.playing || s.buffering ? '正在播放' : '已暫停'}</span>
         <span class="title">${item.title}</span>
         <span class="sub">${[item.artist, item.album].filter(Boolean).join(' · ')}</span>
-        <${ProgressLine} position=${s.time} duration=${s.duration} />
-        <span class="sub">${fmtTime(s.time * 1000)} / ${fmtTime(s.duration * 1000)}</span>
+        <${NowProgress} duration=${s.duration} />
       </span>
     </button>
     <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} filled size=${28} onClick=${toggle} />
   </div>`;
+}
+
+// NowProgress follows the clock by itself, so the card is not drawn again every tick (review #158).
+function NowProgress({ duration }) {
+  const time = useStore(clock, (c) => c.time);
+  return html`<${ProgressLine} position=${time} duration=${duration} />
+    <span class="sub">${fmtTime(time * 1000)} / ${fmtTime(duration * 1000)}</span>`;
 }
 
 function LastPlayedCard({ item }) {

@@ -46,7 +46,6 @@ export const player = createStore({
   index: -1,
   playing: false,
   buffering: false,
-  time: 0, // seconds
   duration: 0, // seconds
   nowPlayingOpen: false,
   original: null, // the queue in its own order while shuffle is on
@@ -59,6 +58,11 @@ export const player = createStore({
   sleep: null, // the sleep timer (review #98): { until } (a time, ms) or { endOfTrack: true }; this device only
   ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
+
+// clock is where the song is (seconds), apart from the player: it moves four times a second, and
+// only what shows it (the seek bar, the time, the lyrics' line) follows it (review #158).
+export const clock = createStore({ time: 0 });
+export const now = () => clock.get().time;
 
 function savePrefs() {
   const { volume, muted, mode, scope, autoContinue, preload, resume } = player.get();
@@ -120,7 +124,9 @@ function fresh() {
   applyVolume();
   if (!src) return audio;
   if (session) session.last = null; // the jump back to the place is not heard time
-  pendingSeek = Math.round(t * 1000);
+  // A place asked for that the old element had not reached yet (a bookmark, resuming, while the song
+  // loads) is still the place (review #141).
+  if (pendingSeek === null) pendingSeek = Math.round(t * 1000);
   audio.src = src;
   if (wasPlaying) {
     player.set({ buffering: true });
@@ -130,9 +136,16 @@ function fresh() {
 }
 attach(audio, applyVolume, near, fresh);
 applyVolume();
+// deferred is the stream of a song brought back paused after a reload, not asked for until it is
+// played (review #154): opening the page fetches nothing from Drive, and shows no error.
+let deferred = null;
 // play starts the element, the sound effects ready first (a play asked for lets the browser start them).
 const play = () => {
   wake();
+  if (deferred) {
+    audio.src = deferred;
+    deferred = null;
+  }
   return audio.play();
 };
 
@@ -183,10 +196,12 @@ function report(finished = false, keepalive = false) {
 
 let pendingSeek = null; // ms to jump to once the new track can seek
 let loads = 0; // counts songs loaded: a wait begun for one song controls nothing once another began (review #125)
+let seeks = 0; // counts places asked for (seek, a bookmark): resuming found late gives way to them (review #142)
 
 // load plays the queue item at index. again is a loop coming round (repeat one, or the queue
-// starting over): that plays from the start, never from where it was resumed (review #42).
-function load(index, autoplay = true, again = false) {
+// starting over): that plays from the start, never from where it was resumed (review #42). lazy,
+// with autoplay off, leaves the stream unasked for until the song is played (review #154).
+function load(index, autoplay = true, again = false, lazy = false) {
   const s = player.get();
   const item = s.queue[index];
   if (!item) return;
@@ -199,22 +214,32 @@ function load(index, autoplay = true, again = false) {
   delete item.resumeMs;
   // Otherwise as the settings say for its kind: drama and radio pick up where they stopped, music
   // starts over (review #78). A loop coming round always starts over.
+  // The answer counts only for this load, and only while no place was asked for since (review #142).
   if (!again && pendingSeek === null && s.resume[item.kind === 'spoken' ? 'spoken' : 'music'] === 'resume') {
+    const loaded = loads, sought = seeks;
     get(`/assets/${item.assetId}/resume`).then((r) => {
-      if (session && session.item === item && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
+      if (loads === loaded && seeks === sought && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
   }
-  player.set({ index, time: (pendingSeek || 0) / 1000, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay });
+  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay });
+  clock.set({ time: (pendingSeek || 0) / 1000 });
   applyVolume(); // this song's balance
   learn(near());
-  audio.src = streamURL(item.assetId);
+  deferred = null;
+  if (lazy && !autoplay) {
+    audio.removeAttribute('src');
+    audio.load();
+    deferred = streamURL(item.assetId);
+  } else {
+    audio.src = streamURL(item.assetId);
+  }
   if (autoplay) play().catch(() => player.set({ playing: false, buffering: false }));
   updateMediaSession(item);
   savePlace();
 }
 
 function seekWhenReady(ms) {
-  if (audio.readyState >= 1) audio.currentTime = ms / 1000;
+  if (audio.readyState >= 1 && !deferred) audio.currentTime = ms / 1000;
   else pendingSeek = ms;
 }
 
@@ -646,7 +671,7 @@ export function restoreSession() {
   item.resumeMs = Math.round(t * 1000);
   restored = false; // bringing it back is not a change of this tab's to keep
   player.set({ queue: saved.queue, index, original, from: saved.from || 0, radio: saved.radio || null, radioError: null });
-  load(index, false);
+  load(index, false, false, true);
   restored = true;
   clearTimeout(saveTimer);
   unsaved = false;
@@ -671,11 +696,13 @@ export function resetPlayer(withReport = true, signOut = false) {
   gen++;
   session = null;
   pendingSeek = null;
+  deferred = null;
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
-  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, time: 0, scrub: null, duration: 0, nowPlayingOpen: false,
+  player.set({ queue: [], index: -1, original: null, playing: false, buffering: false, scrub: null, duration: 0, nowPlayingOpen: false,
     radio: null, radioError: null });
+  clock.set({ time: 0 });
   clearTimeout(saveTimer); // an empty queue is nothing to keep
   unsaved = false;
   if ('mediaSession' in navigator) navigator.mediaSession.metadata = null;
@@ -683,8 +710,18 @@ export function resetPlayer(withReport = true, signOut = false) {
 
 export function toggle() {
   if (!current()) return;
-  if (audio.paused) play().catch(() => {});
-  else {
+  if (audio.paused) resume();
+  else pause();
+}
+
+// resume and pause do one thing each: a "play" from a headset or a car while playing changes
+// nothing (review #170).
+export function resume() {
+  if (current() && audio.paused) play().catch(() => {});
+}
+
+export function pause() {
+  if (!audio.paused) {
     pauses++;
     audio.pause();
   }
@@ -728,7 +765,7 @@ function stopAtEnd() {
 
 export function prev() {
   const s = player.get();
-  if (audio.currentTime > 3 || (s.index === 0 && s.repeat === 'off')) seek(0);
+  if (now() > 3 || (s.index === 0 && s.repeat === 'off')) seek(0);
   else load(s.index > 0 ? s.index - 1 : s.queue.length - 1);
 }
 
@@ -738,8 +775,11 @@ export const playAt = (i) => load(i);
 // once on release, so a drag is one jump, not one per pointer move (review #41).
 export const seek = (sec) => {
   if (!isFinite(sec) || !current()) return;
-  audio.currentTime = sec;
-  player.set({ time: sec, scrub: null });
+  seeks++;
+  if (deferred) pendingSeek = Math.round(sec * 1000); // not loaded yet: it starts there
+  else audio.currentTime = sec;
+  player.set({ scrub: null });
+  clock.set({ time: sec });
   savePlace();
 };
 export const scrubTo = (sec) => isFinite(sec) && player.set({ scrub: sec });
@@ -761,10 +801,10 @@ function prefetchNext() {
 
 let lastTick = 0;
 on('timeupdate', () => {
-  const now = performance.now();
-  if (now - lastTick < 250) return; // 4 updates a second is plenty
-  lastTick = now;
-  player.set({ time: audio.currentTime });
+  const t = performance.now();
+  if (t - lastTick < 250) return; // 4 updates a second is plenty
+  lastTick = t;
+  clock.set({ time: audio.currentTime });
   if (player.get().sleep) checkSleep();
 });
 
@@ -829,11 +869,21 @@ export function playBookmark(b, anyway = false) {
   }
   playQueue([{ ...item, resumeMs: b.position_ms }], 0);
 }
-on('seeked', () => player.set({ time: audio.currentTime }));
-on('durationchange', () => isFinite(audio.duration) && player.set({ duration: audio.duration }));
-on('play', () => player.set({ playing: true }));
+on('seeked', () => {
+  clock.set({ time: audio.currentTime });
+  positionState();
+});
+on('durationchange', () => {
+  if (isFinite(audio.duration)) player.set({ duration: audio.duration });
+  positionState();
+});
+on('play', () => {
+  player.set({ playing: true });
+  playbackState('playing');
+});
 on('pause', () => {
   player.set({ playing: false });
+  playbackState('paused');
   if (!audio.ended) report();
 });
 on('waiting', () => player.set({ buffering: true }));
@@ -855,27 +905,89 @@ on('ended', () => {
   if (player.get().repeat === 'one') load(player.get().index, true, true);
   else next();
 });
-on('error', () => {
+// A song that cannot be played says why (review #167): the server is asked for its first byte,
+// and answers with the reason Drive failed. One that can be read now (Drive failed a moment) is
+// tried once more from where it was.
+let retried = 0; // the load tried again already
+on('error', async () => {
   if (!audio.getAttribute('src')) return; // emptied on purpose
-  const item = current();
+  const item = current(), loaded = loads, s = player.get();
+  const wanted = s.playing || s.buffering, at = audio.currentTime, code = audio.error && audio.error.code;
   player.set({ buffering: false, playing: false });
-  if (item) toast(`無法播放「${item.title}」`, 'error');
+  if (!item) return;
+  const why = await streamProblem(item);
+  if (loads !== loaded) return; // another song since
+  if (why === null && retried !== loaded) {
+    retried = loaded;
+    if (at > 0) pendingSeek = Math.round(at * 1000);
+    audio.src = streamURL(item.assetId);
+    if (wanted) {
+      player.set({ buffering: true });
+      play().catch(() => player.set({ playing: false, buffering: false }));
+    }
+    return;
+  }
+  const said = {
+    not_connected: '沒有連線 Google Drive，無法播放。請到「設定」連線。',
+    auth_expired: 'Google Drive 的授權已過期，無法播放。請到「設定」重新連線。',
+    gone: `「${item.title}」的檔案已不在 Google Drive。`,
+    drive: `暫時無法從 Google Drive 讀取「${item.title}」，請稍後再試。`,
+    network: `連不上伺服器，無法播放「${item.title}」。`,
+  }[why];
+  toast(said || (why === null && (code === 3 || code === 4) ? `這個瀏覽器無法播放「${item.title}」的格式。` : `無法播放「${item.title}」`), 'error');
 });
+
+// streamProblem is why a song's stream cannot be read: null when it can now, a reason the server
+// gave, network, or another word.
+async function streamProblem(item) {
+  try {
+    const res = await fetch(streamURL(item.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' });
+    if (res.ok) {
+      res.body && res.body.cancel().catch(() => {});
+      return null;
+    }
+    const body = await res.json().catch(() => null);
+    return (body && body.reason) || `http${res.status}`;
+  } catch {
+    return 'network';
+  }
+}
 
 // Lock screen, notification and headset controls.
 function updateMediaSession(item) {
   if (!('mediaSession' in navigator)) return;
   const art = item.coverId ? [96, 256, 512].map((n) => ({ src: coverURL(item.coverId, n), sizes: `${n}x${n}`, type: 'image/jpeg' })) : [];
   navigator.mediaSession.metadata = new MediaMetadata({ title: item.title, artist: item.artist, album: item.album || '', artwork: art });
+  playbackState(audio.paused ? 'paused' : 'playing');
+}
+
+// The system is told whether something plays and where (review #170), so a lock screen shows the
+// progress and its buttons do what they say.
+function playbackState(state) {
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = current() ? state : 'none';
+  positionState();
+}
+function positionState() {
+  const ms = 'mediaSession' in navigator && navigator.mediaSession;
+  const d = audio.duration;
+  if (!ms || !ms.setPositionState || !isFinite(d) || d <= 0) return;
+  try {
+    ms.setPositionState({ duration: d, playbackRate: audio.playbackRate || 1, position: Math.min(Math.max(audio.currentTime, 0), d) });
+  } catch { /* a value the platform refuses */ }
 }
 
 if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession;
-  ms.setActionHandler('play', toggle);
-  ms.setActionHandler('pause', toggle);
-  ms.setActionHandler('previoustrack', prev);
-  ms.setActionHandler('nexttrack', next);
-  try {
-    ms.setActionHandler('seekto', (d) => seek(d.seekTime));
-  } catch { /* not supported */ }
+  const step = (by) => seek(Math.min(Math.max(now() + by, 0), player.get().duration || now() + by));
+  const actions = [
+    ['play', resume], ['pause', pause], ['previoustrack', prev], ['nexttrack', next],
+    ['seekto', (d) => seek(d.seekTime)],
+    ['seekbackward', (d) => step(-(d.seekOffset || 10))],
+    ['seekforward', (d) => step(d.seekOffset || (current() && current().kind === 'spoken' ? 30 : 10))],
+  ];
+  for (const [action, f] of actions) {
+    try {
+      ms.setActionHandler(action, f);
+    } catch { /* not supported */ }
+  }
 }

@@ -2,7 +2,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get, post } from '../api.js';
 import { BANDS, MAX_DB, PRESETS, TARGETS, boost as boostOf, effects, presetOf, setEffects } from '../effects.js';
 import { useStore } from '../store.js';
-import { Dialog, ErrorBox, html, showDialog, toast } from '../ui.js';
+import { Dialog, ErrorBox, fmtBytes, html, showDialog, toast } from '../ui.js';
 
 // The sound effects' controls (reviews #136, #139), in the settings and from now playing.
 
@@ -100,7 +100,8 @@ export function EffectsPanel() {
 }
 
 // Measured is how much of the library the server has measured for the balance, with the scan that
-// measures the rest (it starts by itself; it can be stopped, or run again for the files that failed).
+// measures the rest: by itself once the balance is on, until it is stopped here (which lasts), or
+// once more for the files that failed (review #155).
 function Measured() {
   const [st, setSt] = useState(null);
   const [error, setError] = useState(null);
@@ -116,13 +117,19 @@ function Measured() {
   const { status: s, scan } = st;
   if (!st.available) return html`<p class="hint">伺服器沒有安裝 FFmpeg，無法分析歌曲的響度；裝好之後就會開始。</p>`;
   const left = s.files - s.measured - s.failed;
+  const why = {
+    not_connected: '沒有連線 Google Drive，分析停了下來；連線後按「繼續分析」。',
+    auth_expired: 'Google Drive 的授權已過期，分析停了下來；重新連線後按「繼續分析」。',
+    drive: '有些檔案這次沒能從 Google Drive 讀完，下次分析時會再試。',
+    room: '暫存空間不夠複製某些檔案，下次分析時會再試。',
+  }[scan.reason] || scan.error;
   return html`<div class="measured">
     <span class="sub">已分析 ${s.measured}／${s.files} 首${scan.running ? `，正在分析（這次 ${scan.done} 首）…` : left > 0 ? `，還有 ${left} 首` : ''}${s.failed ? `；${s.failed} 首無法分析` : ''}</span>
     ${scan.running
-      ? html`<button class="btn text" onClick=${() => act({ run: false })}>停止</button>`
-      : html`${left > 0 && html`<button class="btn text" onClick=${() => act({ run: true })}>繼續分析</button>`}
+      ? html`<button class="btn text" onClick=${() => act({ auto: false })}>停止</button>`
+      : html`${left > 0 && html`<button class="btn text" onClick=${() => act({ auto: true })}>${st.auto === '' ? '開始分析' : '繼續分析'}</button>`}
           ${s.failed > 0 && html`<button class="btn text" onClick=${() => act({ run: true, failed: true })}>重試無法分析的</button>`}`}
-    ${scan.error && html`<p class="hint tight">${scan.error === 'some files could not be read from Drive; they are measured on another scan'
-      ? '有些檔案這次沒能從 Drive 讀完，下次分析時會再試。' : scan.error}</p>`}
+    ${!scan.running && left > 0 && html`<p class="hint tight">${st.auto === 'off' ? '自動分析已停止。' : ''}分析會從 Google Drive 逐首讀取還沒分析的歌（約 ${fmtBytes(s.pending_bytes)}），只讀不存。</p>`}
+    ${why && html`<p class="hint tight">${why}</p>`}
   </div>`;
 }

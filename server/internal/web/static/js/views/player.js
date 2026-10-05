@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import { ApiError, api, get, post } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
-  cancelSleep, clearUpcoming, current, cycleMode, endScrub, extendSleep, moveItem, next, playAfterCurrent, playAt, player, prev,
+  cancelSleep, clearUpcoming, clock, current, cycleMode, endScrub, extendSleep, moveItem, next, now, playAfterCurrent, playAt, player, prev,
   removeAt, resetPlayer, retryRadio, scrubTo, seek, setPrefs, setSleep, setVolume, sleepAfterTrack, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
@@ -23,13 +23,23 @@ const openTab = (tab) => {
   open(true);
 };
 
-// shownTime is where the song is, or where the seek bar is being dragged to.
-const shownTime = (s) => (s.scrub ?? s.time);
+// useShownTime is where the song is, or where the seek bar is being dragged to; only what uses it
+// follows the clock (review #158).
+const useShownTime = (s) => {
+  const time = useStore(clock, (c) => c.time);
+  return s.scrub ?? time;
+};
+
+// Elapsed is the time shown (and with total, the song's length after it).
+function Elapsed({ s, total }) {
+  const t = useShownTime(s);
+  return total ? `${fmtTime(t * 1000)} / ${fmtTime(s.duration * 1000)}` : fmtTime(t * 1000);
+}
 
 // Seek is the playing position as a slider; the filled part follows it. Dragging previews the
 // position and seeks once on release; each key press seeks at once (review #41).
 function Seek({ s, className }) {
-  const t = shownTime(s);
+  const t = useShownTime(s);
   const pct = s.duration ? Math.min(t / s.duration, 1) * 100 : 0;
   return html`<input class=${'seek ' + className} type="range" min="0" max=${s.duration || 0} step="0.1" value=${t}
     style=${{ '--p': pct + '%' }} onInput=${(e) => scrubTo(parseFloat(e.target.value))}
@@ -42,7 +52,7 @@ function seekKey(e, s) {
   const by = { ArrowLeft: -5, ArrowDown: -5, ArrowRight: 5, ArrowUp: 5, PageDown: -30, PageUp: 30 }[e.key];
   if (!by || !s.duration) return;
   e.preventDefault();
-  seek(Math.min(Math.max(s.time + by, 0), s.duration));
+  seek(Math.min(Math.max(now() + by, 0), s.duration));
 }
 
 const modeLook = { order: ['order', '順序播放'], all: ['repeat', '列表循環'], one: ['repeatOne', '單曲循環'], shuffle: ['shuffle', '隨機播放'] };
@@ -82,7 +92,7 @@ export function PlayerBar() {
     </div>
     <div class="bar-extra">
       ${s.sleep && html`<${SleepButton} s=${s} compact />`}
-      <span class="bar-time wide-only">${fmtTime(shownTime(s) * 1000)} / ${fmtTime(s.duration * 1000)}</span>
+      <span class="bar-time wide-only"><${Elapsed} s=${s} total /></span>
       <span class="wide-only">${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}</span>
       <span class="wide-only"><${IconButton} icon="lyrics" label="歌詞" onClick=${() => openTab('lyrics')} /></span>
       <${IconButton} icon="queue" label="播放佇列" onClick=${() => openTab('queue')} />
@@ -139,7 +149,7 @@ export function NowPlaying() {
         </div>
         <div class="quality">${fmtQuality(item.asset)}</div>
         <${Seek} s=${s} className="np-seek" />
-        <div class="times"><span>${fmtTime(shownTime(s) * 1000)}</span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
+        <div class="times"><span><${Elapsed} s=${s} /></span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
         <div class="np-controls">
           <${ModeButton} s=${s} />
           <${IconButton} icon="prev" label="上一首" onClick=${prev} size=${32} />
@@ -150,7 +160,7 @@ export function NowPlaying() {
         <${Volume} s=${s} />
         <div class="np-tools">
           <${SleepButton} s=${s} />
-          ${item.trackId && html`<button class="btn text" onClick=${() => addBookmark(item)} aria-label=${`在 ${fmtTime(shownTime(s) * 1000)} 加書籤`}>
+          ${item.trackId && html`<button class="btn text" onClick=${() => addBookmark(item)} aria-label="在目前位置加書籤">
             <${Icon} name="bookmarkAdd" />加書籤</button>`}
         </div>
       </div>
@@ -160,7 +170,7 @@ export function NowPlaying() {
         ${[['queue', '播放佇列'], ['lyrics', '歌詞'], ['bookmarks', '書籤']].map(([k, label]) => html`<button role="tab" aria-selected=${k === tab}
           class=${k === tab ? 'active' : ''} onClick=${() => panel.set({ tab: k })}>${label}</button>`)}
       </nav>
-      ${tab === 'queue' ? html`<${Queue} s=${s} />` : tab === 'lyrics' ? html`<${Lyrics} item=${item} time=${s.time} />`
+      ${tab === 'queue' ? html`<${Queue} s=${s} />` : tab === 'lyrics' ? html`<${Lyrics} item=${item} />`
         : html`<${TrackBookmarks} item=${item} />`}
     </div>
   </div>`;
@@ -219,7 +229,7 @@ function SleepDialog({ close }) {
 const bookmarksRev = createStore({ n: 0 });
 
 function addBookmark(item) {
-  const at = Math.round((player.get().scrub ?? player.get().time) * 1000);
+  const at = Math.round((player.get().scrub ?? now()) * 1000);
   showDialog((close) => html`<${BookmarkDialog} close=${close} item=${item} at=${at}
     onSaved=${() => { bookmarksRev.set((v) => ({ n: v.n + 1 })); panel.set({ tab: 'bookmarks' }); }} />`);
 }
@@ -405,6 +415,13 @@ function FoundLyrics({ item, auto, onChosen, query = '', onAdjust, frame = (body
 
 // parseLRC reads [mm:ss.xx] lines (several tags on one line repeat it) and [offset:±ms];
 // word-level <mm:ss.xx> tags of enhanced LRC are dropped.
+// lineAt is the last line started by ms (-1 before the first).
+function lineAt(lines, ms) {
+  let at = -1;
+  for (let i = 0; i < lines.length && lines[i].t <= ms; i++) at = i;
+  return at;
+}
+
 export function parseLRC(text) {
   let offset = 0;
   const lines = [];
@@ -425,7 +442,7 @@ export function parseLRC(text) {
   return lines.sort((a, b) => a.t - b.t);
 }
 
-function Lyrics({ item, time }) {
+function Lyrics({ item }) {
   const rev = useStore(lyricsRev, (s) => s.n);
   const loaded = useLoad(() => loadLyrics(item.trackId), [item.trackId, rev]);
   // Lyrics this page has already are shown at once, with no wait in between (review #132).
@@ -433,9 +450,8 @@ function Lyrics({ item, time }) {
   const lines = useMemo(() => (data.data && data.data.synced ? parseLRC(data.data.text) : []), [data.data]);
   const box = useRef(null);
   const userScrolled = useRef(0);
-  const ms = time * 1000;
-  let at = -1;
-  for (let i = 0; i < lines.length && lines[i].t <= ms; i++) at = i;
+  // The line now: this follows the clock, and changes a few times a minute (review #158).
+  const at = useStore(clock, (c) => lineAt(lines, c.time * 1000));
 
   useEffect(() => { // keep the current line in the middle, unless the listener is scrolling
     const el = box.current;

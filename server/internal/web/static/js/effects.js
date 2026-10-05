@@ -1,4 +1,4 @@
-import { get } from './api.js';
+import { get, post } from './api.js';
 import { createStore } from './store.js';
 
 // ---- sound effects: the equalizer, and the volume balance (reviews #139, #136) ----
@@ -63,9 +63,22 @@ export function setEffects(patch) {
   } catch { /* this page only */ }
   settle();
   if ('balance' in patch || 'target' in patch) {
+    held = null; // a choice made now applies now
     learn(around());
     reapply();
+    if (balance !== 'off') scanWhenOn();
   }
+}
+
+// scanWhenOn has the server measure the library by itself once the balance is on (review #155):
+// unless someone turned that off there, it is turned on (and starts) the first time.
+let scanAsked = false;
+function scanWhenOn() {
+  if (scanAsked) return;
+  scanAsked = true;
+  get('/loudness/scan').then((st) => {
+    if (st.available && st.auto === '') return post('/loudness/scan', { auto: true });
+  }).catch(() => { scanAsked = false; });
 }
 
 // headroom is the curve's largest band.
@@ -78,6 +91,9 @@ const wanted = () => {
 };
 
 let element = null, reapply = () => {}, around = () => [], renew = null;
+// want is the volume last asked for (output's), which a new graph starts at (review #140).
+let want = { level: 1, muted: false, gain: 1 };
+const level = () => (want.muted ? 0 : want.level * want.gain);
 // The graph, while the equalizer has a curve: source → master (volume) → pre → bands → speakers.
 let ctx = null, master = null, pre = null, filters = [];
 
@@ -103,6 +119,7 @@ function build() {
     c = new AC({ latencyHint: 'playback' });
     const src = c.createMediaElementSource(element);
     master = c.createGain();
+    master.gain.value = level(); // from the first sample, not from 1 down to it
     pre = c.createGain();
     filters = BANDS.map((f) => {
       const b = c.createBiquadFilter();
@@ -197,16 +214,17 @@ export function wake() {
 
 // output applies the volume: level (the volume chosen, faded by the sleep timer), muted, and gain
 // (the balance, linear; it can raise the level only through the graph, else up to the element's 1).
-export function output(level, muted, gain = 1) {
+export function output(volume, muted, gain = 1) {
+  want = { level: volume, muted, gain };
   if (!element) return;
   if (!ctx) {
-    element.volume = clamp(level * Math.min(gain, 1), 0, 1);
+    element.volume = clamp(volume * Math.min(gain, 1), 0, 1);
     element.muted = muted;
     return;
   }
   element.volume = 1;
   element.muted = false;
-  master.gain.setTargetAtTime(muted ? 0 : level * gain, ctx.currentTime, 0.015);
+  master.gain.setTargetAtTime(level(), ctx.currentTime, 0.015);
 }
 
 // A graph the browser stopped while something plays is started again by the next tap or key.
@@ -231,14 +249,22 @@ export function presetOf(gains, customs) {
 // song is raised too; without it only the louder ones are brought down (an element's volume stops at
 // 1). A song not measured yet is taken to be as loud as the library's median.
 
-const ASK_AGAIN = 5 * 60_000; // a song not measured is asked about again after this (a scan may be on it)
+const ASK_AGAIN = 5 * 60_000; // a song or album not (wholly) measured is asked about again after this (a scan may be on it)
 const known = { assets: new Map(), albums: new Map(), median: null }; // id -> { v: loudness or null, t }
 const asking = { assets: new Set(), albums: new Set() };
 
+// An album some of whose songs are not measured yet is asked about again too (review #143).
+const unsure = (v) => v === null || (v.songs !== undefined && v.measured < v.songs);
 const stale = (map, id) => {
   const k = map.get(id);
-  return !k || (k.v === null && Date.now() - k.t > ASK_AGAIN);
+  return !k || (unsure(k.v) && Date.now() - k.t > ASK_AGAIN);
 };
+
+// forgetAlbums drops what is known of albums: the library changed (a merge, a split, songs added or
+// taken out), and an album's loudness is its songs' (review #143).
+export function forgetAlbums() {
+  known.albums.clear();
+}
 
 // learn asks the server how loud the songs (and their albums) are, those it was not asked about;
 // the volume is applied again once it answers.
@@ -263,10 +289,14 @@ export function learn(items) {
 }
 
 // balanceGain is the linear gain that brings item to the target loudness (1 with the balance off,
-// or with nothing known yet).
+// or with nothing known yet). Once the song playing has a gain from its own measurement, it keeps
+// it until another song: an album measured further meanwhile changes the next one, not this one
+// halfway (review #143).
+let held = null; // { item, gain }
 export function balanceGain(item) {
   const { balance, target } = effects.get();
   if (balance === 'off' || !item) return 1;
+  if (held && held.item === item) return held.gain;
   const album = balance === 'album' && item.albumId ? known.albums.get(item.albumId) : null;
   const own = known.assets.get(item.assetId);
   const l = (album && album.v) || (own && own.v);
@@ -274,5 +304,10 @@ export function balanceGain(item) {
   if (lufs === null || lufs === undefined) return 1;
   let db = target - lufs;
   if (l) db = Math.min(db, -1 - l.peak); // its peaks stay under −1 dBFS
-  return 10 ** (db / 20);
+  const gain = 10 ** (db / 20);
+  held = l ? { item, gain } : null; // a guess (the median) gives way to the measurement
+  return gain;
 }
+
+// The balance was on before this page: the server measures the library by itself.
+if (effects.get().balance !== 'off') setTimeout(scanWhenOn, 3000);
