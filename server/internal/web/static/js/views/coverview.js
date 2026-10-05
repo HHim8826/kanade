@@ -65,18 +65,23 @@ function CoverViewer({ id, title, close }) {
   const bw = nat ? nat.w * fit : 0, bh = nat ? nat.h * fit : 0;
   const one = nat && nat.orig && fit > 0 ? 1 / fit : 0; // the zoom that shows it at its own size
   const most = Math.max(4, one * 2);
-  const settle = (v) => { // no zooming out past the fit; no moving the picture off the screen
-    const s = clamp(v.s, 1, most);
+  // A picture smaller than the screen is shown larger to fit it, and can go down to its own size
+  // too (review #147); a larger one goes no smaller than the fit.
+  const least = one > 0 ? Math.min(1, one) : 1;
+  const settle = (v) => { // no zooming out past the fit (or the own size); no moving the picture off the screen
+    const s = clamp(v.s, least, most);
     const mx = Math.max(0, (bw * s - stage.w) / 2), my = Math.max(0, (bh * s - stage.h) / 2);
     return { s, x: clamp(v.x, -mx, mx), y: clamp(v.y, -my, my) };
   };
   const view2 = settle(view);
   const zoomAt = (s, px = 0, py = 0) => setView((v) => {
-    const next = clamp(s, 1, most), k = next / v.s;
+    const next = clamp(s, least, most), k = next / v.s;
     return settle({ s: next, x: px - (px - v.x) * k, y: py - (py - v.y) * k });
   });
-  const fitted = view2.s <= 1.001;
-  const toggle = (px = 0, py = 0) => (fitted ? zoomAt(one > 1.2 ? one : 2.5, px, py) : setView({ s: 1, x: 0, y: 0 }));
+  const fitted = Math.abs(view2.s - 1) < 0.001, zoomed = view2.s > 1.001;
+  // A double click goes from the fit to the picture's own size (or 2.5 times, when that is about the
+  // fit), and back.
+  const toggle = (px = 0, py = 0) => (fitted ? zoomAt(one > 1.2 || (one > 0 && one < 0.9) ? one : 2.5, px, py) : setView({ s: 1, x: 0, y: 0 }));
 
   useLayoutEffect(() => {
     const el = img.current;
@@ -154,7 +159,7 @@ function CoverViewer({ id, title, close }) {
     pinch.current = { dist, mid };
     if (!last || !last.dist) return;
     setView((v) => {
-      const s = clamp(v.s * (dist / last.dist), 1, most), k = s / v.s;
+      const s = clamp(v.s * (dist / last.dist), least, most), k = s / v.s;
       return settle({ s, x: mid.x - (last.mid.x - v.x) * k, y: mid.y - (last.mid.y - v.y) * k });
     });
   };
@@ -193,7 +198,7 @@ function CoverViewer({ id, title, close }) {
         <div class="dims">${orig === 'ok' && nat ? `${nat.w} × ${nat.h}` : orig === 'loading' && !failed ? '載入原圖…' : ''}</div>
       </div>
       ${orig === 'failed' && !failed && html`<button class="btn text" onClick=${retry}>原圖載入失敗，重試</button>`}
-      <${IconButton} icon="zoomOut" label="縮小" onClick=${() => zoomAt(view2.s / 1.25)} disabled=${fitted} />
+      <${IconButton} icon="zoomOut" label="縮小" onClick=${() => zoomAt(view2.s / 1.25)} disabled=${view2.s <= least + 0.001} />
       <${IconButton} icon="zoomIn" label="放大" onClick=${() => zoomAt(view2.s * 1.25)} disabled=${!nat || view2.s >= most - 0.001} />
       ${fitted
         ? html`<button class="icon-btn one-to-one" onClick=${() => zoomAt(one)} disabled=${!one} aria-label="原始大小" title="原始大小">1:1</button>`
@@ -201,7 +206,7 @@ function CoverViewer({ id, title, close }) {
       <${IconButton} icon="contrast" label=${light ? '深色背景' : '淺色背景'} onClick=${setBg} />
       <button class="icon-btn" ref=${closeBtn} onClick=${close} aria-label="關閉" title="關閉"><${Icon} name="close" /></button>
     </div>
-    <div class=${'cover-stage' + (fitted ? '' : ' zoomed') + (dragging ? ' dragging' : '')} ref=${box}
+    <div class=${'cover-stage' + (zoomed ? ' zoomed' : '') + (dragging ? ' dragging' : '')} ref=${box}
       onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up} onWheel=${wheel}
       onDblClick=${(e) => { if (touched.current) return; const p = local(e); toggle(p.x, p.y); }}>
       ${failed
