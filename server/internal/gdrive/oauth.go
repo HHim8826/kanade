@@ -67,14 +67,11 @@ func (e *tokenError) Error() string {
 	return strings.TrimSpace(fmt.Sprintf("token endpoint %d: %s %s", e.status, e.code, e.about))
 }
 
-// exchange calls the token endpoint; it also returns the response's fields so callers
-// can see whether refresh_token_expires_in was present. c.mu must be held or cfg stable.
-func (c *Client) exchange(ctx context.Context, form url.Values) (Token, map[string]any, error) {
-	if c.cfg == nil {
-		return Token{}, nil, errors.New("no OAuth client configured")
-	}
-	form.Set("client_id", c.cfg.ClientID)
-	form.Set("client_secret", c.cfg.ClientSecret)
+// exchange calls the token endpoint for the client cfg; it also returns the response's fields so
+// callers can see whether refresh_token_expires_in was present.
+func (c *Client) exchange(ctx context.Context, cfg ClientConfig, form url.Values) (Token, map[string]any, error) {
+	form.Set("client_id", cfg.ClientID)
+	form.Set("client_secret", cfg.ClientSecret)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return Token{}, nil, err
@@ -177,16 +174,22 @@ func (c *Client) Complete(ctx context.Context, q url.Values) (Status, error) {
 		return Status{}, errors.New("callback has no code")
 	}
 	c.mu.Lock()
-	if err := c.loadLocked(ctx); err != nil {
-		c.mu.Unlock()
+	err := c.loadLocked(ctx)
+	cfg := c.cfg
+	c.mu.Unlock()
+	if err != nil {
 		return Status{}, err
 	}
-	tok, _, err := c.exchange(ctx, url.Values{
+	if cfg == nil {
+		return Status{}, errors.New("no OAuth client configured")
+	}
+	ctx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	defer cancel()
+	tok, _, err := c.exchange(ctx, *cfg, url.Values{
 		"grant_type":   {"authorization_code"},
 		"code":         {code},
 		"redirect_uri": {c.redirectURI},
 	})
-	c.mu.Unlock()
 	if err != nil {
 		return Status{}, err
 	}

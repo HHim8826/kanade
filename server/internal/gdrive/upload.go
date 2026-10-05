@@ -180,7 +180,9 @@ func (c *Client) putChunk(ctx context.Context, uri string, f *os.File, off, n, t
 	if err != nil {
 		return off, nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uri, io.NewSectionReader(f, off, n))
+	w := watch(ctx)
+	defer w.end()
+	req, err := http.NewRequestWithContext(w.ctx, http.MethodPut, uri, w.sending(io.NewSectionReader(f, off, n)))
 	if err != nil {
 		return off, nil, err
 	}
@@ -189,7 +191,7 @@ func (c *Client) putChunk(ctx context.Context, uri string, f *os.File, off, n, t
 	req.Header.Set("Authorization", auth)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return off, nil, err
+		return off, nil, w.stalled(err)
 	}
 	defer resp.Body.Close()
 	return c.sessionResult(ctx, resp, total)

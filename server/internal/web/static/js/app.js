@@ -61,7 +61,8 @@ function App() {
       resetPlayer(false, true);
       setAuth('out');
     });
-    get('/status', { allow401: true }).then(() => setAuth('in'), (e) => setAuth(e.status === 401 ? 'out' : 'in'));
+    // A server slow to answer still lets the pages show and say what fails (review #149).
+    get('/status', { allow401: true, timeout: 15000 }).then(() => setAuth('in'), (e) => setAuth(e.status === 401 ? 'out' : 'in'));
   }, []);
   // Leaving a page closes the full-screen player, so it never hides the page you went to.
   useEffect(() => player.set({ nowPlayingOpen: false }), [route]);

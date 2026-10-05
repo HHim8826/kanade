@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,14 +57,38 @@ type Client struct {
 	redirectURI string
 	http        *http.Client
 
-	mu      sync.Mutex
-	cfg     *ClientConfig
-	tok     *Token
-	checked map[string]checkedFolder // cached folder ID -> when it was last seen in its parent
+	mu         sync.Mutex
+	cfg        *ClientConfig
+	tok        *Token
+	refreshing *refresh                 // the access token being refreshed, outside mu
+	checked    map[string]checkedFolder // cached folder ID -> when it was last seen in its parent
 }
 
+// A refresh of the access token, which others needing one wait for.
+type refresh struct {
+	done chan struct{}
+	err  error
+}
+
+// Google not answering never holds anything up for long (review #149): connecting, and the answer
+// to a request once it is sent, have time limits; a body that stops moving either way is given up
+// (stallAfter); refreshing the token has its own limit.
+const (
+	connectTimeout = 30 * time.Second
+	answerTimeout  = 2 * time.Minute
+)
+
+var (
+	stallAfter     = 2 * time.Minute // variables for the tests
+	refreshTimeout = 30 * time.Second
+)
+
 func New(d *sql.DB, redirectURI string) *Client {
-	return &Client{db: d, redirectURI: redirectURI, http: &http.Client{}}
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
+	t.TLSHandshakeTimeout = connectTimeout
+	t.ResponseHeaderTimeout = answerTimeout
+	return &Client{db: d, redirectURI: redirectURI, http: &http.Client{Transport: t}}
 }
 
 func (c *Client) readCredential(ctx context.Context, name string, v any) (bool, error) {
@@ -215,40 +240,87 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return st, err
 }
 
-// bearer returns a valid access token, refreshing it when it is about to expire.
+// bearer returns a valid access token, refreshing it when it is about to expire. The refresh is
+// one for everyone needing it, and runs outside mu: Status and the rest never wait for Google.
 func (c *Client) bearer(ctx context.Context, forceRefresh bool) (string, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if err := c.loadLocked(ctx); err != nil {
-		return "", err
-	}
-	if c.cfg == nil || c.tok == nil {
-		return "", ErrNotConnected
-	}
-	if forceRefresh || time.Until(c.tok.Expiry) < time.Minute {
-		t, fields, err := c.exchange(ctx, url.Values{
-			"grant_type":    {"refresh_token"},
-			"refresh_token": {c.tok.RefreshToken},
-		})
-		if err != nil {
-			var te *tokenError
-			if errors.As(err, &te) && te.code == "invalid_grant" {
-				return "", fmt.Errorf("refresh access token: %w (%v)", ErrAuthExpired, err)
-			}
-			return "", fmt.Errorf("refresh access token: %w", err)
-		}
-		c.tok.AccessToken, c.tok.Expiry = t.AccessToken, t.Expiry
-		if t.RefreshToken != "" {
-			c.tok.RefreshToken = t.RefreshToken
-		}
-		if _, ok := fields["refresh_token_expires_in"]; ok {
-			c.tok.RefreshTokenExpiresIn = t.RefreshTokenExpiresIn
-		}
-		if err := c.writeCredential(ctx, credToken, c.tok); err != nil {
+	for {
+		c.mu.Lock()
+		if err := c.loadLocked(ctx); err != nil {
+			c.mu.Unlock()
 			return "", err
 		}
+		if c.cfg == nil || c.tok == nil {
+			c.mu.Unlock()
+			return "", ErrNotConnected
+		}
+		if !forceRefresh && time.Until(c.tok.Expiry) >= time.Minute {
+			auth := "Bearer " + c.tok.AccessToken
+			c.mu.Unlock()
+			return auth, nil
+		}
+		if r := c.refreshing; r != nil {
+			c.mu.Unlock()
+			select {
+			case <-r.done:
+			case <-ctx.Done():
+				return "", ctx.Err()
+			}
+			if r.err != nil {
+				return "", r.err
+			}
+			forceRefresh = false // refreshed just now
+			continue
+		}
+		r := &refresh{done: make(chan struct{})}
+		c.refreshing = r
+		cfg, tok := *c.cfg, c.tok
+		c.mu.Unlock()
+		r.err = c.refresh(ctx, cfg, tok)
+		c.mu.Lock()
+		c.refreshing = nil
+		c.mu.Unlock()
+		close(r.done)
+		if r.err != nil {
+			return "", r.err
+		}
+		forceRefresh = false
 	}
-	return "Bearer " + c.tok.AccessToken, nil
+}
+
+// refresh gets a new access token for tok, and keeps it unless the token was replaced meanwhile
+// (connected again). It is not the asker's to cancel: others may be waiting for it.
+func (c *Client) refresh(ctx context.Context, cfg ClientConfig, tok *Token) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
+	defer cancel()
+	t, fields, err := c.exchange(ctx, cfg, url.Values{
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {tok.RefreshToken},
+	})
+	if err != nil {
+		var te *tokenError
+		if errors.As(err, &te) && te.code == "invalid_grant" {
+			return fmt.Errorf("refresh access token: %w (%v)", ErrAuthExpired, err)
+		}
+		return fmt.Errorf("refresh access token: %w", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.tok != tok {
+		return nil // replaced: the next turn uses the new one
+	}
+	next := *tok
+	next.AccessToken, next.Expiry = t.AccessToken, t.Expiry
+	if t.RefreshToken != "" {
+		next.RefreshToken = t.RefreshToken
+	}
+	if _, ok := fields["refresh_token_expires_in"]; ok {
+		next.RefreshTokenExpiresIn = t.RefreshTokenExpiresIn
+	}
+	if err := c.writeCredential(ctx, credToken, &next); err != nil {
+		return err
+	}
+	c.tok = &next
+	return nil
 }
 
 // APIError is an error response from Drive.
@@ -314,8 +386,10 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, hea
 		if body != nil {
 			rd = bytes.NewReader(body)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, rawURL, rd)
+		w := watch(ctx)
+		req, err := http.NewRequestWithContext(w.ctx, method, rawURL, rd)
 		if err != nil {
+			w.end()
 			return nil, err
 		}
 		for k, v := range header {
@@ -324,6 +398,7 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, hea
 		req.Header.Set("Authorization", auth)
 		resp, err := c.http.Do(req)
 		if err != nil {
+			w.end()
 			if ctx.Err() != nil || attempt >= 4 {
 				return nil, err
 			}
@@ -333,10 +408,12 @@ func (c *Client) Do(ctx context.Context, method, rawURL string, body []byte, hea
 			continue
 		}
 		if resp.StatusCode < 400 {
+			resp.Body = w.body(resp.Body)
 			return resp, nil
 		}
 		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		resp.Body.Close()
+		w.end()
 		e := parseAPIError(resp.StatusCode, data)
 		switch {
 		case e.Status == http.StatusUnauthorized && attempt == 0:
@@ -383,6 +460,78 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-ctx.Done():
 		return false
 	}
+}
+
+// ErrStalled is a request whose body stopped moving, either way, for stallAfter.
+var ErrStalled = errors.New("google drive stopped sending or taking data")
+
+// watched is a request's context, which ends when its body makes no progress for stallAfter: the
+// response's while it is read (not the time between reads, which is the reader's), or the
+// request's while the transport takes it.
+type watched struct {
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	timer  *time.Timer
+}
+
+func watch(ctx context.Context) *watched {
+	ctx, cancel := context.WithCancelCause(ctx)
+	w := &watched{ctx: ctx, cancel: cancel}
+	w.timer = time.AfterFunc(stallAfter, func() { cancel(ErrStalled) })
+	w.timer.Stop() // until a body moves; the transport's own limits cover the rest
+	return w
+}
+
+func (w *watched) end() {
+	w.timer.Stop()
+	w.cancel(nil)
+}
+
+// stalled turns the error of a body that stopped into ErrStalled.
+func (w *watched) stalled(err error) error {
+	if err != nil && errors.Is(context.Cause(w.ctx), ErrStalled) {
+		return ErrStalled
+	}
+	return err
+}
+
+// body watches a response body as it is read; closing it ends the request.
+func (w *watched) body(rc io.ReadCloser) io.ReadCloser { return &watchedBody{rc, w} }
+
+type watchedBody struct {
+	rc io.ReadCloser
+	w  *watched
+}
+
+func (b *watchedBody) Read(p []byte) (int, error) {
+	b.w.timer.Reset(stallAfter)
+	n, err := b.rc.Read(p)
+	b.w.timer.Stop()
+	return n, b.w.stalled(err)
+}
+
+func (b *watchedBody) Close() error {
+	err := b.rc.Close()
+	b.w.end()
+	return err
+}
+
+// sending watches a request body as the transport takes it: the time between its reads is the
+// time the connection would not take more.
+func (w *watched) sending(r io.Reader) io.Reader { return &sendingBody{r, w} }
+
+type sendingBody struct {
+	r io.Reader
+	w *watched
+}
+
+func (b *sendingBody) Read(p []byte) (int, error) {
+	b.w.timer.Stop()
+	n, err := b.r.Read(p)
+	if err == nil {
+		b.w.timer.Reset(stallAfter)
+	}
+	return n, err
 }
 
 // UseHTTPClient replaces the HTTP client before the client is used, for tests that answer
