@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -160,5 +161,59 @@ func TestCategoryPages(t *testing.T) {
 	}
 	if none, _ := s.AlbumsBy(ctx, AlbumQuery{Limit: 200, Category: -1}); len(none) != 1 || none[0].Title != "Other" {
 		t.Fatalf("in no category: %+v", none)
+	}
+}
+
+// Merging from the album page does what merging from the library does (review #151): the target
+// takes the emptied album's categories and its place among the favorites, in the same edit, and
+// undo takes both back.
+func TestBothMergesPassOnCategoriesAndFavorite(t *testing.T) {
+	for _, way := range []string{"album page", "library"} {
+		t.Run(way, func(t *testing.T) {
+			ctx := context.Background()
+			s := newStore(t)
+			f := fixture{t, s}
+			A := f.albumOf(f.song("a", "A1", "A", 1, 1).EntryID)
+			B := f.albumOf(f.song("b", "B1", "B", 1, 1).EntryID)
+			aria, _ := s.CreateCategory(ctx, "ARIA")
+			if _, _, err := s.Categorize(ctx, CategorizeRequest{Albums: []int64{A}, Add: []int64{aria.ID}}); err != nil {
+				t.Fatal(err)
+			}
+			s.SetFavorite(ctx, "album", A, true)
+			state := func() string {
+				t.Helper()
+				d, err := s.Album(ctx, B)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fav, _ := s.FavoriteIDs(ctx)
+				return fmt.Sprintf("categories %d favorite %v", len(d.Categories), slices.Contains(fav.Albums, B))
+			}
+			var g int64
+			var err error
+			if way == "album page" {
+				g, err = s.MergeAlbum(ctx, A, B)
+			} else {
+				_, g, err = s.MergeAlbums(ctx, MergeRequest{Albums: []int64{A, B}, Into: B})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := state(); got != "categories 1 favorite true" {
+				t.Fatalf("after merge: %s", got)
+			}
+			if list, _ := s.AlbumsBy(ctx, AlbumQuery{Limit: 50, Category: aria.ID}); len(list) != 1 || list[0].ID != B {
+				t.Fatalf("category holds %+v", list)
+			}
+			if _, conflicts, err := s.Undo(ctx, g); err != nil || len(conflicts) != 0 {
+				t.Fatalf("undo: %v %+v", err, conflicts)
+			}
+			if got := state(); got != "categories 0 favorite false" {
+				t.Fatalf("after undo: %s", got)
+			}
+			if d, _ := s.Album(ctx, A); len(d.Categories) != 1 {
+				t.Fatalf("A after undo: %+v", d.Categories)
+			}
+		})
 	}
 }

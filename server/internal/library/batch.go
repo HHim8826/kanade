@@ -428,12 +428,7 @@ func (e *editor) arrange(p *Plan, summary string) (int64, error) {
 			if err := e.set(Change{"album", a.ID, "merged_into", num(target)}); err != nil {
 				return 0, err
 			}
-			if err := e.moveCategories(a.ID, target); err != nil { // its categories go with it (review #92)
-				return 0, err
-			}
-			// A favorite album stays a favorite under its new home.
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO favorite_albums (album_id, created_at)
-				SELECT ?, created_at FROM favorite_albums WHERE album_id = ?`, target, a.ID); err != nil {
+			if err := e.passOn(a.ID, target); err != nil {
 				return 0, err
 			}
 		}
