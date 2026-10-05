@@ -18,12 +18,27 @@ const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload:
 
 const fmtWhen = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
+// usePoll reads now and every ms. An answer older than the one shown is dropped (a reload after
+// cancelling, a page of older ones asked for meanwhile), and a poll waits for the last one to answer
+// (review #169).
 function usePoll(loader, ms, deps = []) {
   const [state, setState] = useState({ data: null, error: null });
-  const load = useCallback(() => loader().then((data) => setState({ data, error: null }), (error) => setState((s) => ({ ...s, error }))), deps);
+  const seq = useRef({ asked: 0, shown: 0, busy: 0 });
+  const load = useCallback(() => {
+    const q = seq.current, my = ++q.asked;
+    q.busy++;
+    return loader().then((data) => {
+      if (my > q.shown) {
+        q.shown = my;
+        setState({ data, error: null });
+      }
+    }, (error) => {
+      if (my > q.shown) setState((s) => ({ ...s, error }));
+    }).finally(() => { q.busy--; });
+  }, deps);
   useEffect(() => {
     load();
-    const t = setInterval(() => document.visibilityState === 'visible' && load(), ms);
+    const t = setInterval(() => document.visibilityState === 'visible' && !seq.current.busy && load(), ms);
     return () => clearInterval(t);
   }, [load]);
   return { ...state, reload: load };
@@ -161,7 +176,12 @@ function DownloadCard({ d, onSelect, onChange }) {
         ${d.can_retry && html`<button class="btn tonal" onClick=${() => act('retry')}>重試</button>`}
         ${!['completed', 'canceled'].includes(d.state) && (d.state !== 'failed' || !d.files_removed) && html`<${IconButton} icon="close"
           label=${d.state === 'seeding' ? '停止做種' : d.state === 'failed' ? '放棄並清除' : '取消'}
-          onClick=${() => confirm(cancelPrompt(d)) && act('cancel')} />`}
+          onClick=${() => confirmDialog({
+            title: d.state === 'seeding' ? '停止做種' : d.state === 'failed' ? '放棄下載' : '取消下載',
+            action: d.state === 'seeding' ? '停止做種' : d.state === 'failed' ? '放棄並清除' : '取消下載', danger: true,
+            children: html`<p>${cancelPrompt(d)}</p>`,
+            onConfirm: () => post(`/downloads/${d.id}/cancel`).then(onChange),
+          })} />`}
         ${d.import_batch_id > 0 && html`<${IconButton} icon="album" label="整理成合集…"
           onClick=${() => showDialog((close) => html`<${MakeCollection} d=${d} close=${close} />`)} />`}
         ${d.clearable && html`<${IconButton} icon="delete" label="移除記錄" onClick=${() => act('clear')} />`}

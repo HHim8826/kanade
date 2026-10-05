@@ -141,7 +141,7 @@ export function NowPlaying() {
       <div class="np-info">
         <div class="np-title-row">
           <div class="grow">
-            <div class="np-title">${item.title}</div>
+            <div class="np-title" title=${item.title}>${item.title}</div>
             <div class="sub">${item.artist || '未知歌手'}</div>
             ${item.albumId ? html`<a class="sub link" href=${href('album/' + item.albumId)} onClick=${() => open(false)}>${item.album}</a>` : ''}
           </div>

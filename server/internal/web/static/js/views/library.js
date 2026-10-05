@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.mod
 import { get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { clock, enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
-import { go, href } from '../router.js';
+import { go, href, keepInAddress, parseHash } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { FavoritesTab, PlaylistsTab } from './collections.js';
@@ -353,18 +353,23 @@ export function Artist({ id, name }) {
   </section>`;
 }
 
+// Search keeps its words in the address (#/search?q=…), so coming back from a result finds them
+// and their results again; an error is for the search that made it (review #164).
 export function Search() {
-  const [q, setQ] = useState('');
+  const [q, setQ] = useState(() => parseHash().query.get('q') || '');
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   useEffect(() => {
+    keepInAddress(q.trim() ? 'search?q=' + encodeURIComponent(q) : 'search');
+    setError(null);
     if (!q.trim()) {
       setResult(null);
       return;
     }
     const ctrl = new AbortController();
     const t = setTimeout(() => {
-      get('/search?q=' + encodeURIComponent(q), { signal: ctrl.signal }).then(setResult, (e) => e.name !== 'AbortError' && setError(e));
+      get('/search?q=' + encodeURIComponent(q), { signal: ctrl.signal }).then((r) => { setResult(r); setError(null); },
+        (e) => e.name !== 'AbortError' && setError(e));
     }, 250);
     return () => { clearTimeout(t); ctrl.abort(); };
   }, [q]);

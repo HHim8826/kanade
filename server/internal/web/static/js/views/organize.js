@@ -81,11 +81,11 @@ function showConflicts(list, none) {
 
 // ---- small form pieces ----
 
-export function Field({ label, value, onInput, multiline, rows = 3, placeholder, autofocus, wide }) {
+export function Field({ label, value, onInput, multiline, rows = 3, placeholder, autofocus, wide, maxLength }) {
   return html`<label class=${'field' + (wide ? ' span' : '')}>${label}
     ${multiline
-      ? html`<textarea rows=${rows} value=${value} placeholder=${placeholder} onInput=${(e) => onInput(e.target.value)}></textarea>`
-      : html`<input value=${value} placeholder=${placeholder} autofocus=${autofocus} onInput=${(e) => onInput(e.target.value)} />`}
+      ? html`<textarea rows=${rows} value=${value} placeholder=${placeholder} maxLength=${maxLength} onInput=${(e) => onInput(e.target.value)}></textarea>`
+      : html`<input value=${value} placeholder=${placeholder} autofocus=${autofocus} maxLength=${maxLength} onInput=${(e) => onInput(e.target.value)} />`}
   </label>`;
 }
 
@@ -115,7 +115,7 @@ export function useRunner() {
   return [busy, run];
 }
 
-function TextDialog({ title, label, initial = '', multiline, hint, action = '儲存', onSubmit, close }) {
+function TextDialog({ title, label, initial = '', multiline, hint, action = '儲存', maxLength, onSubmit, close }) {
   const [value, setValue] = useState(initial);
   const [busy, run] = useRunner();
   const submit = (e) => {
@@ -127,7 +127,7 @@ function TextDialog({ title, label, initial = '', multiline, hint, action = '儲
   return html`<${Dialog} title=${title} onClose=${close}>
     <form onSubmit=${submit}>
       ${hint && html`<p class="hint">${hint}</p>`}
-      <${Field} label=${label} value=${value} onInput=${setValue} multiline=${multiline} rows=${5} autofocus />
+      <${Field} label=${label} value=${value} onInput=${setValue} multiline=${multiline} rows=${5} maxLength=${maxLength} autofocus />
       <div class="dialog-actions">
         <button type="button" class="btn text" onClick=${close}>取消</button>
         <button class="btn filled" disabled=${busy || (!multiline && !value.trim())}>${action}</button>
@@ -146,6 +146,8 @@ function Confirm({ title, children, action, danger, onConfirm, close }) {
 }
 
 export const confirmDialog = (props) => showDialog((close) => html`<${Confirm} ...${props} close=${close} />`);
+// textDialog asks for a line (or lines) of text; onSubmit gets it, and false from it keeps the dialog.
+export const textDialog = (props) => showDialog((close) => html`<${TextDialog} ...${props} close=${close} />`);
 
 // ---- tracks ----
 

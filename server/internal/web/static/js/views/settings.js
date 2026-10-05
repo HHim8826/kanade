@@ -1,7 +1,8 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { EffectsPanel } from './effects.js';
+import { confirmDialog, textDialog } from './organize.js';
 import { showShortcuts } from '../shortcuts.js';
 import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { href } from '../router.js';
@@ -19,14 +20,23 @@ const read = (path) => get(path, { timeout: 10000 }).then((data) => ({ data }), 
 // that section alone: what the page shows stays in place while it does.
 function useSection(path, first) {
   const [s, setS] = useState(first || { loading: true });
+  // Each read and each save's answer is numbered: a read that answers after a newer one, or after a
+  // save, changes nothing (review #169).
+  const seq = useRef({ asked: 0, shown: 0 });
   // reload reads the section again; given data (a save's answer), it shows that instead.
   const reload = (data) => {
+    const q = seq.current, my = ++q.asked;
     if (data && !(data instanceof Event)) {
+      q.shown = my;
       setS({ data, error: null });
       return;
     }
     setS((v) => ({ ...v, loading: true }));
-    read(path).then((r) => setS((v) => ({ data: r.data ?? v.data, error: r.error || null })));
+    read(path).then((r) => {
+      if (my < q.shown) return;
+      q.shown = my;
+      setS((v) => ({ data: r.data ?? v.data, error: r.error || null }));
+    });
   };
   useEffect(() => {
     if (!first) reload();
@@ -324,26 +334,25 @@ function loginName(name) {
 function Passkeys({ first }) {
   const data = useSection('/passkeys', first);
   const add = () => showDialog((close) => html`<${AddPasskey} close=${close} onAdded=${data.reload} />`);
-  const rename = async (p) => {
-    const name = prompt('Passkey 名稱', p.name);
-    if (!name || name === p.name) return;
-    try {
+  // Themed dialogs, not the browser's (review #168).
+  const rename = (p) => textDialog({
+    title: '重新命名 passkey', label: '名稱', initial: p.name, maxLength: 60, hint: '用來認出是哪一台裝置或哪個密碼管理器，最多 60 字。',
+    onSubmit: async (value) => {
+      const name = value.trim();
+      if (name === p.name) return;
       await api('PATCH', `/passkeys/${p.id}`, { name });
       data.reload();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  };
-  const remove = async (p) => {
-    if (!confirm(`移除 passkey「${p.name}」？之後就不能用它登入（裝置上的 passkey 也可以一併刪除）。`)) return;
-    try {
+    },
+  });
+  const remove = (p) => confirmDialog({
+    title: '移除 passkey', action: '移除', danger: true,
+    children: html`<p>移除「${p.name}」後就不能用它登入。裝置或密碼管理器裡的這個 passkey 也可以一併刪除。</p>`,
+    onConfirm: async () => {
       await api('DELETE', `/passkeys/${p.id}`);
       toast('已移除 passkey');
       data.reload();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  };
+    },
+  });
   const list = data.data || [];
   return html`<div class="card pad">
     <div class="title">Passkey</div>
@@ -367,26 +376,24 @@ function Passkeys({ first }) {
 // Logins: every device logged in to this account, and ending the others (review #76).
 function Logins({ first, onLogout }) {
   const data = useSection('/sessions', first);
-  const end = async (v) => {
-    if (!confirm(`登出「${loginName(v.name)}」？那台裝置要重新登入才能使用。`)) return;
-    try {
+  const end = (v) => confirmDialog({
+    title: '登出這台裝置', action: '登出', danger: true,
+    children: html`<p>登出「${loginName(v.name)}」？那台裝置要重新登入才能使用。</p>`,
+    onConfirm: async () => {
       await api('DELETE', `/sessions/${v.id}`);
       toast('已登出那台裝置');
       data.reload();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  };
-  const endOthers = async () => {
-    if (!confirm('登出這台以外的所有裝置？它們要重新登入才能使用。')) return;
-    try {
+    },
+  });
+  const endOthers = () => confirmDialog({
+    title: '登出其他裝置', action: '全部登出', danger: true,
+    children: html`<p>登出這台以外的所有裝置？它們要重新登入才能使用。</p>`,
+    onConfirm: async () => {
       const r = await post('/sessions/end-others');
       toast(r.ended ? `已登出 ${r.ended} 台裝置` : '沒有其他登入中的裝置');
       data.reload();
-    } catch (e) {
-      toast(e.message, 'error');
-    }
-  };
+    },
+  });
   const list = data.data || [];
   const others = list.filter((v) => !v.current).length;
   return html`<div class="card pad">

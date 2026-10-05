@@ -83,7 +83,7 @@ function App() {
       ${nav.map(([key, icon, label]) => html`<a key=${key} href=${href(key)} class=${active(key) ? 'active' : ''} aria-current=${active(key) ? 'page' : undefined}>
         <span class="nav-icon"><${Icon} name=${icon} /></span><span class="nav-label">${label}</span></a>`)}
     </nav>
-    <main class="content" id="content"><div class="page"><${Boundary} key=${location.hash}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></div></main>
+    <main class="content" id="content"><div class="page"><${Boundary} key=${route.raw}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></div></main>
     <${PlayerBar} />
     </div>
     <${NowPlaying} />
