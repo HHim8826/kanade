@@ -57,6 +57,14 @@ Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=htt
 
 **Connecting Google Drive.** Kanade reaches Drive with your own OAuth client from Google Cloud; the settings page walks through creating it and shows the redirect URI to register. Google sends the browser back only to https domains (or localhost): behind a domain with https (Cloudflare Tunnel, Caddy, Nginx) it returns to Kanade by itself; reached by an IP address, Kanade registers `http://localhost/oauth/google/callback` and you paste the address the browser ends on. Passkeys need https in any case, and over plain http the password is sent unencrypted.
 
+**Signing in.** Wrong passwords are limited to 5 in 15 minutes from one address (an IPv6 /64 counts as one) and to 30 from all addresses together. Reaching the second limit means someone is guessing: until it passes, a password logs in only from a browser that has logged in here before, while passkeys still work and a signed-in page can still change the password or add a passkey. The addresses come from the proxy set with `kanade-manager config`.
+
+**Discord status.** In the [Discord Developer Portal](https://discord.com/developers/applications), create an application named Kanade (the status reads "Listening to Kanade"), turn on the Discord Social SDK for it (its Getting Started form; there is nothing to download), and under OAuth2 → Redirects add `https://<your address>/oauth/discord/callback`. Put its Client ID and Client Secret on Kanade's settings page and link your Discord account. While you play, the server sets your status: the song's title, and the artist, album, progress and album cover you choose to show. The cover is the picture of the album's Bangumi entry, or, if you choose, Kanade's own cover through a public address made for Discord. A pause is shown for 10 minutes at most, and Kanade is not connected to Discord while nothing plays. Discord documents this presence permission only for its Social SDK, so Discord may change how it works.
+
+**Bangumi.** Create an application at [bgm.tv/dev/app](https://bgm.tv/dev/app) with the callback `https://<your address>/oauth/bangumi/callback`, put its App ID and App Secret on the settings page, and link your Bangumi account. Kanade changes your Bangumi collection only when you save in an album's collection dialog, or bind an album's entry with 「綁定時加入我的 Bangumi 收藏」 ticked; playing and browsing change nothing there.
+
+Each service has its own callback address (`/oauth/google/…`, `/oauth/discord/…`, `/oauth/bangumi/…`); the settings page shows each one to copy.
+
 ## Layout
 
 | Path | What it is |
@@ -91,7 +99,7 @@ Settings live in the data directory's `config.json` (`kanade config` shows them)
 
 ## Releases
 
-Push a version tag and GitHub Actions runs CI, then builds and publishes the release the install script downloads (`kanade-linux-amd64.tar.gz`, `kanade-linux-arm64.tar.gz`, `SHA256SUMS` covering them and `kanade.sh`, `VERSION`, `kanade.sh`):
+Push a version tag and GitHub Actions runs CI, then builds and publishes the release the install script downloads (`kanade-linux-amd64.tar.gz`, `kanade-linux-arm64.tar.gz`, `kanade.sh`, `SHA256SUMS` covering those three, and `VERSION`):
 
 ```bash
 git tag v0.1.0 && git push origin v0.1.0

@@ -110,7 +110,7 @@ DIR/
 | 方法與路徑 | 用途 |
 |---|---|
 | `POST /setup` | 首次建立管理員；需資料目錄 `setup-code` 檔內的一次性設定碼 |
-| `POST /login`、`POST /logout` | 登入取得 token（失敗 5 次／15 分鐘依 IP 節流，驗證中的請求也算）、登出。要 cookie 的登入（`"cookie": true`）需 `X-Requested-With: kanade`；登入路由拒絕瀏覽器標示為跨站的請求（審查 #60） |
+| `POST /login`、`POST /logout` | 登入取得 token（失敗 5 次／15 分鐘依 IP 節流，IPv6 依 /64，驗證中的請求也算；沒在這裡登入過的瀏覽器另受全體上限，回 429 `reason: throttled_all`，#148、#182）、登出。網頁登入成功時另發 `kanade_known` cookie，標示這個瀏覽器登入過。要 cookie 的登入（`"cookie": true`）需 `X-Requested-With: kanade`；登入路由拒絕瀏覽器標示為跨站的請求（審查 #60） |
 | `GET /passkeys/available`、`POST /passkeys/login/options`、`POST /passkeys/login` | 不需登入：是否有任何 passkey（登入頁據此顯示按鈕）、取得一次性 challenge、以 passkey 的回應登入（同密碼登入的節流與 cookie） |
 | `GET /passkeys`、`POST /passkeys/options`、`POST /passkeys`、`PATCH`／`DELETE /passkeys/{id}` | 列出自己的 passkey；`{"password"}` 確認密碼後取得建立選項（密碼錯回 403）；儲存裝置建立的 passkey；改名、移除 |
 | `GET /status` | Drive 連線、aria2 是否就緒 |
@@ -119,6 +119,7 @@ DIR/
 | `GET /albums`、`GET /albums/{id}` | 專輯清單（`limit`、`offset`）與收錄 |
 | `GET /tracks`、`GET /artists`、`GET /search?q=` | 歌曲、歌手（只列有歌曲的）、搜尋；`/tracks?filter=no_album`／`no_artist` 只列沒有專輯／沒有歌手的歌曲 |
 | `GET`／`HEAD /stream/{asset_id}` | 播放（Range、D7 快取）。驗證：`Authorization` header，或 `POST /stream/{id}/url` 取得的 12 小時簽名網址 |
+| `POST /stream/{asset_id}/prefetch` | 預載下一首：記成快取的下一首並開始下載，不算播放；下載多或磁碟低時略過，回 204（#175） |
 | `GET /covers/{id}?size=N` | 封面縮圖（預設 300，`size=0` 為原圖） |
 | `POST /imports` | `{"path": "..."}` 匯入伺服器上 `imports/`、`downloads/`、`staging/` 內的資料夾；或 `{"upload_group": "..."}` 匯入一組客戶端上傳；`"preview": true` 時分析後等待確認 |
 | `GET /imports/{id}/preview`、`POST /imports/{id}/plan` | 預覽（各組、單曲、其他檔案、偵測到的編碼）；修改計畫（`op`：`group`、`items`、`move`、`standalone`、`folders`、`encoding`、`exclude`、`include`），回傳新的預覽 |
@@ -403,7 +404,7 @@ DIR/
 - 登入（#60）：
   - 登入、passkey 登入與其 options、首次設定的路由以 Go 的 `http.CrossOriginProtection` 拒絕瀏覽器標示為跨站的請求（Sec-Fetch-Site，沒有時比對 Origin 與 Host），沒有這些標頭的原生客戶端照常；要 cookie 的登入還需 `X-Requested-With: kanade`。被拒的請求不建立 session、不用掉 challenge 或節流額度。
   - Session 自建立起 90 天到期（`auth.SessionLifetime`，cookie 同長），使用不延長；到期的在下次驗證時刪除。
-  - 節流計入驗證中的請求：同一位址「近 15 分鐘的失敗＋正在驗證的」達 5 次就拒絕，密碼、passkey 登入與加入 passkey 前的密碼確認共用。
+  - 節流計入驗證中的請求：同一位址「近 15 分鐘的失敗＋正在驗證的」達 5 次就拒絕，密碼與 passkey 登入共用。已登入者的密碼確認（改密碼、加入 passkey）從 #182 起改用帳號自己的額度，不受位址與全體上限影響。
   - 密碼登入先比對，再在建立 session 的寫入交易內確認密碼雜湊沒變；改密碼與撤銷 sessions 在同一個交易。加入 passkey 的 challenge 記住確認時的密碼雜湊，儲存時在交易內再比對，並在同一交易檢查 20 個的上限。Passkey 登入在交易內重新讀取憑證（仍存在、同一帳號與公鑰），計數器有在用時必須大於目前值，更新計數器與建立 session 一起提交；同時用同一個計數器值的兩次登入只有一次成功，不用計數器（一直是 0）的同步 passkey 不受影響。
   - 撤銷政策：移除 passkey 之後不能再用它登入，但不撤銷它先前登入的 sessions；改密碼撤銷所有 sessions，並使還沒完成的、以舊密碼確認的 passkey 加入失效，既有的 passkey 保留。
 - 任務中心（#58、#54，遷移 22：`downloads.cleared_at`、`import_batches.cleared_at`）：未完成的任務（進行中、等待選檔或確認、失敗、還有檔案沒存進曲庫）一定列出，已結束的分頁載入（「顯示更早的記錄」）。已結束的記錄可單筆「移除記錄」或「清除已結束的記錄」，只是不再列出：曲庫、Drive 檔案、匯入紀錄（原標籤恢復與 Drive 對帳用得到）都保留。還持有檔案的下載（失敗後保留以便重試，或匯入還有檔案沒存進曲庫）要先取消或處理匯入，才能移除。
@@ -466,7 +467,7 @@ DIR/
 - 專輯身分（#81）：`album_scopes`（遷移 0023）記住每個下載的「專輯資料夾＋專輯標籤」對應哪張專輯，之後的批次加入它並更新推導的專輯歌手（不同的推導 → Various Artists；標籤寫明的優先）；沒有 ALBUMARTIST 的檔案重匯入時以專輯標籤、碟號、曲號找回原本的收錄。`import_batches.root` 記下批次的根目錄。
 - 服務設定（#74、#75、#77）：`internal/settings` 把資源、下載、Drive 同步三組設定以 JSON 存在 settings 表，儲存時檢查並立即套用（快取 `SetBudget`、暫存 `SetLimits`、磁碟守衛 `SetReserve`、aria2 `changeGlobalOption` 並寫進每次啟動的設定、同步 `Configure`、收件匣 `SetInboxSettle`）；`serve` 的資源參數若有指定，該次啟動以參數為準。
 - 做種（#75）：做種何時停止改由 Kanade 依設定判斷（分享率以累計上傳量計算，`uploaded_before`，遷移 0024）。aria2 重新啟動後沒有做種中的任務時，若仍要做種，用保存的 torrent 重新加入並驗證後繼續——重新啟動服務不再讓做種結束。同時下載數 1–5，仍經過共用暫存預算。
-- 帳號（#76）：本人改密碼（以目前密碼確認、與登入共用節流、結束所有登入、保留 passkey），列出／結束自己的登入；回應不含 token。
+- 帳號（#76）：本人改密碼（以目前密碼確認、受帳號自己的節流（#182 前與登入共用）、結束所有登入、保留 passkey），列出／結束自己的登入；回應不含 token。
 - 播放（#72、#73、#78）：`GET /tracks/random` 以歌曲為單位從全曲庫隨機挑選（只挑可播放的、音樂與廣播劇分開、避開剛播的）。佇列可以「自己往下接」（`radio`）：全曲庫隨機，或播完後自動接續；挑來的歌標示 `auto`，使用者加入的排在前面，晚到的回應以世代號丟棄。播放設定（模式、隨機範圍、自動接續、各類型點歌是否續播、預載）存在瀏覽器。
 - 曲庫整理（#82、#83）：專輯可命名區段（`album_sections`，遷移 0025；修改紀錄欄位 `sections`）。批次操作（合併、批次修改、移除、放進專輯、收藏、永久刪除）在 `library/batch.go`，先檢查所有 ID、一次一筆修改紀錄；計畫（`Plan`：搬移、新增、分區、清空的專輯）先預覽再套用。下載可選分組（`downloads.grouping`：依標籤、每個資料夾、合集）；合集的分區與曲序由整個選取清單算出（`CollectionLayout`），每一批帶著自己檔案的位置入庫；已入庫的下載用 `CollectionPlan` 整理成合集。網頁端：`selection.js`（選取、Ctrl／Shift、全選已載入）、`views/batch.js`。
 - 驗證：每項都有以真實 SQLite、Importer、aria2、FFmpeg 的測試（修正前的程式會失敗的都確認過），完整測試含 `-race` 通過；網頁端以 headless Chromium 在正式曲庫的複本上走過（桌面與 390px），包括把 Umineko 這個下載整理成 208 首、9 個分區的合集。遷移 0023 也在正式資料庫的複本上跑過。
@@ -541,7 +542,7 @@ DIR/
 
 審查總覽是 #171；#132 重新開啟。#160（安裝腳本的信任來源）使用者決定先不做。
 
-- 來源 IP（#148，`internal/clientip`）：只相信設定（`config set trusted_proxy`）列出的代理所轉送的位址：`cloudflare`（CF-Connecting-IP，預設只收本機 cloudflared 的）、`loopback`（本機 Nginx、Caddy；X-Forwarded-For 由右往左取第一個不是代理的位址）或代理的位址／範圍；預設全部不信。本機代理送來轉送標頭但沒設定時記一次警告。密碼錯誤另有全體上限（15 分鐘 30 次，同時檢查 4 個，其餘排隊）；passkey 登入的 challenge 不再存在記憶體（帶期限與 MAC，用過的才記），被大量索取也不影響別人；過期的失敗紀錄定期清掉。安裝腳本詢問前面的代理，`kanade-manager config` 可改，更新後沒設定會提醒。
+- 來源 IP（#148，`internal/clientip`）：只相信設定（`config set trusted_proxy`）列出的代理所轉送的位址：`cloudflare`（CF-Connecting-IP，預設只收本機 cloudflared 的）、`loopback`（本機 Nginx、Caddy；X-Forwarded-For 由右往左取第一個不是代理的位址）或代理的位址／範圍；預設全部不信。本機代理送來轉送標頭但沒設定時記一次警告。密碼錯誤另有全體上限（15 分鐘 30 次，同時檢查 4 個，其餘排隊；#182 起只限制沒在這裡登入過的瀏覽器用密碼登入）；passkey 登入的 challenge 不再存在記憶體（帶期限與 MAC，用過的才記），被大量索取也不影響別人；過期的失敗紀錄定期清掉。安裝腳本詢問前面的代理，`kanade-manager config` 可改，更新後沒設定會提醒。
 - Drive（#149）：連線與 TLS 30 秒、送出後等回應 2 分鐘；回應或上傳的資料停住 2 分鐘就放棄（`ErrStalled`，只量讀取或傳送中的時間）；token 在鎖外刷新，同時需要的共用一次，30 秒為限且不受單一請求取消；`Status` 不再等 Google。網頁啟動時的 `/status` 15 秒逾時。
 - 匯入封面（#150）：資料夾封面以批次為範圍，批次結束清掉；上傳或讀取失敗不快取，同資料夾下一首再試。手動設封面在 Drive 失敗時回 503。
 - 合併（#151、#152）：專輯頁的合併與批次合併共用 `passOn`：分類與收藏（專輯的 `favorite` 欄位，修改紀錄顯示為「收藏」）都在同一筆修改內，撤回一起還原。首頁的最近播放、繼續播放、未聽完的廣播劇，以及智慧歌單的「專輯是」條件，都跟著合併走到目前的專輯（`rootsOf`）。
@@ -558,7 +559,7 @@ DIR/
 ### 資料庫備份到 Drive（2026-10-05，#161）
 
 - `internal/backup`：連線 Drive 後，每天一份資料庫複本（`VACUUM INTO`，先在 staging/backup 做好並 `quick_check`，向暫存預算預留）上傳到 Drive 的 `Kanade/backups/kanade-db-YYYYMMDD-HHMMSS.sqlite`（UTC），保留最近 14 份，較舊的移到 Drive 垃圾桶；資料夾裡其他檔案不動。上次成功的時間與檔名記在 settings 的 `backup.last`，重啟後不重做；啟動 5 分鐘後第一次檢查，之後每小時檢查是否已滿一天。失敗（Drive 未連線、授權過期、空間不足）記在狀態，同一個錯誤只記一筆日誌。
-- API：`GET /backup`、`POST /backup`（立即備份，背景進行）；設定頁「資料庫備份」顯示上次備份、Drive 上的份數與錯誤。
+- API：`GET /backup`、`POST /backup`（立即備份，背景進行；回應時已是 running，#180）；設定頁「資料庫備份」顯示上次備份、Drive 上的份數與錯誤。
 - 還原：從 Drive 下載放進資料目錄的 `backups/`，再 `kanade-manager restore`。`kanade-manager update` 的更新前備份只保留最近 5 份（`before-v*`；手動與還原前的不動）。
 - 複本含 Google 授權與密碼雜湊，放在音樂所在的同一個 Google 帳號。
 
