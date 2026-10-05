@@ -22,6 +22,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/auth"
 	"github.com/HHim8826/kanade/server/internal/backup"
+	"github.com/HHim8826/kanade/server/internal/bangumi"
 	"github.com/HHim8826/kanade/server/internal/clientip"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/diskguard"
@@ -65,6 +66,7 @@ type Deps struct {
 	Loudness  *loudness.Service
 	Thumbs    *thumbs.Store   // covers made for the web client; nil: one in the data directory
 	Backup    *backup.Service // copies of the database in Drive; nil: none
+	Bangumi   *bangumi.Client // works' descriptions (review #94); nil: one for this version
 	Settings  *settings.Store // the service settings the settings page changes
 	Staging   *staging.Budget // shared by downloads, uploads and the importer
 	Pinned    map[string]bool // resources given as serve flags: they win until the next start
@@ -95,12 +97,15 @@ type Server struct {
 	loudness  *loudness.Service
 	thumbs    *thumbs.Store
 	backup    *backup.Service
+	bgm       *bangumi.Client
 	proxy     clientip.Policy
 	streamKey []byte
 	log       *slog.Logger
 	version   string
 	started   time.Time
 	unproxied sync.Once // the log said a proxy's headers are not believed
+
+	refreshing sync.Map // works whose description is being read again
 }
 
 // ThumbsBudget is the most the covers made for the web client take on disk.
@@ -112,7 +117,10 @@ func New(d Deps) *Server {
 	if d.Thumbs == nil {
 		d.Thumbs = thumbs.New(d.Config.Path(config.DirThumbs), ThumbsBudget, d.Log)
 	}
-	return &Server{proxy: proxy, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	if d.Bangumi == nil {
+		d.Bangumi = bangumi.New(d.Version)
+	}
+	return &Server{proxy: proxy, bgm: d.Bangumi, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 }
@@ -248,6 +256,15 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/edits/{id}", s.authed(s.editGroup))
 	mux.Handle("POST /api/v1/edits/{id}/undo", s.authed(s.undo))
 	mux.Handle("GET /api/v1/covers/{id}", s.authed(s.cover))
+	mux.Handle("GET /api/v1/bangumi/search", s.authed(s.bangumiSearch))
+	mux.Handle("GET /api/v1/bangumi/subjects/{sid}/image", s.authed(s.bangumiImage))
+	mux.Handle("GET /api/v1/works", s.authed(s.works))
+	mux.Handle("GET /api/v1/works/{id}", s.authed(s.work))
+	mux.Handle("GET /api/v1/works/{id}/image", s.authed(s.workImage))
+	mux.Handle("POST /api/v1/works/{id}/refresh", s.authed(s.refreshWorkNow))
+	mux.Handle("POST /api/v1/albums/{id}/works", s.authed(s.linkWork))
+	mux.Handle("DELETE /api/v1/albums/{id}/works/{work}", s.authed(s.unlinkWork))
+	mux.Handle("PUT /api/v1/tracks/{id}/works", s.authed(s.setTrackWorks))
 	mux.Handle("POST /api/v1/stream/{id}/url", s.authed(s.streamURL))
 	mux.HandleFunc("GET /api/v1/stream/{id}", s.stream) // header token or signed URL, checked inside
 	mux.HandleFunc("HEAD /api/v1/stream/{id}", s.stream)

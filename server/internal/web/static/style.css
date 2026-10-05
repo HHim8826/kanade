@@ -888,3 +888,41 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .form-grid .field select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s); padding: 8px; }
 .smart-preview { margin-top: 12px; padding: 12px; border-radius: var(--radius-m); background: var(--surface-container-low); }
 .preview-list { margin: 4px 0 0; padding-left: 20px; font-size: 14px; }
+/* Works (review #94): pictures are posters, taller than wide */
+.cover.work-pic { object-fit: cover; aspect-ratio: 3 / 4; }
+.album-card .cover.work-pic { aspect-ratio: 3 / 4; }
+.cover.big.work-pic { width: min(200px, 50vw); aspect-ratio: 3 / 4; }
+.cover.thumb.work-pic { width: 42px; height: 56px; aspect-ratio: auto; }
+.work-chip .cover.work-pic { width: 18px; height: 24px; border-radius: 3px; aspect-ratio: auto; }
+.work-chip .cover.work-pic .icon { width: 14px; height: 14px; }
+.album-works { margin-top: 4px; }
+.track-tag { display: inline-block; padding: 0 6px; margin-right: 6px; border-radius: 6px; font-size: 11px; line-height: 18px; vertical-align: 1px;
+  background: var(--secondary-container); color: var(--on-secondary-container); }
+.sub-title { font-size: 14px; font-weight: 600; margin: 12px 0 4px; color: var(--on-surface-variant); }
+.linked-works li { flex-wrap: nowrap; gap: 12px; }
+.linked-works a.title { color: inherit; }
+.replacing { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0 0; background: var(--secondary-container); color: var(--on-secondary-container); }
+.work-search { display: flex; gap: 8px; align-items: center; margin: 16px 0 8px; }
+.work-search .search-field { flex: 1; height: 48px; min-width: 0; }
+.candidates { list-style: none; padding: 0; margin: 8px 0; }
+.candidates li { border-top: 1px solid var(--outline-variant); }
+.candidates li:first-child { border-top: 0; }
+.candidate { display: flex; align-items: center; gap: 12px; width: 100%; padding: 8px; border: 0; background: none; text-align: left; font: inherit;
+  color: inherit; cursor: pointer; border-radius: var(--radius-s); }
+.candidate:hover { background: var(--surface-container); }
+.candidate .track-text .title, .candidate .track-text .sub { white-space: normal; }
+.candidate .pill { margin: 0; flex: none; }
+.candidate-detail { padding: 0 8px 12px 62px; }
+.candidate-detail .actions { justify-content: flex-end; }
+.work-summary { white-space: pre-line; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+.candidate-detail .work-summary { max-height: 14em; overflow: auto; margin: 0 0 8px; }
+.page-summary { max-width: 72ch; margin: 0 0 4px; }
+.page-summary.clamped { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 5; line-clamp: 5; overflow: hidden; }
+.source-line { margin: 8px 0 16px; }
+.work-uses li { flex-wrap: wrap; gap: 8px 12px; padding: 8px 0; }
+.work-uses label.check { display: flex; align-items: center; gap: 12px; min-width: 200px; cursor: pointer; }
+.work-uses input[type=checkbox] { width: 18px; height: 18px; flex: none; margin: 0; }
+.work-uses select, .work-uses .note { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline);
+  border-radius: var(--radius-s); padding: 6px 8px; }
+.work-uses .note { flex: 1 1 180px; min-width: 0; }
+@media (max-width: 600px) { .candidate-detail { padding-left: 8px; } .work-search .btn { padding: 0 12px; } }

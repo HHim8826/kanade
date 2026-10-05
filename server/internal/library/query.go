@@ -113,6 +113,8 @@ type Entry struct {
 	Version string     `json:"version,omitempty"`
 	Kind    string     `json:"kind"`
 	Asset   AssetBrief `json:"asset"`
+	// Works says what the song is to works (review #94).
+	Works []TrackWork `json:"works,omitempty"`
 }
 
 type AlbumDetail struct {
@@ -129,6 +131,8 @@ type AlbumDetail struct {
 	Sections map[int]string `json:"sections"`
 	// Categories are the user's folders it is in (review #92).
 	Categories []CategoryBrief `json:"categories"`
+	// Works are the works it is linked to (review #94).
+	Works []WorkBrief `json:"works"`
 }
 
 func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
@@ -152,6 +156,13 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 	if d.Categories, err = s.AlbumCategories(ctx, id); err != nil {
 		return nil, err
 	}
+	if d.Works, err = s.AlbumWorks(ctx, id); err != nil {
+		return nil, err
+	}
+	uses, err := s.albumTrackWorks(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if d.Sections, err = sectionNames(ctx, s.db, id); err != nil {
 		return nil, err
 	}
@@ -167,6 +178,7 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist, &e.Version, &e.Kind}, e.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
+		e.Works = uses[e.TrackID]
 		d.Entries = append(d.Entries, e)
 	}
 	return d, rows.Err()
@@ -347,12 +359,13 @@ type SearchResult struct {
 	Tracks  []TrackItem    `json:"tracks"`
 	Albums  []AlbumSummary `json:"albums"`
 	Artists []Artist       `json:"artists"`
+	Works   []Work         `json:"works"` // linked works by name (review #94)
 }
 
 // Search matches a substring of titles and names. The trigram index serves queries of three
 // or more characters; shorter ones (common in Japanese) scan the index table, which is small.
 func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult, error) {
-	res := &SearchResult{Tracks: []TrackItem{}, Albums: []AlbumSummary{}, Artists: []Artist{}}
+	res := &SearchResult{Tracks: []TrackItem{}, Albums: []AlbumSummary{}, Artists: []Artist{}, Works: []Work{}}
 	q, raw := Normalize(q), q
 	if q == "" { // only symbols, like "%" or "△": match them as written
 		if q = fold(raw, false); strings.TrimSpace(q) == "" {
@@ -415,6 +428,9 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 			}
 			res.Artists = append(res.Artists, a)
 		}
+	}
+	if res.Works, err = s.searchWorks(ctx, raw, limit); err != nil {
+		return nil, err
 	}
 	return res, nil
 }

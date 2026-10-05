@@ -44,9 +44,10 @@ const fieldNames = {
   artist: '歌手', version: '版本說明', kind: '類型', aliases: '別名', mb_recording: 'MusicBrainz 錄音', album_artist: '專輯歌手',
   date: '日期', catalog: '型號', edition: '版本', cover_id: '封面', merged_into: '合併到', mb_release: 'MusicBrainz 發行',
   album_id: '所屬專輯', disc_no: '碟號', track_no: '曲序', row: '收錄', sections: '區段名稱', grouping: '下載的分組方式',
-  source: '之後批次歸入', categories: '分類', favorite: '收藏',
+  source: '之後批次歸入', categories: '分類', favorite: '收藏', works: '作品',
 };
-const fieldName = (target, field) => (field === 'title' ? (target === 'album' ? '專輯名稱' : '曲名') : fieldNames[field] || field);
+const fieldName = (target, field) => (field === 'title' ? (target === 'album' ? '專輯名稱' : '曲名')
+  : field === 'works' && target === 'track' ? '作品用途' : fieldNames[field] || field);
 
 function shown(v, field, label) {
   if (label) return label;

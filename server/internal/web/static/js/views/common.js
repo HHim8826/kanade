@@ -188,7 +188,7 @@ export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onRe
           ${showNumber ? html`<span class="num">${it.number || ''}</span>` : html`<${Cover} id=${it.coverId} size=${96} className="thumb" />`}
           <span class="track-text">
             <span class="title">${it.title}</span>
-            <span class="sub">${[it.artist || '未知歌手', showAlbum && it.album].filter(Boolean).join(' · ')}</span>
+            <span class="sub">${it.tags && it.tags.map((t) => html`<span class="track-tag" title=${t.title}>${t.label}</span>`)}${[it.artist || '未知歌手', showAlbum && it.album].filter(Boolean).join(' · ')}</span>
           </span>
           <span class="meta">${meta ? meta(it) : html`<span class="quality">${fmtQuality(it.asset)}</span><span>${fmtTime(it.durationMs)}</span>`}</span>
         </button>

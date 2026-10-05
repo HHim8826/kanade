@@ -562,6 +562,14 @@ DIR/
 - 還原：從 Drive 下載放進資料目錄的 `backups/`，再 `kanade-manager restore`。`kanade-manager update` 的更新前備份只保留最近 5 份（`before-v*`；手動與還原前的不動）。
 - 複本含 Google 授權與密碼雜湊，放在音樂所在的同一個 Google 帳號。
 
+### 作品與 Bangumi（2026-10-05，#94，遷移 35：`works`、`album_works`、`track_works`）
+
+- `internal/bangumi`：Bangumi 公開 API（`api.bgm.tv/v0`，不需帳號），User-Agent 依其要求寫明 `HHim8826/kanade/<版本>`；請求間隔 0.5 秒，搜尋與條目回應在記憶體快取 1 小時；圖片只向 `bgm.tv` 網域抓（不是用戶端可指定的代理）。
+- 作品（`works`）存來源給的原樣：原名、中文名、類型、平台、日期、簡介、評分（沒有就是 NULL）、圖片網址與取得時間；來源沒有的欄位不補。作品不刪：解除關聯後只是不列出，撤回時可以再關聯。
+- 關聯只由使用者確認：專輯頁「關聯作品」用專輯名稱（取「」『』內的字，或去掉 OST、Vol. 等字）預填搜尋，也可貼條目連結或編號；一個純數字同時當編號查與當字詞搜（例如「86」）。專輯的「works」與歌曲的「works」（用途 op/ed/insert/theme/character/bgm/other 與備註）都走修改紀錄，可以撤回；改綁時這張專輯歌曲的用途跟著移到新作品，解除時一起移除；合併專輯時作品跟著移過去。關聯不改動專輯或歌曲本身的任何欄位。
+- 讀取：專輯頁、作品頁（`#/work/{id}`）、曲庫「作品」分頁、搜尋結果都只讀資料庫，不等 Bangumi；作品頁發現資料超過 30 天時在背景重新取得。Bangumi 連不上時搜尋與更新回 503（附 Retry-After），已存過的作品照樣能關聯。圖片由伺服器代抓並存進封面縮圖快取（`bgm-` 開頭，共用 256 MB 上限），網頁的 CSP 不需開外部圖片。
+- API：`GET /bangumi/search?q=&types=&offset=&album=`、`GET /bangumi/subjects/{sid}/image`、`GET /works`、`GET /works/{id}`、`GET /works/{id}/image`、`POST /works/{id}/refresh`、`POST /albums/{id}/works`（`source_id`、`replace`）、`DELETE /albums/{id}/works/{work}`、`PUT /tracks/{id}/works`。
+
 ## 使用方式（開發環境）
 
 ```bash
