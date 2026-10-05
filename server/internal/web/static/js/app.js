@@ -73,7 +73,7 @@ function App() {
     if (auth !== 'in') return;
     loadFavorites();
     restoreSession(); // the queue this browser had, paused where it was
-    checkPresence(); // whether to tell a companion what plays (review #135)
+    checkPresence(); // whether to tell what plays, for the Discord status (review #135)
   }, [auth]);
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;

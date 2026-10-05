@@ -126,10 +126,10 @@ func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) changeDiscordLink(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Follow     *string        `json:"follow"`
-		FollowName *string        `json:"follow_name"`
-		Show       *presence.Show `json:"show"`
-		Status     *string        `json:"status"`
+		Follow     *string             `json:"follow"`
+		FollowName *string             `json:"follow_name"`
+		Show       *discord.ShowChange `json:"show"` // only what changes
+		Status     *string             `json:"status"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)

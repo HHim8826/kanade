@@ -1,10 +1,10 @@
 import { api, get } from './api.js';
 import { clock, player } from './player.js';
 
-// What this tab plays, told to Kanade for the companions that show it, such as Discord's status on
-// a computer (review #135). A tab tells only once it has played: a queue brought back paused, a
-// song loaded ahead or an album looked at tells nothing. Nothing is told while no companion is
-// paired. A song playing on is told again every half minute, so the server knows the tab is there.
+// What this tab plays, told to Kanade, which shows it as its owner's Discord status (review #135).
+// A tab tells only once it has played: a queue brought back paused, a song loaded ahead or an album
+// looked at tells nothing. Nothing is told while no Discord account is linked. A song playing on is
+// told again every half minute, so the server knows the tab is there.
 
 // fromAgent names a device by its browser's user agent: "Windows · Chrome".
 export function fromAgent(ua) {
@@ -17,7 +17,7 @@ export function fromAgent(ua) {
 const random = () => Array.from(crypto.getRandomValues(new Uint8Array(12)), (b) => b.toString(16).padStart(2, '0')).join('');
 const tab = random();
 
-// device is this browser, the same in all its tabs: what a companion follows.
+// device is this browser, the same in all its tabs: what the status can follow.
 export const device = (() => {
   try {
     let d = localStorage.getItem('kanade.device');
@@ -67,15 +67,22 @@ function tell(again) {
     .then((r) => { if (r && r.publish === false) publish = false; }, () => {});
 }
 
-player.subscribe(() => tell(false));
-clock.subscribe(() => tell(false));
+// A change is told a moment later, with those right after it: a song ending, the next one loaded
+// and started, its clock set to its start, is one report of the new song where it is (review #183).
+let soon = null;
+const later = () => {
+  if (!soon) soon = setTimeout(() => { soon = null; tell(false); }, 300);
+};
+player.subscribe(later);
+clock.subscribe(later);
 setInterval(() => told && tell(true), 30000);
 addEventListener('pagehide', () => {
   if (told) api('DELETE', `/presence/players/${tab}`, undefined, { keepalive: true, allow401: true }).catch(() => {});
 });
 
-// checkPresence asks whether a companion is paired, so this tab tells or not; done when logged in,
-// when the tab comes back into view, every few minutes, and when the settings page pairs one.
+// checkPresence asks whether a Discord account is linked, so this tab tells or not; done when
+// logged in, when the tab comes back into view, every few minutes, and when the settings page links
+// one.
 export async function checkPresence(info) {
   active = true;
   try {

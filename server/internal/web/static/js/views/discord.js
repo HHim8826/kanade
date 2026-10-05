@@ -1,4 +1,4 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { checkPresence, device, deviceName } from '../presence.js';
 import { keepInAddress, parseHash } from '../router.js';
@@ -7,8 +7,8 @@ import { confirmDialog } from './organize.js';
 
 // Discord's status (review #135): the server shows what this account plays as its owner's Discord
 // status, like Spotify's: the owner links their Discord account once (Discord's OAuth, with the
-// presence permission of the Social SDK), and nothing runs on their computer or phone. Covers,
-// audio addresses and logins never leave Kanade.
+// presence permission of the Social SDK), and nothing runs on their computer or phone. What is
+// shown is the owner's choice; audio addresses and logins never leave Kanade, covers only as chosen.
 
 const results = {
   linked: ['已連結 Discord。開始播放後，你的 Discord 狀態會顯示正在聽的歌。', 'info'],
@@ -24,11 +24,17 @@ const statuses = [['idle', '閒置'], ['online', '線上'], ['dnd', '請勿打�
 export function DiscordSettings() {
   const [info, setInfo] = useState(null);
   const [error, setError] = useState(null);
-  const load = () => get('/discord', { timeout: 10000 }).then((r) => {
-    setInfo(r);
-    setError(null);
-    checkPresence({ publish: !!(r.link && !r.link.error) });
-  }, setError);
+  // Changes are counted: a read begun before the latest change shows nothing of it (review #178).
+  const changes = useRef(0);
+  const load = () => {
+    const my = changes.current;
+    return get('/discord', { timeout: 10000 }).then((r) => {
+      if (my !== changes.current) return;
+      setInfo(r);
+      setError(null);
+      checkPresence({ publish: !!(r.link && !r.link.error) });
+    }, (e) => my === changes.current && setError(e));
+  };
   useEffect(() => {
     load();
     // Back from Discord: say how it went, once.
@@ -51,7 +57,15 @@ export function DiscordSettings() {
       toast(e.message, 'error');
     }
   };
-  const change = (patch) => api('PATCH', '/discord/link', patch).then(load, (e) => toast(e.message, 'error'));
+  // change shows what was chosen at once and saves only that, one save after another: two choices
+  // made quickly both hold (review #178).
+  const saves = useRef(Promise.resolve());
+  const change = (patch) => {
+    const my = ++changes.current;
+    setInfo((i) => (i && i.link ? { ...i, link: { ...i.link, ...patch, show: { ...i.link.show, ...patch.show } } } : i));
+    saves.current = saves.current.then(() => api('PATCH', '/discord/link', patch)).then(() => {}, (e) => toast(e.message, 'error'))
+      .then(() => my === changes.current && load());
+  };
   const unlink = () => confirmDialog({
     title: '解除 Discord 連結', action: '解除連結', danger: true,
     children: html`<p>Kanade 會停止更新你的 Discord 狀態，並向 Discord 撤銷這次授權。之後要再顯示，需要重新連結。</p>`,
@@ -65,7 +79,7 @@ export function DiscordSettings() {
   for (const p of info ? info.players : []) if (!browsers.has(p.device)) browsers.set(p.device, p.device_name || '另一個瀏覽器');
   return html`<h2 class="section-title">Discord 狀態</h2>
     <div class="card pad discord-settings">
-      <div class="sub">像 Spotify 一樣，在你的 Discord 個人狀態顯示 Kanade 正在播放的歌（「正在聽 Kanade」）。由伺服器回報，電腦和手機都不用另外安裝程式；只有在播放時才會連上 Discord。只會送出歌名、歌手、專輯與進度，不會傳出封面、音檔網址或登入資訊。</div>
+      <div class="sub">像 Spotify 一樣，在你的 Discord 個人狀態顯示 Kanade 正在播放的歌（「正在聽 Kanade」）。由伺服器回報，電腦和手機都不用另外安裝程式；只有在播放時才會連上 Discord（選了暫停時顯示，暫停後最多再顯示 10 分鐘）。會送出歌名，以及下面選擇的歌手、專輯、進度和專輯封面的圖片網址；不會送出音檔網址或登入資訊。</div>
       <${ErrorBox} error=${error} onRetry=${load} />
       ${!info && !error && html`<${Spinner} />`}
       ${info && html`<${AppForm} info=${info} onSaved=${load} />`}
@@ -73,7 +87,7 @@ export function DiscordSettings() {
         <button class="btn filled" disabled=${!ready} onClick=${link}><${Icon} name="link" />連結 Discord 帳號</button>
         ${!ready && html`<span class="sub">先填好上面的 Client ID 與 Client Secret。</span>`}
       </div>`}
-      ${l && html`<div class="companion">
+      ${l && html`<div class="discord-link">
         <div class="toggle-row">
           <span class="grow"><span class="title">已連結 ${l.name}</span>
             <span class=${'sub' + (l.error ? ' state-failed' : st.connected ? ' state-completed' : '')}>${l.error ? l.error
@@ -90,12 +104,12 @@ export function DiscordSettings() {
         <div class="chips" role="group" aria-label="顯示的內容">
           <span class="chip-check on">歌名</span>
           ${[['artist', '歌手'], ['album', '專輯'], ['time', '播放進度']].map(([k, label]) => html`<label key=${k} class="chip-check">
-            <input type="checkbox" checked=${l.show[k]} onChange=${(e) => change({ show: { ...l.show, [k]: e.target.checked } })} />${label}</label>`)}
+            <input type="checkbox" checked=${l.show[k]} onChange=${(e) => change({ show: { [k]: e.target.checked } })} />${label}</label>`)}
           <label class="chip-check"><input type="checkbox" checked=${l.show.paused === 'show'}
-            onChange=${(e) => change({ show: { ...l.show, paused: e.target.checked ? 'show' : 'clear' } })} />暫停時顯示「已暫停」</label>
+            onChange=${(e) => change({ show: { paused: e.target.checked ? 'show' : 'clear' } })} />暫停時顯示「已暫停」（最多 10 分鐘）</label>
         </div>
         <label class="field">專輯封面
-          <select value=${l.show.cover || 'bangumi'} onChange=${(e) => change({ show: { ...l.show, cover: e.target.value } })}>
+          <select value=${l.show.cover || 'bangumi'} onChange=${(e) => change({ show: { cover: e.target.value } })}>
             <option value="bangumi">只用專輯綁定的 Bangumi 條目封面（公開圖片）</option>
             <option value="all">也用 Kanade 的封面（會產生公開的封面網址）</option>
             <option value="none">不顯示封面</option>

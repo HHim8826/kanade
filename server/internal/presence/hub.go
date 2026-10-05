@@ -68,12 +68,10 @@ type Hub struct {
 	mu      sync.Mutex
 	players map[string]*player
 	subs    map[int64]map[chan struct{}]bool // by user: told of every change
-	online  map[int64]int                    // companions with a stream open, by companion
 }
 
 func NewHub() *Hub {
-	return &Hub{Expire: 90 * time.Second, now: time.Now, players: map[string]*player{}, subs: map[int64]map[chan struct{}]bool{},
-		online: map[int64]int{}}
+	return &Hub{Expire: 90 * time.Second, now: time.Now, players: map[string]*player{}, subs: map[int64]map[chan struct{}]bool{}}
 }
 
 const maxPlayersPerUser = 50
@@ -176,7 +174,7 @@ func (h *Hub) EndSessions(user int64, keep int64, sessions ...int64) {
 	}
 }
 
-// Poke tells user's watchers to look again (a companion's settings changed).
+// Poke tells user's watchers to look again (what is shown of it changed).
 func (h *Hub) Poke(user int64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -208,27 +206,6 @@ func (h *Hub) Watch(user int64) (c <-chan struct{}, stop func()) {
 	}
 }
 
-// Connected counts a companion's open stream until done.
-func (h *Hub) Connected(companion int64) (done func()) {
-	h.mu.Lock()
-	h.online[companion]++
-	h.mu.Unlock()
-	return func() {
-		h.mu.Lock()
-		if h.online[companion]--; h.online[companion] <= 0 {
-			delete(h.online, companion)
-		}
-		h.mu.Unlock()
-	}
-}
-
-// Online says whether a companion has a stream open.
-func (h *Hub) Online(companion int64) bool {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.online[companion] > 0
-}
-
 func (h *Hub) nowOf(p *player, now time.Time) Now {
 	pos := p.PositionMS
 	if p.State == Playing {
@@ -241,7 +218,7 @@ func (h *Hub) nowOf(p *player, now time.Time) Now {
 		AlbumID: p.AlbumID, DurationMS: p.DurationMS, PositionMS: pos, Changed: p.changed.UnixMilli()}
 }
 
-// Pick is what a companion following device (empty: any) shows: of its players, the one that last
+// Pick is what is shown of user following device (empty: any): of its players, the one that last
 // started playing; when none plays, the one paused last. Players never take turns: one telling
 // again changes nothing of which. Nil when there is none.
 func (h *Hub) Pick(user int64, device string) *Now {

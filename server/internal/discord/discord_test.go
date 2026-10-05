@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -34,6 +35,13 @@ type fakeDiscord struct {
 	frames   chan map[string]any // what clients sent on the gateway (identify, presence)
 	closeNow chan websocket.StatusCode
 	conns    atomic.Int32
+
+	refuseAll    atomic.Bool  // the gateway refuses every token
+	tokenStatus  atomic.Int32 // renewing answers this, when set
+	refreshes    atomic.Int32
+	refreshGate  chan struct{} // renewing waits for it, when set
+	assetRefused atomic.Bool
+	assetCalls   atomic.Int32
 }
 
 func newFake(t *testing.T) *fakeDiscord {
@@ -60,6 +68,14 @@ func (f *fakeDiscord) serveAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case "refresh_token":
+			f.refreshes.Add(1)
+			if f.refreshGate != nil {
+				<-f.refreshGate
+			}
+			if code := f.tokenStatus.Load(); code != 0 {
+				http.Error(w, `{"message":"slow down"}`, int(code))
+				return
+			}
 			if f.refused.Load() {
 				http.Error(w, `{"error":"invalid_grant"}`, 400)
 				return
@@ -75,6 +91,11 @@ func (f *fakeDiscord) serveAPI(w http.ResponseWriter, r *http.Request) {
 	case "/oauth2/token/revoke":
 		f.revoked.Add(1)
 	case "/applications/123456789012345678/external-assets":
+		f.assetCalls.Add(1)
+		if f.assetRefused.Load() {
+			http.Error(w, `{"message":"no"}`, 400)
+			return
+		}
 		var body struct{ URLs []string }
 		json.NewDecoder(r.Body).Decode(&body)
 		if r.Header.Get("Authorization") == "" || len(body.URLs) != 1 {
@@ -132,7 +153,7 @@ func (f *fakeDiscord) serveGateway(w http.ResponseWriter, r *http.Request) {
 			case 2.0:
 				d := m["d"].(map[string]any)
 				f.mu.Lock()
-				ok := d["token"] == "Bearer "+f.access
+				ok := d["token"] == "Bearer "+f.access && !f.refuseAll.Load()
 				f.mu.Unlock()
 				f.frames <- m
 				if !ok {
@@ -180,6 +201,7 @@ func setup(t *testing.T) (*Service, *fakeDiscord, *presence.Hub, context.CancelF
 	s.Gateway.URL = "ws" + strings.TrimPrefix(f.gw.URL, "http")
 	s.Gateway.MinGap = 0
 	s.Grace = 300 * time.Millisecond
+	s.ClearAfter = 50 * time.Millisecond
 	rctx, cancel := context.WithCancel(ctx)
 	go s.Run(rctx)
 	t.Cleanup(cancel)
@@ -262,9 +284,8 @@ func TestServiceShowsWhatPlays(t *testing.T) {
 		t.Fatalf("state %+v", st)
 	}
 	// What is shown changed: the status and the album go.
-	online := "online"
-	show := presence.Show{Artist: true, Time: true, Paused: "show"}
-	if err := s.Change(context.Background(), 1, nil, nil, &show, &online); err != nil {
+	online, no, show := "online", false, "show"
+	if err := s.Change(context.Background(), 1, nil, nil, &ShowChange{Album: &no, Paused: &show}, &online); err != nil {
 		t.Fatal(err)
 	}
 	if p := f.next(3); p["status"] != "online" || p["activities"].([]any)[0].(map[string]any)["assets"].(map[string]any)["large_text"] != nil {
@@ -353,7 +374,11 @@ func TestServiceShowsCover(t *testing.T) {
 	r.AlbumID = 5
 	hub.Put(1, 7, "tab-a-1234", r)
 	f.next(2)
+	// Shown without it until Discord took it (review #183).
 	a := f.next(3)["activities"].([]any)[0].(map[string]any)
+	if a["assets"].(map[string]any)["large_image"] == "kanade" {
+		a = f.next(3)["activities"].([]any)[0].(map[string]any)
+	}
 	if as := a["assets"].(map[string]any); as["large_image"] != "mp:external/x/lain.bgm.tv/pic/cover/l/rainbow.jpg" || as["large_text"] != "ARIA OST" {
 		t.Fatalf("cover %v", a)
 	}
@@ -362,9 +387,8 @@ func TestServiceShowsCover(t *testing.T) {
 		t.Fatalf("asked %v", asked)
 	}
 	mu.Unlock()
-	show := presence.DefaultShow
-	show.Cover = "none"
-	s.Change(context.Background(), 1, nil, nil, &show, nil)
+	none := "none"
+	s.Change(context.Background(), 1, nil, nil, &ShowChange{Cover: &none}, nil)
 	if as := f.next(3)["activities"].([]any)[0].(map[string]any)["assets"].(map[string]any); as["large_image"] != "kanade" {
 		t.Fatalf("no cover: %v", as)
 	}
@@ -382,5 +406,162 @@ func TestActivity(t *testing.T) {
 	long := Activity(presence.Shown{State: presence.Playing, Title: strings.Repeat("長", 300)}, "", now)
 	if n := len([]rune(long["details"].(string))); n != 128 {
 		t.Fatal(n)
+	}
+}
+
+// The gateway refusing tokens it just renewed is the link refused (review #181): not renewed and
+// connected again on and on, and said why.
+func TestGatewayRefusingRenewedTokens(t *testing.T) {
+	s, f, hub, _ := setup(t)
+	link(t, s)
+	f.refuseAll.Store(true)
+	hub.Put(1, 7, "tab-a-1234", playing(1, presence.Playing, "Undine", 0))
+	for i := 0; i < 200 && s.Linked(context.Background(), 1); i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(200 * time.Millisecond)
+	l, _ := s.Link(context.Background(), 1)
+	if l.Error == "" || !strings.Contains(l.Error, "Social SDK") {
+		t.Fatalf("not refused: %+v", l)
+	}
+	if c, r := f.conns.Load(), f.refreshes.Load(); c != 2 || r != 1 {
+		t.Fatalf("%d connections, %d renewals", c, r)
+	}
+}
+
+// Renewing that Discord turns down for now (limiting) is tried again later: the link stays
+// (review #181).
+func TestRenewingLimited(t *testing.T) {
+	s, f, hub, _ := setup(t)
+	link(t, s)
+	f.tokenStatus.Store(http.StatusTooManyRequests)
+	s.DB.Exec(`UPDATE discord_links SET expires_at = 0`)
+	hub.Put(1, 7, "tab-a-1234", playing(1, presence.Playing, "Undine", 0))
+	for i := 0; i < 200 && s.StateOf(1).Error == ""; i++ {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if st := s.StateOf(1); !strings.Contains(st.Error, "did not answer") || !s.Linked(context.Background(), 1) || f.refreshes.Load() != 1 {
+		t.Fatalf("state %+v, linked %v, %d renewals", st, s.Linked(context.Background(), 1), f.refreshes.Load())
+	}
+}
+
+// A renewal that answers after the link was made again leaves the new link alone (review #172).
+func TestLateRenewalAfterLinkingAgain(t *testing.T) {
+	s, f, _, cancel := setup(t)
+	cancel() // nothing follows: renewals are asked for here
+	link(t, s)
+	ctx := context.Background()
+	s.DB.Exec(`UPDATE discord_links SET expires_at = 0`)
+	f.refreshGate = make(chan struct{})
+	got := make(chan error, 1)
+	go func() {
+		_, err := s.token(ctx, 1)
+		got <- err
+	}()
+	for f.refreshes.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Linked again meanwhile: another account, its own tokens.
+	s.DB.Exec(`UPDATE discord_links SET discord_id = '43', access_token = 'new-acc', refresh_token = 'new-ref', expires_at = ?, linked_at = linked_at + 1`,
+		time.Now().Add(time.Hour*24).UnixMilli())
+	close(f.refreshGate)
+	if err := <-got; err != nil {
+		t.Fatal(err)
+	}
+	if l, _ := s.Link(ctx, 1); l.DiscordID != "43" || l.Access != "new-acc" || l.Refresh != "new-ref" {
+		t.Fatalf("the old renewal wrote over the new link: %+v", l)
+	}
+	if tok, _ := s.token(ctx, 1); tok != "new-acc" {
+		t.Fatalf("token %q", tok)
+	}
+	// One refused: the new link is not marked for it.
+	l, _ := s.Link(ctx, 1)
+	s.setError(1, l.LinkedAt-1, "old")
+	if s.Linked(ctx, 1) == false {
+		t.Fatal("marked the new link")
+	}
+}
+
+// One song ending and the next starting are one change in Discord, never a blank between them; a
+// picture Discord refused is not given again at each change (review #183).
+func TestSongChangeHasNoBlank(t *testing.T) {
+	s, f, hub, _ := setup(t)
+	s.ClearAfter = 500 * time.Millisecond
+	s.CoverURL = func(ctx context.Context, album int64, all bool) string { return "https://lain.bgm.tv/pic/a.jpg" }
+	f.assetRefused.Store(true)
+	link(t, s)
+	r := playing(1, presence.Playing, "Undine", 0)
+	r.AlbumID = 5
+	hub.Put(1, 7, "tab-a-1234", r)
+	f.next(2)
+	if a := f.next(3)["activities"].([]any)[0].(map[string]any); a["assets"].(map[string]any)["large_image"] != "kanade" {
+		t.Fatalf("first %v", a)
+	}
+	for i := int64(2); i < 8; i += 2 {
+		p := playing(i, presence.Paused, "Undine", 230_000) // ended
+		p.AlbumID = 5
+		hub.Put(1, 7, "tab-a-1234", p)
+		time.Sleep(20 * time.Millisecond)
+		n := playing(i+1, presence.Playing, fmt.Sprint("Song ", i), 0)
+		n.AlbumID = 5
+		hub.Put(1, 7, "tab-a-1234", n)
+		if a := f.next(3)["activities"].([]any); len(a) != 1 || a[0].(map[string]any)["details"] != fmt.Sprint("Song ", i) {
+			t.Fatalf("after song %d: %v", i, a)
+		}
+	}
+	if n := f.assetCalls.Load(); n != 1 {
+		t.Fatalf("the refused picture was given %d times", n)
+	}
+}
+
+// A pause is shown a while only; then the status clears and the connection goes (review #184).
+func TestPauseShownAWhile(t *testing.T) {
+	s, f, hub, _ := setup(t)
+	s.PausedFor = 300 * time.Millisecond
+	link(t, s)
+	show := "show"
+	s.Change(context.Background(), 1, nil, nil, &ShowChange{Paused: &show}, nil)
+	hub.Put(1, 7, "tab-a-1234", playing(1, presence.Playing, "Undine", 0))
+	f.next(2)
+	f.next(3)
+	hub.Put(1, 7, "tab-a-1234", playing(2, presence.Paused, "Undine", 1000))
+	if a := f.next(3)["activities"].([]any); len(a) != 1 {
+		t.Fatalf("paused %v", a)
+	}
+	if a := f.next(3)["activities"].([]any); len(a) != 0 {
+		t.Fatalf("paused a while %v", a)
+	}
+	for i := 0; i < 100 && s.StateOf(1).Connected; i++ {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if s.StateOf(1).Connected {
+		t.Fatal("still connected")
+	}
+}
+
+// Changes made at once each change what they name only (review #178).
+func TestChangesAtOnce(t *testing.T) {
+	s, _, _, _ := setup(t)
+	link(t, s)
+	ctx := context.Background()
+	off := false
+	var wg sync.WaitGroup
+	for _, c := range []ShowChange{{Artist: &off}, {Album: &off}, {Time: &off}} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := s.Change(ctx, 1, nil, nil, &c, nil); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	l, _ := s.Link(ctx, 1)
+	if l.Show.Artist || l.Show.Album || l.Show.Time || l.Show.Cover != "bangumi" {
+		t.Fatalf("show %+v", l.Show)
+	}
+	bad := "everything"
+	if err := s.Change(ctx, 1, nil, nil, &ShowChange{Cover: &bad}, nil); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("a bad cover: %v", err)
 	}
 }

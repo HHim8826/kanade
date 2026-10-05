@@ -927,7 +927,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .work-uses .note { flex: 1 1 180px; min-width: 0; }
 @media (max-width: 600px) { .candidate-detail { padding-left: 8px; } .work-search .btn { padding: 0 12px; } }
 /* Discord's status (review #135) */
-.discord-settings .companion { border-top: 1px solid var(--outline-variant); margin-top: 12px; padding-top: 8px; }
+.discord-settings .discord-link { border-top: 1px solid var(--outline-variant); margin-top: 12px; padding-top: 8px; }
 .discord-settings select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline);
   border-radius: var(--radius-s); padding: 6px 8px; max-width: 100%; }
 .app-setup { margin: 12px 0 4px; }
