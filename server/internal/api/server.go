@@ -311,6 +311,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/discord/link", s.authed(s.unlinkDiscord))
 	mux.Handle("POST /api/v1/stream/{id}/url", s.authed(s.streamURL))
 	mux.Handle("POST /api/v1/stream/{id}/prefetch", s.authed(s.prefetchStream))
+	mux.Handle("DELETE /api/v1/stream/prefetch", s.authed(s.unprefetch))
 	mux.HandleFunc("GET /api/v1/stream/{id}", s.stream) // header token or signed URL, checked inside
 	mux.HandleFunc("HEAD /api/v1/stream/{id}", s.stream)
 

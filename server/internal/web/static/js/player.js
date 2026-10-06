@@ -1,4 +1,4 @@
-import { coverURL, get, post, streamURL } from './api.js';
+import { api, coverURL, get, post, streamURL } from './api.js';
 import { attach, balanceGain, learn, output, wake } from './effects.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
@@ -207,7 +207,8 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (!item) return;
   if (session) report(); // close out the track we are leaving
   loads++;
-  prefetched = 0; // the next one is preloaded again for this one
+  prefetched = 0; // the next one is preloaded again for this one, once it plays
+  warm = null;
   session = { id: crypto.randomUUID(), item, heard: 0, last: null, played: false };
   // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
   // 0 is a place too, the start, which the settings' resuming does not override (review #106).
@@ -384,7 +385,6 @@ async function fetchMore(s, n) {
     if (!list.length) throw new Error(s.radio.playlist ? '沒有其他符合條件的歌' : '曲庫沒有可以接續的歌');
     const q = player.get();
     player.set({ queue: [...q.queue, ...tag(list.map(fromTrack).map(autoItem))], radioError: null });
-    prefetchNext();
     return 'ok';
   } catch (e) {
     if (my !== gen) return 'stale';
@@ -697,6 +697,8 @@ export function resetPlayer(withReport = true, signOut = false) {
   if (owner || signOut) forgetSession();
   owner = false;
   gen++;
+  warm = null; // nothing to preload, nor to let go of: signed out, it would be refused
+  prefetched = 0;
   session = null;
   pendingSeek = null;
   deferred = null;
@@ -800,17 +802,25 @@ export const endScrub = (commit) => {
 
 // Warm the server's stream cache for the next track (plan §5: preload at most the next one),
 // unless the settings turned it off (review #78). Asked as a preload, not played: the song playing
-// keeps its download (review #175).
-let prefetched = 0;
+// keeps its download (review #175). Once the song playing has started, the next one is followed
+// as the queue and the modes change (a song moved or put next, the next one removed, repeat): the
+// new one is preloaded, and one no longer next is let go of, so its download stops (review #193).
+// The asks go one after another, so the server ends with the last.
+let prefetched = 0; // the asset preloaded for the song playing (0: none)
+let warm = null; // the queue item that started playing: preloading no longer competes with it
+let asking = Promise.resolve();
 function prefetchNext() {
   const s = player.get();
-  if (!s.preload) return;
-  const n = s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
-  if (n && n.assetId !== prefetched) {
-    prefetched = n.assetId;
-    post(`/stream/${n.assetId}/prefetch`).catch(() => { prefetched = 0; });
-  }
+  const cur = s.queue[s.index];
+  if (!cur || cur.qid !== warm) return; // another queue, its song not started yet
+  const n = !s.preload || s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
+  const want = n ? n.assetId : 0;
+  if (want === prefetched) return;
+  prefetched = want;
+  asking = asking.then(() => (want ? post(`/stream/${want}/prefetch`) : api('DELETE', '/stream/prefetch')))
+    .catch(() => { if (prefetched === want) prefetched = 0; });
 }
+player.subscribe(prefetchNext);
 
 let lastTick = 0;
 on('timeupdate', () => {
@@ -901,9 +911,10 @@ on('pause', () => {
 });
 on('waiting', () => player.set({ buffering: true }));
 on('playing', () => {
+  const s = player.get();
+  warm = s.queue[s.index] ? s.queue[s.index].qid : null;
   player.set({ buffering: false, playing: true });
   topUp();
-  prefetchNext();
 });
 on('ended', () => {
   report(true);

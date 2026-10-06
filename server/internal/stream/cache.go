@@ -349,6 +349,15 @@ func (c *Cache) Playing() (current, next string) {
 // SetLean keeps the cache to the files being played while the disk is low; prefetching stops.
 func (c *Cache) SetLean(on bool) { c.lean.Store(on) }
 
+// Unprefetch lets go of the file prefetched last: the next track is another one now, or none, so
+// its download stops unless a request holds it (review #193).
+func (c *Cache) Unprefetch() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.next = ""
+	c.settleLocked()
+}
+
 // Prefetch starts filling a file without a client request (plan: preload at most the next track).
 func (c *Cache) Prefetch(id string, size int64) error {
 	if c.lean.Load() {

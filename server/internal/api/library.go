@@ -215,6 +215,13 @@ func (s *Server) prefetchStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// unprefetch lets go of the track preloaded last: the player's next track changed to none, or
+// preloading was turned off (review #193).
+func (s *Server) unprefetch(w http.ResponseWriter, r *http.Request) {
+	s.cache.Unprefetch()
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func contentType(format string) string {
 	switch format {
 	case "flac":

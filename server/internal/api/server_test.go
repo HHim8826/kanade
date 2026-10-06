@@ -229,6 +229,16 @@ func TestPrefetchIsNoPlay(t *testing.T) {
 	if rec := do(t, h, "POST", "/api/v1/stream/999/prefetch", token, nil); rec.Code != http.StatusNoContent {
 		t.Fatalf("no such song: %d", rec.Code)
 	}
+	// None next any more (review #193).
+	if rec := do(t, h, "DELETE", "/api/v1/stream/prefetch", "", nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("let go of without auth: %d", rec.Code)
+	}
+	if rec := do(t, h, "DELETE", "/api/v1/stream/prefetch", token, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("let go of: %d", rec.Code)
+	}
+	if _, next := s.cache.Playing(); next != "" {
+		t.Fatalf("next %q", next)
+	}
 }
 
 func TestImportPathMustStayInsideRoots(t *testing.T) {

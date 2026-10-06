@@ -399,6 +399,49 @@ func TestSkippedSongsStopDownloading(t *testing.T) {
 	t.Fatal("the song playing stopped downloading")
 }
 
+// A preloaded song that is no longer next stops downloading (review #193): another one preloaded
+// instead, or none.
+func TestPreloadNoLongerNextStops(t *testing.T) {
+	const size = 64 * blockSize
+	src := &slowSource{data: make([]byte, size)}
+	c, err := NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := func(id string) bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		cf := c.files[id]
+		if cf == nil {
+			return false
+		}
+		cf.mu.Lock()
+		defer cf.mu.Unlock()
+		for _, fl := range cf.fillers {
+			if !fl.done {
+				return true
+			}
+		}
+		return false
+	}
+	get(c, "a", size, "bytes=0-1000")
+	c.Prefetch("b", size)
+	if !running("b") {
+		t.Fatal("b is not preloaded")
+	}
+	c.Prefetch("c", size) // c moved before b
+	if running("b") || !running("c") {
+		t.Fatalf("another next: b %v, c %v", running("b"), running("c"))
+	}
+	c.Unprefetch() // c removed, and nothing after a
+	if _, next := c.Playing(); next != "" || running("c") {
+		t.Fatalf("none next: %q, c %v", next, running("c"))
+	}
+	if !running("a") {
+		t.Fatal("the song playing stopped downloading")
+	}
+}
+
 // A prefetch waits while downloads are running; a request never does.
 func TestPrefetchWaitsItsTurn(t *testing.T) {
 	const size = 64 * blockSize
