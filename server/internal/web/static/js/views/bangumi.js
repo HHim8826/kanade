@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast } from '../ui.js';
-import { confirmDialog, useRunner } from './organize.js';
+import { confirmDialog, useLibRev, useRunner } from './organize.js';
 import { WorkImage, bindSubject, workLine } from './works.js';
 
 // The album's own entry in Bangumi (a music subject) and its owner's collection of it, through
@@ -83,6 +83,7 @@ function CollectionDialog({ album, onSaved, close }) {
     if (tags.length > 10) throw new Error('標籤最多 10 個');
     // The answer is the collection as saved: nothing to read again (review #185).
     const r = await api('PUT', `/albums/${album.id}/collection`, { ...form, tags: [...new Set(tags)] });
+    kept = null; // the collections tab reads them again (review #192)
     toast(`已更新 Bangumi 收藏：${statusNames[form.type]}`);
     if (onSaved) onSaved({ ...data, collection: r.collection });
     close();
@@ -202,8 +203,9 @@ export function BangumiAccount() {
 }
 
 // What the collections tab read last, kept a while: back from an album, it shows as it was, with
-// the pages loaded, without asking Bangumi again (review #187).
-let kept = null; // { type, pages, at }
+// the pages loaded, without asking Bangumi again (review #187). A collection saved here, or the
+// library changed since (an entry bound, an album removed), and it is read again (review #192).
+let kept = null; // { type, pages, at, rev }
 const keptFor = 5 * 60 * 1000;
 
 // CollectionsTab is the owner's music collections in Bangumi, a type at a time, with the library's
@@ -213,7 +215,8 @@ export function CollectionsTab() {
     const t = Number(parseHash().query.get('type'));
     return statusNames[t] ? t : 2;
   });
-  const [pages, setPages] = useState(() => (kept && kept.type === type && Date.now() - kept.at < keptFor ? kept.pages : null));
+  const rev = useLibRev();
+  const [pages, setPages] = useState(() => (kept && kept.type === type && kept.rev === rev && Date.now() - kept.at < keptFor ? kept.pages : null));
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   // Each read is numbered: one that answers after a newer one, or after the type changed, shows
@@ -228,7 +231,7 @@ export function CollectionsTab() {
       if (my !== asked.current) return;
       const next = more ? { ...r, items: [...pages.items, ...r.items] } : r;
       setPages(next);
-      kept = { type, pages: next, at: Date.now() };
+      kept = { type, pages: next, at: Date.now(), rev };
     } catch (e) {
       if (my !== asked.current) return;
       setError(e);
