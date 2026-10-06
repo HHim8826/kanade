@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // pngOf is a small PNG of one color: each color is another image.
@@ -111,7 +112,16 @@ func TestInboxRootCoverIsPerBatch(t *testing.T) {
 	if got := albumCover(t, im, "Second"); got != shaOf(blue) {
 		t.Fatalf("second album took %q, want its own", got)
 	}
-	if len(im.covers) != 0 {
-		t.Fatalf("finished batches left %v", im.covers)
+	// A batch is marked done before what it leaves is cleared up.
+	left := func() int {
+		im.mu.Lock()
+		defer im.mu.Unlock()
+		return len(im.covers)
+	}
+	for deadline := time.Now().Add(5 * time.Second); left() != 0 && time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := left(); n != 0 {
+		t.Fatalf("finished batches left %d covers", n)
 	}
 }
