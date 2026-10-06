@@ -467,6 +467,41 @@ func (s *Store) LinkWork(ctx context.Context, album, work, replace int64) (int64
 	})
 }
 
+// LinkAlbums links albums to a work, as one edit: the albums of a series, chosen together. Those
+// linked to it already stay as they are.
+func (s *Store) LinkAlbums(ctx context.Context, albums []int64, work int64) (int64, error) {
+	if len(albums) == 0 || len(albums) > maxBatch {
+		return 0, invalid("give from 1 to %d albums", maxBatch)
+	}
+	name, err := s.workName(ctx, work)
+	if err != nil {
+		return 0, err
+	}
+	return s.edit(ctx, SourceUser, fmt.Sprintf("將 %d 張專輯關聯到作品「%s」", len(albums), name), func(e *editor) error {
+		for _, id := range albums {
+			if _, err := brief(ctx, e.tx, id); err != nil {
+				return err
+			}
+		}
+		for _, id := range albums {
+			ids, err := e.albumWorks(id)
+			if err != nil {
+				return err
+			}
+			if slices.Contains(ids, work) {
+				continue
+			}
+			if len(ids) >= maxWorksPerAlbum {
+				return invalid("album %d is linked to %d works already, the most there can be", id, len(ids))
+			}
+			if err := e.setWorks("album", id, Str(encodeIDs(append(ids, work)))); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
 // UnlinkWork takes an album's link to a work away, with what its songs say of the work, as one edit.
 func (s *Store) UnlinkWork(ctx context.Context, album, work int64) (int64, error) {
 	title, err := s.name(ctx, "album", album)

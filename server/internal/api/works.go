@@ -314,28 +314,8 @@ func (s *Server) linkWork(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	sid, ok := bangumi.Ref(req.SourceID)
+	work, ok := s.keepWork(w, r, req.SourceID)
 	if !ok {
-		writeError(w, http.StatusBadRequest, errors.New("source_id is a Bangumi subject's number or link"))
-		return
-	}
-	var work int64
-	sub, err := s.bgm.Subject(r.Context(), sid)
-	switch {
-	case err == nil:
-		if work, err = s.lib.PutWork(r.Context(), workData(sub)); err != nil {
-			s.libError(w, r, err)
-			return
-		}
-	case errors.Is(err, bangumi.ErrUnavailable):
-		wk, err2 := s.lib.WorkFor(r.Context(), library.SourceBangumi, strconv.FormatInt(sid, 10))
-		if err2 != nil || wk == nil {
-			s.bangumiError(w, r, err)
-			return
-		}
-		work = wk.ID
-	default:
-		s.bangumiError(w, r, err)
 		return
 	}
 	g, err := s.lib.LinkWork(r.Context(), album, work, req.Replace)
@@ -344,6 +324,58 @@ func (s *Server) linkWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"group": g, "work_id": work})
+}
+
+// linkAlbums links several albums to one Bangumi subject at once: {albums, source_id}.
+func (s *Server) linkAlbums(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Albums   []int64 `json:"albums"`
+		SourceID string  `json:"source_id"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	work, ok := s.keepWork(w, r, req.SourceID)
+	if !ok {
+		return
+	}
+	g, err := s.lib.LinkAlbums(r.Context(), req.Albums, work)
+	if err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"group": g, "work_id": work})
+}
+
+// keepWork keeps the Bangumi subject sourceID names (its number or link) as a work, read again
+// from Bangumi: the work's ID. One kept already serves while Bangumi cannot be reached. Otherwise
+// the answer is written, and ok is false.
+func (s *Server) keepWork(w http.ResponseWriter, r *http.Request, sourceID string) (work int64, ok bool) {
+	sid, ok := bangumi.Ref(sourceID)
+	if !ok {
+		writeError(w, http.StatusBadRequest, errors.New("source_id is a Bangumi subject's number or link"))
+		return 0, false
+	}
+	sub, err := s.bgm.Subject(r.Context(), sid)
+	switch {
+	case err == nil:
+		if work, err = s.lib.PutWork(r.Context(), workData(sub)); err != nil {
+			s.libError(w, r, err)
+			return 0, false
+		}
+		return work, true
+	case errors.Is(err, bangumi.ErrUnavailable):
+		wk, err2 := s.lib.WorkFor(r.Context(), library.SourceBangumi, strconv.FormatInt(sid, 10))
+		if err2 != nil || wk == nil {
+			s.bangumiError(w, r, err)
+			return 0, false
+		}
+		return wk.ID, true
+	default:
+		s.bangumiError(w, r, err)
+		return 0, false
+	}
 }
 
 func (s *Server) unlinkWork(w http.ResponseWriter, r *http.Request) {

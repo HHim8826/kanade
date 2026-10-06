@@ -5,6 +5,7 @@ import { enqueue, fromEntry, playNext, playQueue } from '../player.js';
 import { go } from '../router.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { Field, KindPicker, changed, done, useRunner } from './organize.js';
+import { linkAlbumsWorks } from './works.js';
 
 // Acting on several albums or songs at once (review #83): the selection bar's actions and their
 // dialogs. The server checks every album and song first and makes each change one edit, which the
@@ -51,6 +52,7 @@ export function AlbumActions({ sel }) {
     <${Btn} icon="favorite" label="收藏" onClick=${() => setFavorites('album', ids, true)} />
     <${Btn} icon="favoriteOff" label="取消收藏" onClick=${() => setFavorites('album', ids, false)} />
     <${Btn} icon="folder" label="分類…" onClick=${() => showDialog((close) => html`<${Categorize} ids=${ids} close=${close} />`)} />
+    <${Btn} icon="work" label="關聯作品…" onClick=${() => linkAlbumsWorks(ids, chosen)} />
     <${Btn} icon="merge" label="合併…" onClick=${() => showDialog((close) => html`<${MergeAlbums} albums=${chosen} close=${close} onDone=${sel.stop} />`)} />
     <${Btn} icon="edit" label="修改資訊…" onClick=${() => showDialog((close) => html`<${EditAlbums} ids=${ids} close=${close} />`)} />
     <${Btn} icon="delete" label="移除…" danger onClick=${() => showDialog((close) => html`<${RemoveAlbums} ids=${ids} close=${close} onDone=${sel.stop} />`)} />`;

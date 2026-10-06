@@ -569,7 +569,7 @@ DIR/
 - 作品（`works`）存來源給的原樣：原名、中文名、類型、平台、日期、簡介、評分（沒有就是 NULL）、圖片網址與取得時間；來源沒有的欄位不補。作品不刪：解除關聯後只是不列出，撤回時可以再關聯。
 - 關聯只由使用者確認：專輯頁「關聯作品」用專輯名稱（取「」『』內的字，或去掉 OST、Vol. 等字）預填搜尋，也可貼條目連結或編號；一個純數字同時當編號查與當字詞搜（例如「86」）。專輯的「works」與歌曲的「works」（用途 op/ed/insert/theme/character/bgm/other 與備註）都走修改紀錄，可以撤回；改綁時這張專輯歌曲的用途跟著移到新作品，解除時一起移除；歌曲也在其他仍關聯同一作品的專輯裡（單曲與合集共用一首）時保留原用途，改綁時另外給新作品一份（#173）；合併專輯時作品跟著移過去。關聯不改動專輯或歌曲本身的任何欄位。
 - 讀取：專輯頁、作品頁（`#/work/{id}`）、曲庫「作品」分頁、搜尋結果都只讀資料庫，不等 Bangumi；作品頁發現資料超過 30 天時在背景重新取得。Bangumi 連不上時搜尋與更新回 503（附 Retry-After），已存過的作品照樣能關聯。圖片由伺服器代抓並存進封面縮圖快取（`bgm-` 開頭，共用 256 MB 上限），網頁的 CSP 不需開外部圖片。
-- API：`GET /bangumi/search?q=&types=&offset=&album=`、`GET /bangumi/subjects/{sid}/image`、`GET /works`、`GET /works/{id}`、`GET /works/{id}/image`、`POST /works/{id}/refresh`、`POST /albums/{id}/works`（`source_id`、`replace`）、`DELETE /albums/{id}/works/{work}`、`PUT /tracks/{id}/works`。
+- API：`GET /bangumi/search?q=&types=&offset=&album=`、`GET /bangumi/subjects/{sid}/image`、`GET /works`、`GET /works/{id}`、`GET /works/{id}/image`、`POST /works/{id}/refresh`、`POST /albums/{id}/works`（`source_id`、`replace`）、`POST /albums/works`（`albums`、`source_id`：多張專輯一次關聯同一部作品，見下方）、`DELETE /albums/{id}/works/{work}`、`PUT /tracks/{id}/works`。
 
 ### Bangumi 音樂條目與收藏（2026-10-05，#94，遷移 37：`album_subjects`、`bangumi_links`）
 
@@ -621,6 +621,10 @@ DIR/
   - 歌單頁導覽列的選中項；
   - 刪除歌單後的去處；
   - 25 筆 MusicBrainz 結果時的標題高度。
+- 多選關聯作品（使用者要求）：曲庫、分類、收藏的專輯多選工具列加上「關聯作品…」，把選取的專輯一次關聯到同一部 Bangumi 作品（`POST /albums/works`，`Store.LinkAlbums`）：
+  - 整批是一筆修改紀錄，可一次撤回；已關聯這部作品的專輯不變；有一張專輯不存在就整批不做。
+  - 對話框沿用單張的「關聯 Bangumi 作品」：預設搜尋字詞取各專輯推測名稱開頭共同的字，沒有就用第一張的；不列出單張的已關聯作品，也沒有改綁與解除。
+  - 驗證：Go 測試（一次關聯、已關聯的不變、撤回、不存在的專輯與作品、API 的錯誤回應）；瀏覽器在桌面與 390px 走過多選、搜尋與關聯（Bangumi 的搜尋與關聯在瀏覽器端模擬）。
 
 ## 使用方式（開發環境）
 

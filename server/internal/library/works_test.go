@@ -284,3 +284,71 @@ func TestSharedSongsKeepTheirUses(t *testing.T) {
 		t.Fatalf("unlinked from both: %q", got)
 	}
 }
+
+// Albums chosen together are linked to a work as one edit (review #190's library): one linked to
+// it already stays as it was, and undo takes the rest back; an album that is no more stops it all.
+func TestLinkAlbums(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	f := fixture{t, s}
+	A := f.albumOf(f.song("l1", "Undine", "ARIA The ANIMATION OST", 1, 1).EntryID)
+	B := f.albumOf(f.song("l2", "Euforia", "ARIA The NATURAL OST", 1, 1).EntryID)
+	C := f.albumOf(f.song("l3", "Kin no Hoshi", "ARIA The ORIGINATION OST", 1, 1).EntryID)
+	anim, _ := s.PutWork(ctx, WorkData{Source: SourceBangumi, SourceID: "531", Type: 2, Name: "ARIA"})
+	other, _ := s.PutWork(ctx, WorkData{Source: SourceBangumi, SourceID: "1", Type: 2, Name: "Other"})
+	if _, err := s.LinkWork(ctx, A, anim, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.LinkWork(ctx, B, other, 0); err != nil {
+		t.Fatal(err)
+	}
+	linked := func() string {
+		t.Helper()
+		var out []string
+		for _, a := range []int64{A, B, C} {
+			d, err := s.Album(ctx, a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var names []string
+			for _, w := range d.Works {
+				names = append(names, w.Name)
+			}
+			out = append(out, strings.Join(names, "+"))
+		}
+		return strings.Join(out, " ")
+	}
+	g, err := s.LinkAlbums(ctx, []int64{A, B, C, C}, anim)
+	if err != nil || g == 0 {
+		t.Fatalf("link: %d %v", g, err)
+	}
+	if got := linked(); got != "ARIA ARIA+Other ARIA" && got != "ARIA Other+ARIA ARIA" {
+		t.Fatalf("linked: %q", got)
+	}
+	var summary string
+	s.db.QueryRow(`SELECT summary FROM edit_groups WHERE id = ?`, g).Scan(&summary)
+	if summary != "將 4 張專輯關聯到作品「ARIA」" {
+		t.Fatalf("summary %q", summary)
+	}
+	if again, err := s.LinkAlbums(ctx, []int64{A, C}, anim); err != nil || again != 0 {
+		t.Fatalf("linked already: %d %v", again, err)
+	}
+	if _, _, err := s.Undo(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if got := linked(); got != "ARIA Other " {
+		t.Fatalf("undone: %q", got)
+	}
+	if _, err := s.LinkAlbums(ctx, []int64{C, 999}, anim); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an album that is not: %v", err)
+	}
+	if got := linked(); got != "ARIA Other " {
+		t.Fatalf("nothing linked with it: %q", got)
+	}
+	if _, err := s.LinkAlbums(ctx, nil, anim); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("no albums: %v", err)
+	}
+	if _, err := s.LinkAlbums(ctx, []int64{C}, 999); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no such work: %v", err)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -206,6 +207,35 @@ func TestWorkEndpoints(t *testing.T) {
 	}
 	if call("GET", "/api/v1/works/"+itoa(linked.WorkID), nil, &wp); wp.Work.Albums != 1 || len(wp.Songs) != 1 {
 		t.Fatalf("undone: %+v", wp)
+	}
+
+	// Albums chosen together link to one work at once (review #190's library).
+	b, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "w2", Size: 1, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, b.ID, "d-w2")
+	pub2, _ := s.lib.Publish(ctx, b.ID, library.EntryInput{Title: "Euforia", Artist: "x", Album: "ARIA The NATURAL OST", AlbumArtist: "y"})
+	var album2 int64
+	s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub2.EntryID).Scan(&album2)
+	var both struct {
+		Group  int64 `json:"group"`
+		WorkID int64 `json:"work_id"`
+	}
+	if code := call("POST", "/api/v1/albums/works", map[string]any{"albums": []int64{album, album2}, "source_id": "1269"}, &both); code != 200 ||
+		both.Group == 0 || both.WorkID == 0 {
+		t.Fatalf("link albums: %d %+v", code, both)
+	}
+	for _, a := range []int64{album, album2} {
+		if call("GET", "/api/v1/albums/"+itoa(a), nil, &detail); !slices.ContainsFunc(detail.Works, func(w library.WorkBrief) bool { return w.ID == both.WorkID }) {
+			t.Fatalf("album %d: %+v", a, detail.Works)
+		}
+	}
+	if code := call("POST", "/api/v1/albums/works", map[string]any{"albums": []int64{album}, "source_id": "not a subject"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("no subject: %d", code)
+	}
+	if code := call("POST", "/api/v1/albums/works", map[string]any{"albums": []int64{}, "source_id": "1269"}, nil); code != http.StatusBadRequest {
+		t.Fatalf("no albums: %d", code)
+	}
+	if code := call("POST", "/api/v1/albums/works", map[string]any{"albums": []int64{album, 999}, "source_id": "1269"}, nil); code != http.StatusNotFound {
+		t.Fatalf("an album that is not: %d", code)
 	}
 
 	// Pictures only from Bangumi: this work's (kept from the fake server, which is not Bangumi's)

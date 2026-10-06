@@ -84,6 +84,18 @@ export function guess(title) {
 
 export const linkWorks = (album, replace) => showDialog((close) => html`<${LinkWorks} albumId=${album.id} title=${album.title} replaceFirst=${replace} close=${close} />`);
 
+// linkAlbumsWorks links albums chosen together (the albums of a series) to one work at once.
+export const linkAlbumsWorks = (ids, albums) => showDialog((close) => html`<${LinkWorks} albumIds=${ids} titles=${albums.map((a) => a.title)} close=${close} />`);
+
+// sharedGuess is what to search for albums chosen together: the words their guesses begin with,
+// else the first one's.
+function sharedGuess(titles) {
+  const words = titles.map((t) => guess(t).split(' '));
+  let n = 0;
+  while (words.every((w) => n < w.length && w[n] === words[0][n])) n++;
+  return words[0].slice(0, n).join(' ') || guess(titles[0]);
+}
+
 // bindSubject finds the album's own entry in Bangumi (a music subject), to manage its collection.
 export const bindSubject = (album) => showDialog((close) => html`<${LinkWorks} albumId=${album.id} title=${album.title} subject close=${close} />`);
 
@@ -91,13 +103,15 @@ export const bindSubject = (album) => showDialog((close) => html`<${LinkWorks} a
 const plainTitle = (t) => (t || '').replace(/[[(【][^\])】]*[\])】]/g, ' ').replace(/\s+/g, ' ').trim() || (t || '').trim();
 
 // LinkWorks finds a work in Bangumi for an album and links it, or corrects or removes a link; with
-// subject, it finds the album's own entry (a music subject) instead, one per album.
-function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
+// subject, it finds the album's own entry (a music subject) instead, one per album. With albumIds
+// (and titles, those loaded of them), it links albums chosen together to one work.
+function LinkWorks({ albumId, title, replaceFirst, subject, albumIds, titles, close }) {
   const rev = useLibRev();
-  const album = useLoad(() => get('/albums/' + albumId), [albumId], rev);
+  const album = useLoad(() => (albumId ? get('/albums/' + albumId) : Promise.resolve(null)), [albumId], rev);
   const works = album.data ? (subject ? (album.data.subject ? [album.data.subject] : []) : album.data.works) : [];
+  const [linkedHere, setLinkedHere] = useState(() => new Set()); // albums chosen together: the subjects linked to them
   const [replacing, setReplacing] = useState(replaceFirst || null);
-  const [q, setQ] = useState(() => (subject ? plainTitle(title) : guess(title)));
+  const [q, setQ] = useState(() => (subject ? plainTitle(title) : albumIds ? sharedGuess(titles.length ? titles : ['']) : guess(title)));
   const [types, setTypes] = useState(new Set(subject ? [3] : [2, 4, 1, 6]));
   const [found, setFound] = useState(null); // { q, types, total, subjects, page_size }
   const [error, setError] = useState(null);
@@ -127,7 +141,7 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
     setLoading(true);
     setError(null);
     try {
-      const r = await get(`/bangumi/search?q=${encodeURIComponent(words)}&types=${kinds.join(',')}&album=${albumId}&offset=${more ? found.subjects.length : 0}`);
+      const r = await get(`/bangumi/search?q=${encodeURIComponent(words)}&types=${kinds.join(',')}${albumId ? '&album=' + albumId : ''}&offset=${more ? found.subjects.length : 0}`);
       setFound(more ? { ...found, subjects: [...found.subjects, ...r.subjects], total: r.total } : { ...r, q: words, types: kinds });
       if (!more) setOpen(r.subjects.length === 1 ? r.subjects[0].source_id : null);
     } catch (e) {
@@ -136,8 +150,14 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
     setLoading(false);
   };
   useEffect(() => { search(false); }, []);
-  const linked = (c) => works.some((w) => w.source_id === c.source_id);
+  const linked = (c) => works.some((w) => w.source_id === c.source_id) || linkedHere.has(c.source_id);
   const link = (c) => run(async () => {
+    if (albumIds) {
+      const res = await post('/albums/works', { albums: albumIds, source_id: c.source_id });
+      done(res, `已將 ${albumIds.length} 張專輯關聯到「${c.name}」`);
+      setLinkedHere((s) => new Set(s).add(c.source_id));
+      return;
+    }
     if (subject) {
       if (c.type !== 3) throw new Error('這個條目不是音樂：動畫、遊戲請用「關聯作品」。');
       const res = await api('PUT', `/albums/${albumId}/subject`, { source_id: c.source_id, collect: linkedBgm && collect.on ? collect.type : 0 });
@@ -169,6 +189,7 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
   return html`<${Dialog} title=${subject ? '綁定 Bangumi 音樂條目' : '關聯 Bangumi 作品'} wide onClose=${close} actions=${html`<button class="btn filled" onClick=${close}>完成</button>`}>
     <p class="hint tight">${subject
       ? `找出「${title}」在 Bangumi 上的音樂條目（專輯、單曲本身那一頁），綁定後可以在這裡管理你的收藏、評分與標籤。只會綁定你確認的條目，可在修改紀錄撤回。`
+      : albumIds ? `為選取的 ${albumIds.length} 張專輯選擇共同所屬的作品，一次關聯。已經關聯這部作品的專輯不變；專輯本身的資料不會改變，可在修改紀錄一次撤回。`
       : `為「${title}」選擇所屬的作品。只會關聯你確認的條目；專輯本身的資料不會改變，可在修改紀錄撤回。`}</p>
     ${works.length > 0 && html`<h3 class="sub-title">${subject ? '已綁定' : '已關聯'}</h3>
       <ul class="items linked-works">${works.map((w) => html`<li key=${w.id} class=${replacing && replacing.id === w.id ? 'current' : ''}>
@@ -220,7 +241,7 @@ function LinkWorks({ albumId, title, replaceFirst, subject, close }) {
             <a class="btn text" href=${c.url} target="_blank" rel="noopener noreferrer"><${Icon} name="openNew" />在 Bangumi 查看</a>
             <button class="btn filled" disabled=${busy || on} onClick=${() => link(c)}>${subject
               ? (on ? '已綁定' : works.length ? '改為這個條目' : '綁定這個條目')
-              : (on ? '已關聯' : replacing ? '改為這部' : '關聯這部作品')}</button>
+              : (on ? '已關聯' : replacing ? '改為這部' : albumIds ? `關聯這 ${albumIds.length} 張` : '關聯這部作品')}</button>
           </div>
         </div>`}
       </li>`;

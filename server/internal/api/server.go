@@ -288,6 +288,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /api/v1/works/{id}/image", s.authed(s.workImage))
 	mux.Handle("POST /api/v1/works/{id}/refresh", s.authed(s.refreshWorkNow))
 	mux.Handle("POST /api/v1/albums/{id}/works", s.authed(s.linkWork))
+	mux.Handle("POST /api/v1/albums/works", s.authed(s.linkAlbums))
 	mux.Handle("DELETE /api/v1/albums/{id}/works/{work}", s.authed(s.unlinkWork))
 	mux.Handle("PUT /api/v1/tracks/{id}/works", s.authed(s.setTrackWorks))
 	mux.Handle("PUT /api/v1/albums/{id}/subject", s.authed(s.setAlbumSubject))
