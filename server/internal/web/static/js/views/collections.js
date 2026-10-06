@@ -125,7 +125,7 @@ export function Playlist({ id }) {
           await api('DELETE', '/playlists/' + id);
           close();
           toast(`已刪除「${p.name}」`);
-          go('library/playlists');
+          go('me/playlists');
         } catch (e) {
           toast(e.message, 'error');
         }
@@ -176,7 +176,7 @@ function SmartPlaylist({ p, names }) {
           await api('DELETE', '/playlists/' + p.id);
           close();
           toast(`已刪除「${p.name}」`);
-          go('library/playlists');
+          go('me/playlists');
         } catch (e) {
           toast(e.message, 'error');
         }
@@ -220,7 +220,8 @@ const dayLabel = (ms) => {
 };
 const clock = (ms) => new Date(ms).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false });
 
-export function History() {
+// HistoryTab is the history tab of "my" page (review #190).
+export function HistoryTab() {
   const rev = useLibRev();
   const top = useLoad(() => get('/history/top?days=30'), [], rev);
   const [pages, setPages] = useState([]);
@@ -243,8 +244,7 @@ export function History() {
 
   const topItems = (top.data || []).slice(0, 10).map((t) => ({ ...fromTrack(t), plays: t.plays, key: 't' + t.id }));
   let lastDay = '';
-  return html`<section>
-    <h1 class="page-title">播放記錄</h1>
+  return html`
     ${topItems.length > 0 && html`<h2 class="section-title">最近 30 天最常播放</h2>
       <${TrackList} items=${topItems} showAlbum meta=${(it) => html`<span>${it.plays} 次</span>`} />`}
     <h2 class="section-title">最近播放</h2>
@@ -264,6 +264,5 @@ export function History() {
         </button></li>`;
     })}</ul>
     ${first.data && list.length >= 50 && !more.done && html`<div class="actions center">
-      <button class="btn tonal" disabled=${more.busy} onClick=${loadMore}>載入更多</button></div>`}
-  </section>`;
+      <button class="btn tonal" disabled=${more.busy} onClick=${loadMore}>載入更多</button></div>`}`;
 }

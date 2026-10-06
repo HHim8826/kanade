@@ -273,7 +273,7 @@ function TrackBookmarks({ item }) {
   return html`<div class="np-bookmarks">
     ${data.data.length ? html`<${BookmarkList} items=${data.data} onChanged=${data.reload} />`
       : html`<${Empty} icon="bookmark">這首還沒有書籤。播放到想記住的地方，按「加書籤」。<//>`}
-    <a class="btn text" href=${href('bookmarks')} onClick=${() => open(false)}>所有書籤 ›</a>
+    <a class="btn text" href=${href('me/bookmarks')} onClick=${() => open(false)}>所有書籤 ›</a>
   </div>`;
 }
 

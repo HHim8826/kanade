@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get } from '../api.js';
 import { fromTrack, playQueue } from '../player.js';
-import { href } from '../router.js';
+import { href, keepInAddress, parseHash } from '../router.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { useRunner } from './organize.js';
 
@@ -66,16 +66,19 @@ function todayIn(tz) {
 
 const kinds = [['', '全部'], ['music', '音樂'], ['spoken', '廣播劇／談話']];
 
-export function Stats() {
-  const [kind, setKind] = useState('');
+// StatsTab is the listening tab of "my" page (review #190); the kind shown is in the address
+// (#/me/stats?kind=music).
+export function StatsTab() {
+  const [kind, setKind] = useState(() => {
+    const k = parseHash().query.get('kind') || '';
+    return kinds.some(([x]) => x === k) ? k : '';
+  });
+  useEffect(() => keepInAddress('me/stats' + (kind ? '?kind=' + kind : '')), [kind]);
   const [tz] = useState(statsTz);
   const q = `tz=${encodeURIComponent(tz)}${kind ? '&kind=' + kind : ''}`;
   const today = todayIn(tz);
   const [rev, setRev] = useState(0);
-  return html`<section class="stats">
-    <div class="page-head">
-      <div><div class="overline"><a href=${href('')}>首頁</a></div><h1 class="page-title">我的聆聽</h1></div>
-    </div>
+  return html`<div class="stats">
     <div class="filter-row" role="group" aria-label="篩選">
       <nav class="seg" aria-label="類型">${kinds.map(([k, label]) => html`<button key=${k} class=${k === kind ? 'on' : ''}
         aria-pressed=${k === kind} onClick=${() => setKind(k)}>${label}</button>`)}</nav>
@@ -84,7 +87,7 @@ export function Stats() {
     <${Heatmap} q=${q} today=${today} rev=${rev} />
     <${Period} q=${q} today=${today} rev=${rev} />
     <${DataTools} q=${q} onCleared=${() => setRev(rev + 1)} />
-  </section>`;
+  </div>`;
 }
 
 // Overview: today, this week, month and year.

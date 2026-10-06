@@ -63,15 +63,12 @@ function MovedBookmark({ b, close }) {
   <//>`;
 }
 
-// Bookmarks lists every bookmark, the latest first.
-export function Bookmarks() {
+// BookmarksTab lists every bookmark, the latest first: the bookmarks tab of "my" page (review #190).
+export function BookmarksTab() {
   const data = useLoad(() => get('/bookmarks'), []);
-  return html`<section>
-    <div class="page-head"><h1 class="page-title">書籤</h1></div>
-    <p class="hint">在正在播放的畫面按「加書籤」記住一個位置；書籤存在伺服器，換裝置也看得到。</p>
+  return html`<p class="hint">在正在播放的畫面按「加書籤」記住一個位置；書籤存在伺服器，換裝置也看得到。</p>
     ${data.loading && !data.data && html`<${Spinner} />`}
     ${data.error && html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${data.data && (data.data.length ? html`<${BookmarkList} items=${data.data} onChanged=${data.reload} withSong />`
-      : html`<${Empty} icon="bookmark">還沒有書籤。<//>`)}
-  </section>`;
+      : html`<${Empty} icon="bookmark">還沒有書籤。<//>`)}`;
 }

@@ -5,11 +5,10 @@ import { clock, enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, pla
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { useStore } from '../store.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
-import { FavoritesTab, PlaylistsTab } from './collections.js';
 import { AlbumActions, Categorize, SongActions, editSections } from './batch.js';
 import { CategoriesTab } from './categories.js';
 import { WorkGrid, WorkImage, WorksTab, bindSubject, linkWorks, trackWorks, useTags } from './works.js';
-import { CollectionsTab, SubjectRow } from './bangumi.js';
+import { SubjectRow } from './bangumi.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { viewCover } from './coverview.js';
@@ -102,8 +101,6 @@ export function Home() {
       <div class="actions">
         <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
         <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="album" />隨便聽一張</button>
-        <a class="btn text" href=${href('stats')}><${Icon} name="history" />我的聆聽</a>
-        <a class="btn text" href=${href('bookmarks')}><${Icon} name="bookmark" />書籤</a>
       </div>
     </div>
     ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
@@ -119,7 +116,7 @@ export function Home() {
     </a>`}
     ${empty && html`<${Empty} icon="library">曲庫還是空的。到「任務」新增下載，或上傳音樂。<//>`}
     ${d && html`<${Shelf} title="最近播放" albums=${d.recently_played}
-      more=${html`<a class="btn text" href=${href('history')}><${Icon} name="history" />播放記錄</a>`} />`}
+      more=${html`<a class="btn text" href=${href('me/history')}><${Icon} name="history" />播放記錄</a>`} />`}
     ${spoken.length > 0 && html`<h2 class="section-title">未聽完的廣播劇</h2>
       <ul class="list spoken-list">${spoken.map((t) => html`<li key=${t.id}><button class="row plain wide spoken-row" onClick=${() => playInAlbum(t)}>
         <${Cover} id=${t.cover_id} size=${96} className="thumb" />
@@ -142,9 +139,10 @@ export function Home() {
   </section>`;
 }
 
-const tabs = [['albums', '專輯'], ['categories', '分類'], ['works', '作品'], ['artists', '歌手'], ['tracks', '歌曲'], ['playlists', '歌單'], ['favorites', '收藏'],
-  ['bangumi', 'Bangumi']];
-const tabURL = { playlists: '/playlists', favorites: '/favorites', categories: '/categories', works: '/works' };
+// The library is the music itself; what is one's own (playlists, favorites, Bangumi collections)
+// is on "my" page (review #190).
+const tabs = [['albums', '專輯'], ['categories', '分類'], ['works', '作品'], ['artists', '歌手'], ['tracks', '歌曲']];
+const tabURL = { categories: '/categories', works: '/works' };
 
 const PAGE = 200;
 
@@ -171,9 +169,9 @@ export function Library({ tab = 'albums', filter = '' }) {
   const rev = useLibRev();
   const paged = !tabURL[tab];
   if (tab !== 'tracks' || !trackFilters.some(([k]) => k === filter)) filter = '';
-  const selfLoaded = tab === 'bangumi'; // loads its own
+  if (!tabs.some(([k]) => k === tab)) tab = 'albums';
   const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? '&filter=' + filter : ''}`;
-  const data = useLoad(() => (selfLoaded ? Promise.resolve(null) : get(base)), [base], rev);
+  const data = useLoad(() => get(base), [base], rev);
   // Later pages, for this tab, filter and library version only (review #9).
   const key = `${base}:${rev}`;
   const [more, setMore] = useState({ key: null, pages: [], done: false, busy: false });
@@ -222,11 +220,8 @@ export function Library({ tab = 'albums', filter = '' }) {
       ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum sel=${sel} />`
       : html`<${Empty}>${filter === 'no_album' ? '每首歌都有專輯了。' : filter === 'no_artist' ? '每首歌都有歌手了。' : '還沒有歌曲。'}<//>`)}
     ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
-    ${data.data && tab === 'playlists' && html`<${PlaylistsTab} lists=${data.data} />`}
-    ${data.data && tab === 'favorites' && html`<${FavoritesTab} data=${data.data} />`}
     ${data.data && tab === 'categories' && html`<${CategoriesTab} data=${data.data} />`}
     ${data.data && tab === 'works' && html`<${WorksTab} data=${data.data} />`}
-    ${selfLoaded && html`<${CollectionsTab} />`}
     ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}
       items=${tab === 'albums' ? list : list.map(fromTrack)}>
       ${tab === 'albums' ? html`<${AlbumActions} sel=${sel} />` : html`<${SongActions} sel=${sel} />`}

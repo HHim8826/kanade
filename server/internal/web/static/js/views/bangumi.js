@@ -207,7 +207,7 @@ let kept = null; // { type, pages, at }
 const keptFor = 5 * 60 * 1000;
 
 // CollectionsTab is the owner's music collections in Bangumi, a type at a time, with the library's
-// albums of each. The type is in the address (#/library/bangumi?type=1).
+// albums of each, on "my" page (review #190). The type is in the address (#/me/bangumi?type=1).
 export function CollectionsTab() {
   const [type, setType] = useState(() => {
     const t = Number(parseHash().query.get('type'));
@@ -238,7 +238,7 @@ export function CollectionsTab() {
   };
   const shown = useRef(pages ? type : null); // the type shown as it was kept
   useEffect(() => {
-    keepInAddress(`library/bangumi?type=${type}`);
+    keepInAddress(`me/bangumi?type=${type}`);
     if (shown.current === type) {
       shown.current = null;
       return;

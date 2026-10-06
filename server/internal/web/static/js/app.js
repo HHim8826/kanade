@@ -8,12 +8,11 @@ import './scrollbars.js';
 import './shortcuts.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
-import { History, Playlist } from './views/collections.js';
+import { Playlist } from './views/collections.js';
 import { Album, Artist, Home, Library, Search } from './views/library.js';
 import { CategoryPage } from './views/categories.js';
 import { WorkPage } from './views/works.js';
-import { Stats } from './views/stats.js';
-import { Bookmarks } from './views/bookmarks.js';
+import { Me } from './views/me.js';
 import { Login } from './views/login.js';
 import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
@@ -27,6 +26,7 @@ const nav = [
   ['', 'home', '首頁'],
   ['search', 'search', '搜尋'],
   ['library', 'library', '曲庫'],
+  ['me', 'me', '我的'],
   ['tasks', 'tasks', '任務'],
   ['settings', 'settings', '設定'],
 ];
@@ -42,9 +42,7 @@ function Page({ route, onLogout }) {
     case 'work': return html`<${WorkPage} id=${arg} />`;
     case 'artist': return html`<${Artist} id=${arg} name=${route.query.get('name')} />`;
     case 'playlist': return html`<${Playlist} id=${arg} />`;
-    case 'history': return html`<${History} />`;
-    case 'stats': return html`<${Stats} />`;
-    case 'bookmarks': return html`<${Bookmarks} />`;
+    case 'me': return html`<${Me} tab=${arg || 'playlists'} />`;
     case 'edits': return html`<${Edits} />`;
     case 'missing': return html`<${Missing} />`;
     case 'tasks': return html`<${Tasks} />`;
@@ -78,8 +76,8 @@ function App() {
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'playlist', 'edits', 'category', 'work'].includes(section))
-    || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section)) || (key === '' && ['history', 'stats', 'bookmarks'].includes(section));
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'category', 'work'].includes(section))
+    || (key === 'me' && section === 'playlist') || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section));
   // The page scrolls on its own above the player bar and the navigation, which keep their room
   // (review #48).
   return html`<div class="shell">

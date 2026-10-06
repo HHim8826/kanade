@@ -14,11 +14,21 @@ export function keepInAddress(path) {
   if (location.hash !== target) history.replaceState(history.state, '', target);
 }
 
+// Pages that moved to "my" page keep their old addresses (review #190): one leads to where its page
+// is now, with what it asked for, in place of it in the history.
+const moved = [[/^library\/(playlists|favorites|bangumi)(?=$|[/?])/, 'me/$1'], [/^(stats|history|bookmarks)(?=$|[/?])/, 'me/$1']];
+function settled() {
+  const raw = location.hash.replace(/^#\/?/, '');
+  const to = moved.find(([from]) => from.test(raw));
+  if (to) history.replaceState(history.state, '', href(raw.replace(to[0], to[1])));
+  return parseHash();
+}
+
 export function useRoute() {
-  const [route, setRoute] = useState(parseHash);
+  const [route, setRoute] = useState(settled);
   useEffect(() => {
     const onChange = () => {
-      setRoute(parseHash());
+      setRoute(settled());
       document.getElementById('content')?.scrollTo(0, 0); // the page scrolls, not the window
     };
     addEventListener('hashchange', onChange);

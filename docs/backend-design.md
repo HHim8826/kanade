@@ -577,7 +577,7 @@ DIR/
 - Bangumi 帳號：設定頁填 Bangumi 應用程式（bgm.tv/dev/app）的 App ID 與 App Secret（Secret 只寫入），回調地址 `<public_url>/oauth/bangumi/callback`；OAuth 授權碼流程（`bgm.tv/oauth/authorize`、`/oauth/access_token`），token 一週有效，剩不到一天時更新；同一帳號一次只更新一次，只寫回更新開始時的那個連結，重新連結後晚到的更新或拒絕不影響新連結（#172）；被拒（401 或更新失敗）時標成失效，請使用者重新連結。Bangumi 沒有撤銷授權的 API，解除連結只刪除 Kanade 這邊的 token。
 - 綁定時收藏：綁定對話框可勾選「綁定時加入我的 Bangumi 收藏」與狀態（預設勾選「聽過」，記在瀏覽器）；只有該條目還沒收藏時才寫入，已收藏的保持原狀（回應 `collected`：added／kept／not_linked／failed）。這是使用者按下綁定時的動作，播放與瀏覽仍不會改動收藏。
 - 收藏：專輯頁讀取時向 Bangumi 查（`GET /v0/users/{username}/collections/{id}`），附上條目的常用標籤；自己用過的標籤從最近更新的 200 筆音樂收藏在背景收集（`GET /bangumi/tags`，快取 10 分鐘），收藏狀態不等它（#185）；只有按「儲存到 Bangumi」才寫入（`POST /v0/users/-/collections/{id}`：狀態 1–5、評分 0–10、吐槽、僅自己可見、最多 10 個不含空白的標籤），回應就是存好的收藏，剛用的標籤直接併入快取，不必重讀。播放、瀏覽都不會改動 Bangumi。
-- 我的收藏清單：曲庫「Bangumi」分頁依狀態列出自己的音樂收藏（每頁 30），標出綁定了該條目的曲庫專輯；沒有的可以直接到 RSS 資源搜尋。不依名稱自動配對。狀態放在網址（`#/library/bangumi?type=`），返回時沿用 5 分鐘內讀過的頁，不再向 Bangumi 讀；晚到的舊回應不覆蓋新的選擇（#177、#187）。
+- 我的收藏清單：「我的」頁的「Bangumi」分頁（原本在曲庫，#190）依狀態列出自己的音樂收藏（每頁 30），標出綁定了該條目的曲庫專輯；沒有的可以直接到 RSS 資源搜尋。不依名稱自動配對。狀態放在網址（`#/me/bangumi?type=`），返回時沿用 5 分鐘內讀過的頁，不再向 Bangumi 讀；晚到的舊回應不覆蓋新的選擇（#177、#187）。
 - API：`PUT|DELETE /albums/{id}/subject`、`GET|PUT /albums/{id}/collection`、`GET /bangumi/account`、`PUT /bangumi/app`、`POST|DELETE /bangumi/link`、`GET /bangumi/collections?type=&offset=`、`GET /bangumi/tags`；`GET /bangumi/search` 的候選多一個 `subject`（是否為這張專輯的條目）。
 - 驗證：Go 測試用假的 Bangumi（OAuth、me、單一收藏讀寫、收藏清單）驗證連結、state、非音樂條目被拒、讀取不寫入、寫入內容、標籤檢查、清單對應曲庫、撤回綁定、授權失效；Chromium 用真的 Bangumi 公開 API 測綁定，收藏讀寫以模擬的伺服器回應測介面與送出內容。沒有用真的 Bangumi 帳號實測寫入。
 
@@ -603,6 +603,24 @@ DIR/
 - 播放器（#174）：載入中（還沒有 metadata）的定位一律記成待定位置，取代較早的（包括 0 秒）；可以定位時直接跳過去並清掉待定的。
 - 作品分頁（#187）：類型與排序放在網址（`#/library/works?type=&sort=date`）。對話框標題最多兩行，完整標題放在 title（#188）；手機上 Bangumi 收藏列的專輯與「找資源」排在文字下方（#188）。
 - 驗證：新增的 Go 測試（Gateway 持續 4004、換 token 被限速、晚到的 token 更新、換歌不空白、封面被拒只送一次、暫停時限、同時改設定、Bangumi 錯誤回應不快取與晚到更新、共用歌曲的作品用途、全體上限與已知瀏覽器、帳號自己的上限、IPv6 /64、預載 API、縮圖背壓與取消、備份立即 running、最近播放分批）在 race detector 下通過；Chromium 實測載入中定位 90→0、90→30（舊版會從 90 秒開始）、預載請求、換歌與手動下一首的回報、Discord 連續切換、立即備份、Bangumi 分頁亂序回應與返回、收藏對話框、作品分頁返回、390px 版面與長標題。
+
+### 「我的」頁（2026-10-06，#190）
+
+- 導覽列改為首頁、搜尋、曲庫、我的、任務、設定。曲庫只放音樂本身：專輯、分類、作品、歌手、歌曲。
+- 「我的」（`#/me/<分頁>`，`views/me.js`）的分頁依序是歌單（含智慧歌單，預設分頁）、收藏、書籤、記錄、聆聽、Bangumi。這些原本分散在曲庫的歌單、收藏、Bangumi 分頁，以及首頁的「我的聆聽」、「書籤」與「播放記錄」。歌單頁屬於「我的」，刪除歌單後回到 `#/me/playlists`。帳號設定（密碼、passkey、裝置、Discord、Bangumi 連結）留在「設定」。
+- 舊網址照常可用：`#/library/playlists`、`#/library/favorites`、`#/library/bangumi`、`#/stats`、`#/history`、`#/bookmarks` 由 `router.js` 換成新網址（replaceState，不多一筆瀏覽紀錄，查詢參數保留）。
+- 狀態放在網址：分頁在路徑，聆聽的類型在 `?kind=`，Bangumi 的狀態在 `?type=`，返回時恢復。
+- 首頁拿掉「我的聆聽」與「書籤」按鈕，「最近播放」旁的「播放記錄」改連到 `#/me/history`；正在播放頁的「所有書籤」連到 `#/me/bookmarks`。
+- 手機：底部列 6 項；分頁左右留白 8px，「我的」的 6 個分頁在 375px 寬時一排放得下。
+- 對話框標題（#188 的兩行上限）不再被下方很長的內容擠扁：例如 MusicBrainz 辨識列出結果時，標題原本只剩半行（使用者回報）。
+- 驗證：以 headless Chromium 在虛構的示範資料上走過桌面與 320／375／390px 手機。檢查項目：
+  - 各分頁的內容；
+  - 舊網址的轉址與返回；
+  - 重新載入舊網址；
+  - 聆聽類型返回後保留；
+  - 歌單頁導覽列的選中項；
+  - 刪除歌單後的去處；
+  - 25 筆 MusicBrainz 結果時的標題高度。
 
 ## 使用方式（開發環境）
 
