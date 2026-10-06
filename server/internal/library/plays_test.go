@@ -328,3 +328,127 @@ func TestRecentlyPlayedAlbumsReadsBack(t *testing.T) {
 		t.Fatalf("all %+v", recent)
 	}
 }
+
+// Removed albums keep their rows for undo, but take no place among the recently played: earlier
+// ones show instead, and undo brings them back in their place (review #194).
+func TestRecentlyPlayedAlbumsLeaveRemovedOut(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	var albums []int64
+	for i := range 13 {
+		name := fmt.Sprint("album ", i)
+		asset := assetWithDuration(t, s, name, 60_000)
+		res, err := s.Publish(ctx, asset, EntryInput{Title: name, Album: name, AlbumArtist: "X"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var album, track int64
+		s.db.QueryRow(`SELECT album_id, track_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&album, &track)
+		s.db.Exec(`INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			name, asset, track, album, i+1, i+1)
+		albums = append(albums, album)
+	}
+	recent := func(limit int) []int64 {
+		t.Helper()
+		list, err := s.RecentlyPlayedAlbums(ctx, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := []int64{}
+		for _, a := range list {
+			ids = append(ids, a.ID)
+		}
+		return ids
+	}
+	newer := slices.Clone(albums[1:])
+	slices.Reverse(newer) // the latest first
+	g, err := s.RemoveAlbums(ctx, newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := recent(12); !slices.Equal(got, albums[:1]) {
+		t.Fatalf("the 12 latest removed: %v, want %v", got, albums[:1])
+	}
+	if got := recent(1); !slices.Equal(got, albums[:1]) {
+		t.Fatalf("one asked for: %v", got)
+	}
+	if _, _, err := s.Undo(ctx, g); err != nil {
+		t.Fatal(err)
+	}
+	if got := recent(12); !slices.Equal(got, newer) {
+		t.Fatalf("undone: %v, want %v", got, newer)
+	}
+	if _, err := s.RemoveAlbums(ctx, albums); err != nil {
+		t.Fatal(err)
+	}
+	if got := recent(12); len(got) != 0 {
+		t.Fatalf("all removed: %v", got)
+	}
+}
+
+// The history is read on from where each few stopped (review #191): playbacks of one millisecond
+// across the few read at a time are each read once; a history of one album, of fewer albums than
+// asked for, or of many merged into one, is read through and lists each album once.
+func TestRecentlyPlayedAlbumsReadOn(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	type song struct{ asset, track, album int64 }
+	album := func(name string) song {
+		t.Helper()
+		asset := assetWithDuration(t, s, name, 60_000)
+		res, err := s.Publish(ctx, asset, EntryInput{Title: name, Album: name, AlbumArtist: "X"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		x := song{asset: asset}
+		s.db.QueryRow(`SELECT album_id, track_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&x.album, &x.track)
+		return x
+	}
+	n := 0
+	play := func(x song, at int64) {
+		t.Helper()
+		n++
+		if _, err := s.db.Exec(`INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			fmt.Sprint("p", n), x.asset, x.track, x.album, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recent := func(limit int) []int64 {
+		t.Helper()
+		list, err := s.RecentlyPlayedAlbums(ctx, limit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids := []int64{}
+		for _, a := range list {
+			ids = append(ids, a.ID)
+		}
+		return ids
+	}
+	oldest, tie, often := album("oldest"), album("tie"), album("often")
+	play(oldest, 100)
+	play(tie, 500) // of the same millisecond as the 1,000 after it, and read after them
+	for range 1000 {
+		play(often, 500)
+	}
+	if got, want := recent(3), []int64{often.album, tie.album, oldest.album}; !slices.Equal(got, want) {
+		t.Fatalf("ties across the few read at a time: %v, want %v", got, want)
+	}
+	if got := recent(10); len(got) != 3 {
+		t.Fatalf("fewer albums than asked for: %v", got)
+	}
+	// Many albums merged into one: listed once, before what was played earlier.
+	into := album("into")
+	for i := range 30 {
+		x := album(fmt.Sprint("part ", i))
+		for j := range 40 {
+			play(x, int64(1000+i*40+j))
+		}
+		if _, err := s.MergeAlbum(ctx, x.album, into.album); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := recent(3), []int64{into.album, often.album, tie.album}; !slices.Equal(got, want) {
+		t.Fatalf("merged into one: %v, want %v", got, want)
+	}
+}

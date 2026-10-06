@@ -3,7 +3,11 @@ package library
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"maps"
+	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -276,15 +280,19 @@ func (s *Store) UnfinishedSpoken(ctx context.Context, limit int) ([]ResumeItem, 
 }
 
 // RecentlyPlayedAlbums orders albums by their latest playback: played from an album that was merged
-// since, the album it went into (review #152). The playbacks are read from the latest back, a few
-// at a time, until there are limit albums: not the whole history (review #186).
+// since, the album it went into (review #152); one emptied (removed, its row kept for undo) takes no
+// place, so earlier ones show instead (review #194). The playbacks are read from the latest back, a
+// few at a time, until there are limit albums: not the whole history (review #186). Each few go on
+// from where the last stopped, and leave out the albums met already, so a history of a few albums
+// is gone through once, by SQLite, not read again and again (review #191).
 func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSummary, error) {
 	var ids []any
-	seen := map[int64]bool{}  // albums listed
-	now := map[int64]int64{}  // album played from -> the album it is now (0: none)
-	batch := max(limit*8, 64) // most often enough; more each time it is not
-	for offset := 0; len(ids) < limit; offset, batch = offset+batch, min(batch*2, 4096) {
-		played, err := s.recentAlbums(ctx, batch, offset)
+	seen := map[int64]bool{} // albums listed
+	now := map[int64]int64{} // album played from -> the album it shows as (0: none)
+	at := playAt{math.MaxInt64, math.MaxInt64}
+	batch := max(limit*8, 64)
+	for len(ids) < limit {
+		played, next, err := s.recentAlbums(ctx, at, now, batch)
 		if err != nil {
 			return nil, err
 		}
@@ -294,10 +302,10 @@ func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSum
 			}
 			to, ok := now[a]
 			if !ok {
-				if to, _, err = s.AlbumNow(ctx, a); err != nil && ctx.Err() != nil {
+				if to, err = s.shownAlbum(ctx, a); err != nil && ctx.Err() != nil {
 					return nil, err
 				}
-				now[a] = to // merged in a loop: none
+				now[a] = to
 			}
 			if to != 0 && !seen[to] {
 				seen[to] = true
@@ -307,6 +315,7 @@ func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSum
 		if len(played) < batch {
 			break
 		}
+		at = next
 	}
 	if len(ids) == 0 {
 		return []AlbumSummary{}, nil
@@ -329,23 +338,49 @@ func (s *Store) RecentlyPlayedAlbums(ctx context.Context, limit int) ([]AlbumSum
 	return out, nil
 }
 
-// recentAlbums are the albums of playbacks, the latest first (through plays_recent).
-func (s *Store) recentAlbums(ctx context.Context, limit, offset int) ([]int64, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT album_id FROM plays INDEXED BY plays_recent WHERE album_id IS NOT NULL
-		ORDER BY updated_at DESC LIMIT ? OFFSET ?`, limit, offset)
+// shownAlbum is the album a playback was from as lists show it: the one it was merged into, if it
+// was; 0 when it is no more, has no songs left, or was merged in a loop.
+func (s *Store) shownAlbum(ctx context.Context, id int64) (int64, error) {
+	to, _, err := s.AlbumNow(ctx, id)
+	if err != nil || to == 0 {
+		return 0, err
+	}
+	var songs bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM album_entries WHERE album_id = ?)`, to).Scan(&songs); err != nil || !songs {
+		return 0, err
+	}
+	return to, nil
+}
+
+// playAt is where a playback is in the history, the latest first: by when it was last played, then
+// by its ID (ties of the same millisecond).
+type playAt struct{ updated, id int64 }
+
+// recentAlbums are the albums of the playbacks before at, the latest first (through plays_recent),
+// but for those met already, and where the last of them is.
+func (s *Store) recentAlbums(ctx context.Context, before playAt, met map[int64]int64, limit int) ([]int64, playAt, error) {
+	known, err := json.Marshal(slices.AppendSeq([]int64{}, maps.Keys(met))) // [], never null: NOT IN (NULL) leaves all out
 	if err != nil {
-		return nil, err
+		return nil, before, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, updated_at, album_id FROM plays INDEXED BY plays_recent
+		WHERE album_id IS NOT NULL AND (updated_at < ?1 OR (updated_at = ?1 AND id < ?2))
+			AND album_id NOT IN (SELECT value FROM json_each(?3))
+		ORDER BY updated_at DESC, id DESC LIMIT ?4`, before.updated, before.id, string(known), limit)
+	if err != nil {
+		return nil, before, err
 	}
 	defer rows.Close()
 	var out []int64
+	last := before
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
+		if err := rows.Scan(&last.id, &last.updated, &id); err != nil {
+			return nil, before, err
 		}
 		out = append(out, id)
 	}
-	return out, rows.Err()
+	return out, last, rows.Err()
 }
 
 // RandomAlbum picks an album that has playable music (drama CDs and radio are left out).
