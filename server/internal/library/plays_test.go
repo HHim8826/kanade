@@ -452,3 +452,83 @@ func TestRecentlyPlayedAlbumsReadOn(t *testing.T) {
 		t.Fatalf("merged into one: %v, want %v", got, want)
 	}
 }
+
+// Merges one after another make a chain of any length (review #201): recently played and the
+// listening statistics both follow it to its end, the album still there; undoing the last merge
+// brings back the album before it; only albums merged in a loop are none.
+func TestLongMergeChains(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	var albums []int64
+	var first, firstTrack int64
+	for i := range 13 {
+		name := fmt.Sprint("chain ", i)
+		asset := assetWithDuration(t, s, name, 60_000)
+		res, err := s.Publish(ctx, asset, EntryInput{Title: name, Album: name, AlbumArtist: "X"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var album, track int64
+		s.db.QueryRow(`SELECT album_id, track_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&album, &track)
+		if i == 0 {
+			first, firstTrack = asset, track
+		}
+		albums = append(albums, album)
+	}
+	at := time.Now().Add(-time.Hour).UnixMilli()
+	res, err := s.db.Exec(`INSERT INTO plays (session, asset_id, track_id, album_id, started_at, updated_at, listened_ms, counted)
+		VALUES ('chain', ?, ?, ?, ?, ?, 60000, 1)`, first, firstTrack, albums[0], at-60_000, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	play, _ := res.LastInsertId()
+	if err := addListening(ctx, s.db, play, at, 60_000, true, false); err != nil {
+		t.Fatal(err)
+	}
+	var last int64
+	for i := range 11 { // 0 -> 1 -> ... -> 11
+		if last, err = s.MergeAlbum(ctx, albums[i], albums[i+1]); err != nil {
+			t.Fatalf("merge %d: %v", i, err)
+		}
+	}
+	end := albums[11]
+	shown := func() ([]int64, []int64) {
+		t.Helper()
+		recent, err := s.RecentlyPlayedAlbums(ctx, 12)
+		if err != nil {
+			t.Fatal(err)
+		}
+		top, err := s.ListeningTop(ctx, 0, time.Now().Add(time.Hour).UnixMilli(), "", "albums", "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var r, st []int64
+		for _, a := range recent {
+			r = append(r, a.ID)
+		}
+		for _, a := range top {
+			st = append(st, a.ID)
+		}
+		return r, st
+	}
+	if now, _, err := s.AlbumNow(ctx, albums[0]); err != nil || now != end {
+		t.Fatalf("11 merges along: %d %v, want %d", now, err, end)
+	}
+	if r, st := shown(); !slices.Equal(r, []int64{end}) || !slices.Equal(st, []int64{end}) {
+		t.Fatalf("recently played %v, statistics %v, want [%d]", r, st, end)
+	}
+	if _, _, err := s.Undo(ctx, last); err != nil {
+		t.Fatal(err)
+	}
+	if r, st := shown(); !slices.Equal(r, []int64{albums[10]}) || !slices.Equal(st, []int64{albums[10]}) {
+		t.Fatalf("the last merge undone: %v, %v, want [%d]", r, st, albums[10])
+	}
+	// A loop, which merging never makes: none, and no endless walk.
+	s.db.Exec(`UPDATE albums SET merged_into = ? WHERE id = ?`, albums[0], albums[10])
+	if now, _, err := s.AlbumNow(ctx, albums[3]); err == nil || now != 0 {
+		t.Fatalf("a loop: %d %v", now, err)
+	}
+	if r, st := shown(); len(r) != 0 || len(st) != 0 {
+		t.Fatalf("albums in a loop listed: %v, %v", r, st)
+	}
+}

@@ -26,15 +26,14 @@ func kindCond(kind string) (string, []any) {
 }
 
 // rootsOf follows each album of src (album IDs: a query, or a list of placeholders) to the album it
-// was merged into, however many merges along (review #109, #152): roots(src, id). A loop or a
-// merge into a missing album ends the walk.
+// was merged into, however many merges along (review #109, #152, #201), as AlbumNow does:
+// roots(src, id). Albums merged in a loop have none.
 func rootsOf(src string) string {
-	return `WITH RECURSIVE up(src, cur, depth) AS (
-		SELECT id, id, 0 FROM albums WHERE id IN (` + src + `)
-		UNION ALL
-		SELECT up.src, a.merged_into, up.depth + 1 FROM up JOIN albums a ON a.id = up.cur
-			JOIN albums t ON t.id = a.merged_into WHERE up.depth < 32
-	), roots(src, id) AS (SELECT src, cur FROM (SELECT src, cur, max(depth) FROM up GROUP BY src))
+	return `WITH RECURSIVE up(src, cur) AS (
+		SELECT id, id FROM albums WHERE id IN (` + src + `)
+		UNION
+		SELECT up.src, a.merged_into FROM up JOIN albums a ON a.id = up.cur WHERE a.merged_into IS NOT NULL
+	), roots(src, id) AS (SELECT up.src, up.cur FROM up JOIN albums a ON a.id = up.cur WHERE a.merged_into IS NULL)
 	`
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -486,9 +487,13 @@ func (s *Store) Cover(ctx context.Context, id int64) (*Cover, error) {
 	return &c, err
 }
 
-// AlbumNow is the album id is now, following merges, with its album artist; 0 when it is gone.
+// AlbumNow is the album id is now, following merges, with its album artist; 0 when it is gone. Merges
+// one after another make a chain of any length, followed to its end (review #201); only one that
+// comes back to an album met already is a loop.
 func (s *Store) AlbumNow(ctx context.Context, id int64) (int64, string, error) {
-	for hops := 0; hops < 10; hops++ {
+	met := map[int64]bool{}
+	for !met[id] {
+		met[id] = true
 		var artist string
 		var merged sql.NullInt64
 		err := s.db.QueryRowContext(ctx, `SELECT album_artist, merged_into FROM albums WHERE id = ?`, id).Scan(&artist, &merged)
@@ -503,7 +508,7 @@ func (s *Store) AlbumNow(ctx context.Context, id int64) (int64, string, error) {
 		}
 		id = merged.Int64
 	}
-	return 0, "", errors.New("albums merged in a loop")
+	return 0, "", fmt.Errorf("albums merged in a loop, through album %d", id)
 }
 
 // ReplaceAlbumArtist changes an album's artist from one an import worked out to another, unless it
