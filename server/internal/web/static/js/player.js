@@ -130,12 +130,51 @@ function fresh() {
   audio.src = src;
   if (wasPlaying) {
     player.set({ buffering: true });
-    audio.play().catch(() => player.set({ playing: false, buffering: false }));
+    audio.play().catch(refused);
   }
   return audio;
 }
 attach(audio, applyVolume, near, fresh);
 applyVolume();
+
+// The song changing with the phone locked: Chrome on Android ends the page's media session the
+// moment the one song playing reaches its end, and with the phone locked it takes the media
+// notification away at once (not half a second later, as unlocked). The browser then loses what kept
+// it running and on the network in the background, and the next song, still to be fetched, never
+// starts. A silent sound looping beside the songs while they play keeps the session open through
+// the change: one song ending is not everything playing ending. It is longer than the 5 s under
+// which Chrome takes a sound for a short effect, which holds no session, and it stops when the songs
+// are paused or nothing comes next.
+const keeper = /Android/i.test(navigator.userAgent) ? new Audio() : null;
+if (keeper) keeper.loop = true;
+function keep(on) {
+  if (!keeper) return;
+  if (!on) {
+    if (!keeper.paused) keeper.pause();
+    return;
+  }
+  if (!keeper.getAttribute('src')) keeper.src = silence();
+  if (keeper.paused) keeper.play().catch(() => {});
+}
+// silence makes a WAV file of 6 s without sound (8 kHz, one channel, 8-bit, where 128 is the middle).
+function silence() {
+  const rate = 8000, n = rate * 6, b = new Uint8Array(44 + n).fill(128, 44), v = new DataView(b.buffer);
+  const text = (at, s) => [...s].forEach((c, i) => v.setUint8(at + i, c.charCodeAt(0)));
+  text(0, 'RIFF');
+  v.setUint32(4, 36 + n, true);
+  text(8, 'WAVEfmt ');
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); // PCM
+  v.setUint16(22, 1, true); // one channel
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate, true); // bytes a second
+  v.setUint16(32, 1, true); // bytes a sample
+  v.setUint16(34, 8, true);
+  text(36, 'data');
+  v.setUint32(40, n, true);
+  return URL.createObjectURL(new Blob([b], { type: 'audio/wav' }));
+}
+
 // deferred is the stream of a song brought back paused after a reload, not asked for until it is
 // played (review #154): opening the page fetches nothing from Drive, and shows no error.
 let deferred = null;
@@ -147,6 +186,12 @@ const play = () => {
     deferred = null;
   }
   return audio.play();
+};
+// refused: a play the browser turned down, or cut short by another song (which, playing, keeps the
+// silent sound).
+const refused = () => {
+  player.set({ playing: false, buffering: false });
+  if (audio.paused) keep(false);
 };
 
 let qseq = 0;
@@ -235,7 +280,8 @@ function load(index, autoplay = true, again = false, lazy = false) {
   } else {
     audio.src = streamURL(item.assetId);
   }
-  if (autoplay) play().catch(() => player.set({ playing: false, buffering: false }));
+  if (autoplay) play().catch(refused);
+  else keep(false); // a song that ended, followed by one that waits
   updateMediaSession(item);
   savePlace();
 }
@@ -702,6 +748,7 @@ export function resetPlayer(withReport = true, signOut = false) {
   session = null;
   pendingSeek = null;
   deferred = null;
+  keep(false);
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
@@ -729,6 +776,9 @@ export function pause() {
   if (!audio.paused) {
     pauses++;
     audio.pause();
+  } else if (keeper && !keeper.paused) { // between two songs, the next still being picked: it waits too
+    pauses++;
+    keep(false);
   }
 }
 
@@ -765,6 +815,7 @@ export async function next() {
 
 function stopAtEnd() {
   audio.pause();
+  keep(false);
   player.set({ playing: false });
 }
 
@@ -903,11 +954,14 @@ on('durationchange', () => {
 on('play', () => {
   player.set({ playing: true });
   playbackState('playing');
+  keep(true);
 });
 on('pause', () => {
   player.set({ playing: false });
   playbackState('paused');
-  if (!audio.ended) report();
+  if (audio.ended) return; // the song's end: what comes next decides
+  report();
+  keep(false);
 });
 on('waiting', () => player.set({ buffering: true }));
 on('playing', () => {
@@ -941,13 +995,14 @@ on('error', async () => {
   if (!item) return;
   const why = await streamProblem(item);
   if (loads !== loaded) return; // another song since
+  if (!wanted || why !== null || retried === loaded) keep(false); // nothing plays on
   if (why === null && retried !== loaded) {
     retried = loaded;
     if (at > 0) pendingSeek = Math.round(at * 1000);
     audio.src = streamURL(item.assetId);
     if (wanted) {
       player.set({ buffering: true });
-      play().catch(() => player.set({ playing: false, buffering: false }));
+      play().catch(refused);
     }
     return;
   }

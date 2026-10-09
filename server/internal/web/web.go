@@ -20,9 +20,10 @@ type asset struct {
 	etag, ctype string
 }
 
-// csp allows only same-origin scripts, styles and media: no inline code, no third parties.
+// csp allows only same-origin scripts, styles and media: no inline code, no third parties. Media
+// made by the page itself (blob:) plays too: the player's silent sound on Android.
 const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; " +
-	"media-src 'self'; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+	"media-src 'self' blob:; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
 
 // Handler serves /app/... . Static files are addressed as /app/v/<version>/<path>, where the
 // version is a hash of every embedded file: Cloudflare rewrites Cache-Control on .js/.css to
