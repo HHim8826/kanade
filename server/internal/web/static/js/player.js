@@ -253,7 +253,8 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (session) report(); // close out the track we are leaving
   loads++;
   onward = null;
-  prefetched = 0; // the next one is preloaded again for this one, once it plays
+  told = null; // the next one is preloaded again for this one, once it plays
+  tries = 0;
   warm = null;
   session = { id: crypto.randomUUID(), item, heard: 0, last: null, played: false };
   // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
@@ -744,8 +745,13 @@ export function resetPlayer(withReport = true, signOut = false) {
   if (owner || signOut) forgetSession();
   owner = false;
   gen++;
-  warm = null; // nothing to preload, nor to let go of: signed out, it would be refused
-  prefetched = 0;
+  warm = null;
+  if (signOut) { // nothing to let go of: it would be refused
+    clearTimeout(retry);
+    retry = 0;
+    target = told = 0;
+    signedIn++;
+  }
   session = null;
   pendingSeek = null;
   deferred = null;
@@ -873,20 +879,47 @@ export const endScrub = (commit) => {
 // keeps its download (review #175). Once the song playing has started, the next one is followed
 // as the queue and the modes change (a song moved or put next, the next one removed, repeat): the
 // new one is preloaded, and one no longer next is let go of, so its download stops (review #193).
-// The asks go one after another, so the server ends with the last.
-let prefetched = 0; // the asset preloaded for the song playing (0: none)
+// The queue stopped and cleared lets go of it too (review #198).
+// One ask is sent at a time, for what is wanted when it is sent: one wanted no more is never sent
+// later. One that fails leaves the server's preload unknown, and is tried again a few times, further
+// and further apart (review #199); a change of what is wanted is sent at once.
+let target = 0; // the asset to preload (0: none)
+let told = 0; // what the server was told and took (null: not known)
+let sending = false;
+let retry = 0; // the timer of the next try
+let tries = 0; // failed tries for target
+let signedIn = 0; // counts sign-outs: an answer from before one says nothing of the server now
 let warm = null; // the queue item that started playing: preloading no longer competes with it
-let asking = Promise.resolve();
 function prefetchNext() {
   const s = player.get();
   const cur = s.queue[s.index];
-  if (!cur || cur.qid !== warm) return; // another queue, its song not started yet
-  const n = !s.preload || s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
+  if (cur && cur.qid !== warm) return; // another queue, its song not started yet
+  const n = !cur || !s.preload || s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
   const want = n ? n.assetId : 0;
-  if (want === prefetched) return;
-  prefetched = want;
-  asking = asking.then(() => (want ? post(`/stream/${want}/prefetch`) : api('DELETE', '/stream/prefetch')))
-    .catch(() => { if (prefetched === want) prefetched = 0; });
+  if (want !== target) {
+    target = want;
+    tries = 0;
+    clearTimeout(retry);
+    retry = 0;
+  }
+  tell();
+}
+function tell() {
+  if (sending || retry || target === told || tries > 4) return;
+  const want = target, my = signedIn;
+  sending = true;
+  (want ? post(`/stream/${want}/prefetch`) : api('DELETE', '/stream/prefetch')).then(() => {
+    if (my !== signedIn) return;
+    told = want;
+    tries = 0;
+  }, () => {
+    if (my !== signedIn) return;
+    told = null;
+    if (want === target && ++tries <= 4) retry = setTimeout(() => { retry = 0; tell(); }, 2000 * 2 ** tries);
+  }).finally(() => {
+    sending = false;
+    tell();
+  });
 }
 player.subscribe(prefetchNext);
 
