@@ -252,6 +252,7 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (!item) return;
   if (session) report(); // close out the track we are leaving
   loads++;
+  onward = null;
   prefetched = 0; // the next one is preloaded again for this one, once it plays
   warm = null;
   session = { id: crypto.randomUUID(), item, heard: 0, last: null, played: false };
@@ -748,6 +749,7 @@ export function resetPlayer(withReport = true, signOut = false) {
   session = null;
   pendingSeek = null;
   deferred = null;
+  onward = null;
   keep(false);
   audio.pause();
   audio.removeAttribute('src');
@@ -762,24 +764,35 @@ export function resetPlayer(withReport = true, signOut = false) {
 
 export function toggle() {
   if (!current()) return;
-  if (audio.paused) resume();
+  if (audio.paused && !onward) resume();
   else pause();
 }
 
 // resume and pause do one thing each: a "play" from a headset or a car while playing changes
-// nothing (review #170).
+// nothing (review #170). Between two songs, the next still being picked, they say whether it plays
+// when it comes: the song that ended does not start again.
 export function resume() {
-  if (current() && audio.paused) play().catch(() => {});
+  if (onward !== null) {
+    if (!onward) goOn(true);
+  } else if (current() && audio.paused) play().catch(() => {});
 }
 
 export function pause() {
   if (!audio.paused) {
     pauses++;
     audio.pause();
-  } else if (keeper && !keeper.paused) { // between two songs, the next still being picked: it waits too
-    pauses++;
-    keep(false);
-  }
+  } else if (onward) goOn(false);
+}
+
+// onward is whether the next song, picked from the library after one ended, plays when it comes
+// (null: no song is being picked so). Meanwhile the player shows what it will do, playing or paused,
+// and the silent sound keeps the session while it is to play.
+let onward = null;
+function goOn(play) {
+  onward = play;
+  player.set({ playing: play, buffering: play });
+  playbackState(play ? 'playing' : 'paused');
+  keep(play);
 }
 
 // next moves on. Past the end: a queue going on by itself picks from the library; looping the
@@ -792,12 +805,14 @@ export async function next() {
   if (!s.queue.length) return;
   if (s.radio || (s.autoContinue && s.mode !== 'all')) {
     if (!s.radio) player.set({ radio: { kind: kindOf(s.queue[s.index]) }, radioError: null });
-    const my = gen, paused = pauses, loaded = loads;
+    const my = gen, paused = pauses, loaded = loads, ended = audio.ended;
+    if (ended) goOn(true); // the song that ended is followed by one still to be picked
     const ok = await topUp(true);
     // Another queue, or another song chosen while waiting: this wait has nothing more to do.
     if (my !== gen || loads !== loaded) return;
     const q = player.get();
-    if (ok && q.index + 1 < q.queue.length) load(q.index + 1, pauses === paused); // paused while waiting: the next song waits too
+    // Paused while waiting: the next song waits too.
+    if (ok && q.index + 1 < q.queue.length) load(q.index + 1, ended ? onward === true : pauses === paused);
     else stopAtEnd(); // nothing to go on with: radioError says why
     return;
   }
@@ -814,9 +829,11 @@ export async function next() {
 }
 
 function stopAtEnd() {
+  onward = null;
   audio.pause();
   keep(false);
-  player.set({ playing: false });
+  player.set({ playing: false, buffering: false });
+  playbackState('paused');
 }
 
 export function prev() {
@@ -907,6 +924,7 @@ function checkSleep() {
     // while the queue waits at its end (review #103).
     pauses++;
     if (!audio.paused) audio.pause();
+    else if (onward) goOn(false);
     toast('睡眠定時到了，已暫停播放');
     return;
   }
