@@ -83,7 +83,7 @@ function CollectionDialog({ album, onSaved, close }) {
     if (tags.length > 10) throw new Error('標籤最多 10 個');
     // The answer is the collection as saved: nothing to read again (review #185).
     const r = await api('PUT', `/albums/${album.id}/collection`, { ...form, tags: [...new Set(tags)] });
-    kept = null; // the collections tab reads them again (review #192)
+    forgetKept(); // the collections tab reads them again (review #192)
     toast(`已更新 Bangumi 收藏：${statusNames[form.type]}`);
     if (onSaved) onSaved({ ...data, collection: r.collection });
     close();
@@ -165,7 +165,7 @@ export function BangumiAccount() {
   const unlink = () => confirmDialog({
     title: '解除 Bangumi 連結', action: '解除連結', danger: true,
     children: html`<p>Kanade 會忘記這個帳號的授權，之後無法在這裡管理收藏；已綁定的條目會保留。Bangumi 沒有撤銷授權的功能，舊授權會在一週內自動失效。</p>`,
-    onConfirm: () => api('DELETE', '/bangumi/link').then(() => { kept = null; load(); }),
+    onConfirm: () => api('DELETE', '/bangumi/link').then(() => { forgetKept(); load(); }),
   });
   const l = info && info.link;
   const ready = info && info.app_id && info.has_secret;
@@ -204,9 +204,15 @@ export function BangumiAccount() {
 
 // What the collections tab read last, kept a while: back from an album, it shows as it was, with
 // the pages loaded, without asking Bangumi again (review #187). A collection saved here, or the
-// library changed since (an entry bound, an album removed), and it is read again (review #192).
+// library changed since (an entry bound, an album removed), and it is read again (review #192). A
+// read asked before a collection was saved keeps nothing, however late it answers (review #197).
 let kept = null; // { type, pages, at, rev }
+let keptGen = 0; // counts what was kept forgotten
 const keptFor = 5 * 60 * 1000;
+const forgetKept = () => {
+  kept = null;
+  keptGen++;
+};
 
 // CollectionsTab is the owner's music collections in Bangumi, a type at a time, with the library's
 // albums of each, on "my" page (review #190). The type is in the address (#/me/bangumi?type=1).
@@ -219,23 +225,30 @@ export function CollectionsTab() {
   const [pages, setPages] = useState(() => (kept && kept.type === type && kept.rev === rev && Date.now() - kept.at < keptFor ? kept.pages : null));
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
-  // Each read is numbered: one that answers after a newer one, or after the type changed, shows
-  // nothing (review #177).
+  // Each read is numbered: one that answers after a newer one, after the type changed, or once the
+  // list is gone shows nothing (reviews #177, #197).
   const asked = useRef(0);
-  const load = async (more) => {
-    const my = ++asked.current;
+  useEffect(() => () => { asked.current++; }, []);
+  // load reads the first page; 'more', the next one; 'again', as many as are shown, in place of them.
+  const load = async (how) => {
+    const my = ++asked.current, gen = keptGen;
+    const want = how === 'again' && pages ? pages.items.length : 0;
     setLoading(true);
     setError(null);
     try {
-      const r = await get(`/bangumi/collections?type=${type}&offset=${more ? pages.items.length : 0}`);
-      if (my !== asked.current) return;
-      const next = more ? { ...r, items: [...pages.items, ...r.items] } : r;
+      let next = how === 'more' ? pages : null;
+      for (;;) {
+        const r = await get(`/bangumi/collections?type=${type}&offset=${next ? next.items.length : 0}`);
+        if (my !== asked.current) return;
+        next = next ? { ...r, items: [...next.items, ...r.items] } : r;
+        if (!r.items.length || next.items.length >= Math.min(want, next.total)) break;
+      }
       setPages(next);
-      kept = { type, pages: next, at: Date.now(), rev };
+      if (gen === keptGen) kept = { type, pages: next, at: Date.now(), rev };
     } catch (e) {
       if (my !== asked.current) return;
       setError(e);
-      if (!more) setPages(null);
+      if (how !== 'more') setPages(null);
     }
     setLoading(false);
   };
@@ -247,8 +260,16 @@ export function CollectionsTab() {
       return;
     }
     setPages(null);
-    load(false);
+    load('first');
   }, [type]);
+  // The library changed under the list (an entry bound or its binding undone): which albums each
+  // has is read again, the pages shown kept on screen meanwhile (review #200).
+  const seenRev = useRef(rev);
+  useEffect(() => {
+    if (seenRev.current === rev) return;
+    seenRev.current = rev;
+    if (pages || loading) load(pages ? 'again' : 'first');
+  }, [rev]);
   if (error && error.body && error.body.reason === 'not_linked') {
     return html`<${Empty} icon="link">連結 Bangumi 帳號後，這裡會列出你的音樂收藏（想聽、聽過…），並標出曲庫有沒有。
       <div class="actions center"><a class="btn tonal" href=${href('settings')}>到設定連結</a></div><//>`;
@@ -258,7 +279,7 @@ export function CollectionsTab() {
         class=${Number(k) === type ? 'on' : ''} aria-pressed=${Number(k) === type} onClick=${() => setType(Number(k))}>${label}</button>`)}</nav>
       ${pages && html`<span class="sub">@${pages.username} 共 ${pages.total} 個</span>`}
     </div>
-    ${error && html`<${ErrorBox} error=${{ message: unavailable(error) }} onRetry=${() => load(false)} />`}
+    ${error && html`<${ErrorBox} error=${{ message: unavailable(error) }} onRetry=${() => load('first')} />`}
     ${loading && !pages && html`<${Spinner} />`}
     ${pages && !pages.items.length && html`<${Empty} icon="note">沒有「${statusNames[type]}」的音樂收藏。<//>`}
     ${pages && pages.items.length > 0 && html`<ul class="items collections">${pages.items.map((c) => html`<li key=${c.subject_id}>
@@ -274,5 +295,5 @@ export function CollectionsTab() {
           <a class="btn text" href=${href('feeds?q=' + encodeURIComponent(c.name || ''))}><${Icon} name="download" />找資源</a>`}</span>
     </li>`)}</ul>`}
     ${pages && pages.items.length < pages.total && html`<div class="actions center">
-      <button class="btn tonal" disabled=${loading} onClick=${() => load(true)}>${loading ? '載入中…' : '載入更多'}</button></div>`}`;
+      <button class="btn tonal" disabled=${loading} onClick=${() => load('more')}>${loading ? '載入中…' : '載入更多'}</button></div>`}`;
 }
