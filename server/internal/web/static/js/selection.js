@@ -41,7 +41,8 @@ export function useSelection(scope) {
     click(e, keys, i) {
       const mod = e.ctrlKey || e.metaKey;
       if (!s.on && !mod && !e.shiftKey) return false;
-      e.preventDefault();
+      // A row's checkbox checks itself, as selected here; kept from it, the browser would undo it.
+      if (e.currentTarget.type !== 'checkbox') e.preventDefault();
       e.stopPropagation();
       update((v) => {
         const next = new Set(v.keys);
