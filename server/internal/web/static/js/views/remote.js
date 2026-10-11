@@ -197,7 +197,8 @@ function askSleep(sleep, name) {
 }
 
 // fallback offers what device d played last, from where it was, with its album after it: the
-// queue cannot come along.
+// queue cannot come along. Like taking it over, it plays here, a device controlled or not (review
+// #205), unless something else was taken over or played here meanwhile.
 function fallback(d, why) {
   const name = nameOf(d);
   if (!(d.asset_id > 0 && d.album_id > 0)) {
@@ -207,11 +208,14 @@ function fallback(d, why) {
   confirmDialog({
     title: '只能從最後的歌接續', action: '從這首開始',
     onConfirm: async () => {
+      const my = ++taking, began = generation();
       const a = await get('/albums/' + d.album_id);
+      if (my !== taking || generation() !== began) return;
       const items = a.entries.map((e) => fromEntry(e, a));
       const i = items.findIndex((q) => q.assetId === d.asset_id);
       if (i < 0) return toast(`曲庫裡找不到《${d.title}》了`, 'error');
       items[i] = { ...items[i], resumeMs: at };
+      endControl();
       playQueue(items, i);
     },
     children: html`<p>「${name}」${why}，它的佇列帶不過來。</p>

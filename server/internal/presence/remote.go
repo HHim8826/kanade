@@ -22,7 +22,7 @@ const CommandTTL = 10 * time.Second
 var Ops = map[string]bool{
 	"toggle": true, "play": true, "pause": true, "next": true, "prev": true, "seek": true, "seekBy": true, "volume": true, "volumeBy": true,
 	"mute": true, "mode": true,
-	"jump": true, "enqueue": true, "playNext": true, "playQueue": true, "snapshot": true, "release": true,
+	"jump": true, "enqueue": true, "playNext": true, "playQueue": true, "shuffle": true, "smart": true, "snapshot": true, "release": true,
 }
 
 var (

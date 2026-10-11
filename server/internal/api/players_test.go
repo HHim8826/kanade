@@ -153,6 +153,12 @@ func TestPlayerEvents(t *testing.T) {
 			t.Fatalf("%v: %d", bad, res.StatusCode)
 		}
 	}
+	// The whole library or a smart playlist is picked on the device that plays it (review #204).
+	for _, op := range []string{"shuffle", "smart"} {
+		if res := post(t, srv.URL, tok, "/api/v1/players/tab-phone-1/commands", map[string]any{"from": "tab-desk-01", "op": op}); res.StatusCode != http.StatusAccepted {
+			t.Fatalf("%s: %d", op, res.StatusCode)
+		}
+	}
 	if res := post(t, srv.URL, tok, "/api/v1/players/tab-none-01/commands", map[string]any{"from": "tab-desk-01", "op": "pause"}); res.StatusCode != http.StatusConflict {
 		t.Fatalf("not connected: %d", res.StatusCode)
 	}

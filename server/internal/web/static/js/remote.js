@@ -32,6 +32,7 @@ const reasons = {
   stale: '的佇列已經變了',
   changed: '播放的內容已經變了',
   empty: '沒有在播放',
+  none: '沒有找到可以播放的歌',
   bad: '看不懂這個要求',
 };
 
@@ -213,6 +214,16 @@ const ops = {
     local(() => P.playQueue(list, Math.min(Math.max(Math.floor(Number(index)) || 0, 0), list.length - 1)));
     await playing();
   },
+  // The whole library or a smart playlist played on and on: picked here, as it goes (review #204).
+  shuffle: async ({ kind }) => {
+    if (!(await local(() => P.playLibraryShuffle(kind === 'spoken' ? 'spoken' : 'music')))) fail('none');
+    await playing();
+  },
+  smart: async ({ id, name }) => {
+    if (!(Number(id) > 0)) fail('bad');
+    if (!(await local(() => P.playSmart(Number(id), String(name || ''))))) fail('none');
+    await playing();
+  },
   snapshot: () => P.snapshot(),
   // release pauses this tab for the device that took its playback over: only while it still plays
   // the queue taken (nothing else played here since) at the song taken or the one after. Its sleep
@@ -253,16 +264,29 @@ export function target() {
 export function controlDevice(d) {
   if (!d || !d.player || d.player === tab) return;
   local(P.pause);
+  dropVolume();
   control.set({ target: d.player, name: d.device_name || '另一台裝置', busy: 0 });
   P.setRemote(route);
   P.player.set({ nowPlayingOpen: false });
 }
 
 export function endControl() {
+  dropVolume();
   if (!control.get().target) return;
   P.setRemote(null);
   control.set({ target: null, name: '', busy: 0 });
 }
+
+// Something starting to play here (asked by a third device, say) ends the control: the player bar
+// shows, and its buttons work, what plays (review #204).
+let wasPlaying = false;
+P.player.subscribe((s) => {
+  if (s.playing && !wasPlaying && control.get().target) {
+    toast(`這裡開始播放了，已結束控制「${control.get().name}」`);
+    endControl();
+  }
+  wasPlaying = s.playing;
+});
 
 // command sends the device controlled op, saying when it is done (said) or why not.
 export function command(op, args, said) {
@@ -288,7 +312,13 @@ function around(items, index) {
   return { items: items.slice(start, start + 500), index: index - start };
 }
 
+// A volume dragged is sent a few times a second, its latest value; it is for the device it was
+// dragged for, and not sent once another is controlled (review #206).
 let volumeTimer = 0, volumeTo = 0;
+function dropVolume() {
+  clearTimeout(volumeTimer);
+  volumeTimer = 0;
+}
 
 // route sends what is asked of the player here to the device controlled (player.js's remote hook).
 function route(op, args = {}) {
@@ -301,7 +331,7 @@ function route(op, args = {}) {
     case 'mute':
       quietly(command('mute', { on: !(d && d.muted) }));
       break;
-    case 'volume': // a slider dragged: its latest value, a few times a second
+    case 'volume':
       volumeTo = args.v;
       if (!volumeTimer) volumeTimer = setTimeout(() => { volumeTimer = 0; quietly(command('volume', { v: volumeTo })); }, 200);
       break;

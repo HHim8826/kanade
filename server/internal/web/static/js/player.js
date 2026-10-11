@@ -367,41 +367,48 @@ const kindOf = (item) => (item && item.kind === 'spoken' ? 'spoken' : 'music');
 
 // playLibraryShuffle plays songs picked at random from the whole library, one after another, each
 // song as likely as any other; the queue goes on with more as it plays. kind: music (drama and
-// radio left out) or spoken.
+// radio left out) or spoken. It is whether it began: false when there was nothing to play, or another
+// queue was played meanwhile (said here); a device controlled is asked to do it (review #204).
 export async function playLibraryShuffle(kind = 'music') {
+  if (routed('shuffle', { kind })) return true;
   const my = ++gen;
   const s = player.get();
   try {
     const list = await get(`/tracks/random?n=3&kind=${kind}&not=${recentIds(s).join(',')}`);
-    if (my !== gen) return;
+    if (my !== gen) return false;
     if (!list.length) {
       toast(kind === 'spoken' ? '曲庫沒有可以播放的廣播劇或談話' : '曲庫沒有可以播放的歌', 'error');
-      return;
+      return false;
     }
     player.set({ queue: tag(list.map(fromTrack).map(autoItem)), index: 0, original: null, radio: { kind, chosen: true }, radioError: null });
     load(0);
+    return true;
   } catch (e) {
     if (my === gen) toast(e.message, 'error');
+    return false;
   }
 }
 
 // playSmart plays a smart playlist on and on (review #96): every pick asks its rules again,
-// leaving out the songs just played.
+// leaving out the songs just played. It is whether it began, as playLibraryShuffle.
 export async function playSmart(id, name) {
+  if (routed('smart', { id, name })) return true;
   const my = ++gen;
   const s = player.get();
   try {
     const list = await get(`/playlists/${id}/next?n=3&not=${recentIds(s).join(',')}`);
-    if (my !== gen) return;
+    if (my !== gen) return false;
     if (!list.length) {
       toast('沒有符合條件的歌', 'error');
-      return;
+      return false;
     }
     player.set({ queue: tag(list.map(fromTrack).map(autoItem)), index: 0, original: null,
       radio: { kind: 'music', playlist: id, name, chosen: true }, radioError: null });
     load(0);
+    return true;
   } catch (e) {
     if (my === gen) toast(e.message, 'error');
+    return false;
   }
 }
 
@@ -1096,7 +1103,7 @@ export function playBookmark(b, anyway = false) {
   if (!b.track || (!b.asset && !anyway)) return;
   const item = fromTrack(b.track);
   if (b.asset) Object.assign(item, { asset: b.asset, assetId: b.asset.id, durationMs: b.asset.duration_ms });
-  const cur = current();
+  const cur = remote ? null : current(); // controlling a device: it plays the bookmark
   if (cur && cur.assetId === item.assetId) {
     seek(b.position_ms / 1000);
     if (audio.paused) play().catch(() => {});
