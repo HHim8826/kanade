@@ -1,4 +1,5 @@
-# Checks every push to main and every pull request; a release runs it first (workflow_call).
+# Checks every push to main and every pull request; a release runs it (workflow_call) on a commit
+# it has not passed on yet.
 #   go:      gofmt, go vet, and the tests with the race detector, with aria2 and FFmpeg installed
 #            so the download and conversion tests run instead of skipping
 #   web:     the web client (no build step): modules parse, imports exist and are used

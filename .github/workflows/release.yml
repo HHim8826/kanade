@@ -1,6 +1,7 @@
 # Builds Kanade for Linux and publishes a release when a version tag (v1.2.3) is pushed, once CI
-# (ci.yml) passes. Run by hand (workflow_dispatch), it builds the same files as an artifact without
-# releasing them.
+# (ci.yml) passes on the commit: the run its push to main started (waited for while it goes), else
+# one of its own (a commit not pushed to main, or whose run was cancelled or failed). Run by hand
+# (workflow_dispatch), it builds the same files as an artifact without releasing them.
 #
 # Release files, which scripts/kanade.sh downloads:
 #   kanade-linux-amd64.tar.gz, kanade-linux-arm64.tar.gz   the program
@@ -17,13 +18,39 @@ on:
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
+  # passed: CI ran on this commit when it was pushed to main, and passed.
+  checked:
+    runs-on: ubuntu-latest
+    outputs:
+      passed: ${{ steps.find.outputs.passed }}
+    steps:
+      - id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for _ in $(seq 90); do # up to half an hour: a run takes about five minutes
+            states=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push" \
+              --jq '[.workflow_runs[] | if .status == "completed" then .conclusion else "running" end] | join(" ")')
+            echo "CI on $GITHUB_SHA: ${states:-none}"
+            case " $states " in
+              *" success "*) echo "passed=true" >> "$GITHUB_OUTPUT"; exit 0 ;;
+              *" running "*) sleep 20 ;;
+              *) break ;;
+            esac
+          done
+          echo "passed=false" >> "$GITHUB_OUTPUT"
+
   ci:
+    needs: checked
+    if: needs.checked.outputs.passed != 'true'
     uses: ./.github/workflows/ci.yml
 
   release:
-    needs: ci
+    needs: [checked, ci]
+    if: ${{ !cancelled() && needs.checked.result == 'success' && (needs.checked.outputs.passed == 'true' || needs.ci.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
