@@ -265,6 +265,7 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (session) report(); // close out the track we are leaving
   loads++;
   onward = null;
+  probe = null;
   endCut();
   told = null; // the next one is preloaded again for this one, once it plays
   tries = 0;
@@ -822,6 +823,7 @@ export function resetPlayer(withReport = true, signOut = false) {
   pendingSeek = null;
   deferred = null;
   onward = null;
+  probe = null;
   endCut();
   keep(false);
   audio.pause();
@@ -837,17 +839,23 @@ export function resetPlayer(withReport = true, signOut = false) {
 
 export function toggle() {
   if (routed('toggle') || !current()) return;
-  if (stopped() && !onward && !cut) resume();
-  else pause();
+  if (probe ? probe.wanted : !stopped() || onward || cut) pause();
+  else resume();
 }
 
 // resume and pause do one thing each: a "play" from a headset or a car while playing changes
 // nothing (review #170). Between two songs, the next still being picked, they say whether it plays
 // when it comes: the song that ended does not start again. A song cut off by the network (cut):
-// play asks for it at once, pause ends the wait.
+// play asks for it at once, pause ends the wait. A song that failed, the server being asked why
+// (probe): they say whether it plays on once the answer comes.
 export function resume() {
   if (routed('play')) return;
-  if (cut) {
+  if (probe) {
+    probe.wanted = true;
+    player.set({ playing: true, buffering: true });
+    playbackState('playing');
+    keep(true);
+  } else if (cut) {
     tryCut(); // asked at once
   } else if (onward !== null) {
     if (!onward) goOn(true);
@@ -855,16 +863,22 @@ export function resume() {
 }
 
 export function pause() {
-  if (routed('pause')) return;
-  if (endCut()) { // the song cut off waits no more
+  if (!routed('pause')) halt();
+}
+
+// halt is a pause here, never sent to a device controlled: the listener's, or the sleep timer's.
+// Nothing goes on by itself after it: not a song still being picked while the queue waits at its end
+// (review #103), nor one waiting for the network (review #203) or for the server's answer (#202).
+function halt() {
+  pauses++;
+  if (probe) probe.wanted = false;
+  if (endCut() || probe) {
     player.set({ playing: false, buffering: false });
     playbackState('paused');
     keep(false);
   }
-  if (!audio.paused) {
-    pauses++;
-    audio.pause();
-  } else if (onward) goOn(false);
+  if (!audio.paused) audio.pause();
+  else if (onward) goOn(false);
 }
 
 // onward is whether the next song, picked from the library after one ended, plays when it comes
@@ -1053,11 +1067,7 @@ function checkSleep() {
   const s = player.get().sleep;
   if (s && s.until && Date.now() >= s.until) {
     endSleep();
-    // As if the listener paused: nothing goes on by itself, not even a song still being picked
-    // while the queue waits at its end (review #103).
-    pauses++;
-    if (!audio.paused) audio.pause();
-    else if (onward) goOn(false);
+    halt(); // as if the listener paused
     toast('睡眠定時到了，已暫停播放');
     return;
   }
@@ -1138,29 +1148,36 @@ on('ended', () => {
 // and answers with the reason Drive failed. One that can be read now (Drive failed a moment, the
 // network back) is tried again from where it was, once, and again each time it got further. One
 // cut off by the network while it played waits for it (cut).
+// While the server is asked (probe), the song shows as what the listener wants of it, which play
+// and pause change: what the answer does is for that, not for what was wanted when the song failed
+// (review #202). Another song, the queue cleared or another failure makes the answer late.
 let retried = { loaded: 0, at: 0 }; // the last try again: the song loaded, and where
+let probe = null; // { wanted }: the song that failed, being asked about
 on('error', async () => {
   if (!audio.getAttribute('src')) return; // emptied on purpose
-  const item = current(), loaded = loads, s = player.get();
-  const wanted = s.playing || s.buffering, at = audio.currentTime, code = audio.error && audio.error.code;
-  player.set({ buffering: false, playing: false });
-  if (!item) return;
+  const item = current(), loaded = loads, sought = seeks, s = player.get();
+  const p = probe = item ? { wanted: s.playing || s.buffering } : null;
+  const at = audio.currentTime, code = audio.error && audio.error.code;
+  player.set({ buffering: !!p && p.wanted, playing: !!p && p.wanted });
+  if (!p) return;
   const why = await streamProblem(item);
-  if (loads !== loaded) return; // another song since
-  if (why === null && (retried.loaded !== loaded || at > retried.at + 5)) {
-    retried = { loaded, at };
-    if (!wanted) keep(false);
-    if (at > 0) pendingSeek = Math.round(at * 1000);
+  if (probe !== p) return;
+  probe = null;
+  // A place asked for meanwhile is where it goes on from.
+  const where = seeks === sought ? at : now();
+  if (why === null && (retried.loaded !== loaded || where > retried.at + 5)) {
+    retried = { loaded, at: where };
+    if (!p.wanted) keep(false);
+    if (where > 0) pendingSeek = Math.round(where * 1000);
     audio.src = streamURL(item.assetId);
-    if (wanted) {
-      player.set({ buffering: true });
-      play().catch(refused);
-    }
+    if (p.wanted) play().catch(refused);
     return;
   }
-  if (why === 'network' && wanted) return waitForNetwork(item, at);
+  if (why === 'network' && p.wanted) return waitForNetwork(item, where);
+  player.set({ playing: false, buffering: false });
+  playbackState('paused');
   keep(false); // nothing plays on
-  askAgain(item, at);
+  askAgain(item, where);
   cantPlay(item, why, code);
 });
 
