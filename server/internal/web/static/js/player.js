@@ -253,6 +253,7 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (session) report(); // close out the track we are leaving
   loads++;
   onward = null;
+  endCut();
   told = null; // the next one is preloaded again for this one, once it plays
   tries = 0;
   warm = null;
@@ -756,6 +757,7 @@ export function resetPlayer(withReport = true, signOut = false) {
   pendingSeek = null;
   deferred = null;
   onward = null;
+  endCut();
   keep(false);
   audio.pause();
   audio.removeAttribute('src');
@@ -770,20 +772,28 @@ export function resetPlayer(withReport = true, signOut = false) {
 
 export function toggle() {
   if (!current()) return;
-  if (audio.paused && !onward) resume();
+  if (stopped() && !onward && !cut) resume();
   else pause();
 }
 
 // resume and pause do one thing each: a "play" from a headset or a car while playing changes
 // nothing (review #170). Between two songs, the next still being picked, they say whether it plays
-// when it comes: the song that ended does not start again.
+// when it comes: the song that ended does not start again. A song cut off by the network (cut):
+// play asks for it at once, pause ends the wait.
 export function resume() {
-  if (onward !== null) {
+  if (cut) {
+    tryCut(); // asked at once
+  } else if (onward !== null) {
     if (!onward) goOn(true);
-  } else if (current() && audio.paused) play().catch(() => {});
+  } else if (current() && stopped()) play().catch(() => {});
 }
 
 export function pause() {
+  if (endCut()) { // the song cut off waits no more
+    player.set({ playing: false, buffering: false });
+    playbackState('paused');
+    keep(false);
+  }
   if (!audio.paused) {
     pauses++;
     audio.pause();
@@ -1035,9 +1045,10 @@ on('ended', () => {
   else next();
 });
 // A song that cannot be played says why (review #167): the server is asked for its first byte,
-// and answers with the reason Drive failed. One that can be read now (Drive failed a moment) is
-// tried once more from where it was.
-let retried = 0; // the load tried again already
+// and answers with the reason Drive failed. One that can be read now (Drive failed a moment, the
+// network back) is tried again from where it was, once, and again each time it got further. One
+// cut off by the network while it played waits for it (cut).
+let retried = { loaded: 0, at: 0 }; // the last try again: the song loaded, and where
 on('error', async () => {
   if (!audio.getAttribute('src')) return; // emptied on purpose
   const item = current(), loaded = loads, s = player.get();
@@ -1046,9 +1057,9 @@ on('error', async () => {
   if (!item) return;
   const why = await streamProblem(item);
   if (loads !== loaded) return; // another song since
-  if (!wanted || why !== null || retried === loaded) keep(false); // nothing plays on
-  if (why === null && retried !== loaded) {
-    retried = loaded;
+  if (why === null && (retried.loaded !== loaded || at > retried.at + 5)) {
+    retried = { loaded, at };
+    if (!wanted) keep(false);
     if (at > 0) pendingSeek = Math.round(at * 1000);
     audio.src = streamURL(item.assetId);
     if (wanted) {
@@ -1057,6 +1068,21 @@ on('error', async () => {
     }
     return;
   }
+  if (why === 'network' && wanted) return waitForNetwork(item, at);
+  keep(false); // nothing plays on
+  askAgain(item, at);
+  cantPlay(item, why, code);
+});
+
+// askAgain has a song that failed asked for again when played, from where it stopped. The element
+// that failed is not paused, but nothing plays: stopped says so (one play plays again).
+function askAgain(item, at) {
+  deferred = streamURL(item.assetId);
+  pendingSeek = Math.round(at * 1000);
+}
+const stopped = () => audio.paused || audio.error !== null;
+
+function cantPlay(item, why, code) {
   const said = {
     not_connected: '沒有連線 Google Drive，無法播放。請到「設定」連線。',
     auth_expired: 'Google Drive 的授權已過期，無法播放。請到「設定」重新連線。',
@@ -1065,13 +1091,58 @@ on('error', async () => {
     network: `連不上伺服器，無法播放「${item.title}」。`,
   }[why];
   toast(said || (why === null && (code === 3 || code === 4) ? `這個瀏覽器無法播放「${item.title}」的格式。` : `無法播放「${item.title}」`), 'error');
-});
+}
+
+// cut is the song playing when the network went away for longer than the browser keeps trying by
+// itself (half a minute or so: a phone in a lift, on a train, between networks, or held off the
+// network with its screen off). It goes on where it stopped once the server answers: asked at
+// growing intervals, and at once when the device is back online or the page is looked at, for up
+// to CUT_WAIT_MS. Meanwhile it shows as playing, and the silent sound keeps the media session, so
+// Android keeps the browser running and on the network; a pause ends the wait.
+let cut = null; // { since, tries, timer, asking }
+const CUT_WAIT_MS = 10 * 60_000;
+function waitForNetwork(item, at) {
+  askAgain(item, at);
+  cut = { since: Date.now(), tries: 0, timer: 0, asking: false };
+  cut.timer = setTimeout(tryCut, 2000);
+  player.set({ playing: true, buffering: true });
+  playbackState('playing');
+  keep(true);
+}
+async function tryCut() {
+  const c = cut;
+  if (!c || c.asking) return;
+  clearTimeout(c.timer);
+  c.asking = true;
+  const item = current(), why = await streamProblem(item);
+  c.asking = false;
+  if (cut !== c) return; // paused, another song, or stopped meanwhile
+  if (why === 'network' && Date.now() - c.since < CUT_WAIT_MS) {
+    c.timer = setTimeout(tryCut, Math.min(2000 * 2 ** ++c.tries, 15_000));
+    return;
+  }
+  cut = null;
+  if (why === null) return play().catch(refused);
+  player.set({ playing: false, buffering: false });
+  playbackState('paused');
+  keep(false);
+  cantPlay(item, why, null);
+}
+// endCut stops the wait: true when there was one.
+function endCut() {
+  if (!cut) return false;
+  clearTimeout(cut.timer);
+  cut = null;
+  return true;
+}
+addEventListener('online', () => cut && tryCut());
+document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && cut && tryCut());
 
 // streamProblem is why a song's stream cannot be read: null when it can now, a reason the server
-// gave, network, or another word.
+// gave, network (no answer within 10 s too), or another word.
 async function streamProblem(item) {
   try {
-    const res = await fetch(streamURL(item.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin' });
+    const res = await fetch(streamURL(item.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin', signal: AbortSignal.timeout(10_000) });
     if (res.ok) {
       res.body && res.body.cancel().catch(() => {});
       return null;
