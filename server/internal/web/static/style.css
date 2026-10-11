@@ -361,6 +361,7 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 }
 @keyframes rise { from { transform: translateY(24px); opacity: 0; } }
 .np-top { display: flex; justify-content: space-between; }
+.np-top-end { display: flex; align-items: center; }
 .np-title-row { display: flex; align-items: flex-start; gap: 8px; }
 .np-main { display: flex; flex-direction: column; align-items: center; gap: 24px; max-width: 960px; margin: 0 auto; }
 .np-cover { width: min(420px, 82vw); aspect-ratio: 1; border-radius: var(--radius-l); box-shadow: 0 8px 32px rgb(0 0 0 / .25); }
@@ -379,7 +380,10 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .np-info .volume input { width: 100%; }
 .times { display: flex; justify-content: space-between; font-size: 12px; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
 .np-controls { display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 8px; }
+/* Five buttons, kept round: on a narrow phone the space between them gives way instead. */
+.np-controls .icon-btn { flex: none; }
 .np-controls .icon-btn.filled { width: 72px; height: 72px; }
+@media (max-width: 839px) { .np-controls { gap: clamp(4px, calc((100vw - 280px) / 4), 16px); } }
 .np-panel { max-width: 720px; margin: 24px auto 0; }
 .queue-head { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; padding: 8px 0; }
 .lyrics { list-style: none; margin: 0; padding: 0; }
@@ -1001,8 +1005,11 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .player-bar .now .remote-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .remote-bar { background: var(--primary-container); color: var(--on-primary-container); }
 .remote-bar .sub, .remote-bar .bar-time { color: var(--on-primary-container); }
-.remote-busy { display: inline-flex; width: 24px; height: 24px; }
-.remote-busy .spinner { width: 18px; height: 18px; margin: 3px; }
+/* A command waiting for its answer: a ring round the play button, which moves nothing as commands
+   come and go (late: it shows only for one that takes a while). */
+.remote-play { position: relative; display: inline-flex; flex: none; }
+.remote-play .spinner { position: absolute; inset: -4px; width: auto; height: auto; margin: 0; pointer-events: none;
+  border-color: transparent; border-top-color: var(--primary); }
 .remote-view .np-top { align-items: center; gap: 8px; }
 .remote-view .np-top .remote-label { font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .player-bar.elsewhere { gap: 10px; }

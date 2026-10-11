@@ -169,7 +169,7 @@ function NowPlayingView() {
   return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放" ref=${root} onScroll=${onScroll}>
     <div class="np-top">
       <${IconButton} icon="expand" label="收起" onClick=${() => open(false)} />
-      <${IconButton} icon="more" label="更多" onClick=${menu} />
+      <span class="np-top-end"><${DevicesButton} /><${IconButton} icon="more" label="更多" onClick=${menu} /></span>
     </div>
     <div class="np-main">
       ${item.coverId
@@ -194,7 +194,6 @@ function NowPlayingView() {
           <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled size=${40} />
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
           <${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} />
-          <${DevicesButton} />
         </div>
         <${Volume} s=${s} />
         <div class="np-tools">

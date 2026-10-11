@@ -289,11 +289,13 @@ export function RemoteBar() {
     <div class="controls">
       <span class="wide-only"><${RemoteMode} d=${d} /></span>
       <${IconButton} icon="prev" label="上一首" onClick=${prev} />
-      <${IconButton} icon=${d.state === 'playing' ? 'pause' : 'play'} label=${d.state === 'playing' ? '暫停' : '播放'} onClick=${toggle} filled />
+      <span class="remote-play">
+        <${IconButton} icon=${d.state === 'playing' ? 'pause' : 'play'} label=${d.state === 'playing' ? '暫停' : '播放'} onClick=${toggle} filled />
+        ${busy > 0 && html`<div class="spinner late" role="status" aria-label="等待回應"></div>`}
+      </span>
       <${IconButton} icon="next" label="下一首" onClick=${next} />
     </div>
     <div class="bar-extra">
-      ${busy > 0 && html`<span class="remote-busy" title="等待回應"><${Spinner} /></span>`}
       <span class="bar-time wide-only">${fmtTime(positionOf(d))} / ${fmtTime(d.duration_ms || 0)}</span>
       <span class="wide-only"><${RemoteVolume} d=${d} /></span>
       <${DevicesButton} />
