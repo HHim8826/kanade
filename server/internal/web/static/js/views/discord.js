@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
-import { checkPresence, device, deviceName } from '../presence.js';
+import { device, deviceName } from '../presence.js';
 import { keepInAddress, parseHash } from '../router.js';
 import { ErrorBox, Icon, Spinner, html, toast } from '../ui.js';
 import { confirmDialog } from './organize.js';
@@ -32,7 +32,6 @@ export function DiscordSettings() {
       if (my !== changes.current) return;
       setInfo(r);
       setError(null);
-      checkPresence({ publish: !!(r.link && !r.link.error) });
     }, (e) => my === changes.current && setError(e));
   };
   useEffect(() => {
@@ -69,7 +68,7 @@ export function DiscordSettings() {
   const unlink = () => confirmDialog({
     title: '解除 Discord 連結', action: '解除連結', danger: true,
     children: html`<p>Kanade 會停止更新你的 Discord 狀態，並向 Discord 撤銷這次授權。之後要再顯示，需要重新連結。</p>`,
-    onConfirm: () => api('DELETE', '/discord/link').then(() => { checkPresence({ publish: false }); load(); }),
+    onConfirm: () => api('DELETE', '/discord/link').then(load),
   });
   const l = info && info.link;
   const st = info && info.state;

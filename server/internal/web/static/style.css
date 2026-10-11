@@ -974,3 +974,43 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
   background: var(--surface-container-high); }
 .collect-on-bind .check-row { margin: 0; }
 .collect-on-bind select { font: inherit; color: var(--on-surface); background: var(--surface); border: 1px solid var(--outline); border-radius: var(--radius-s); padding: 4px 8px; }
+
+/* ---- the account's other devices (review #138) ---- */
+.devices { list-style: none; margin: 0 0 8px; padding: 0; }
+.device { display: flex; align-items: center; gap: 12px; padding: 10px 4px; border-top: 1px solid var(--outline-variant); }
+.device:first-child { border-top: 0; }
+.device.on { background: var(--surface-container); border-radius: 12px; }
+.device .thumb { width: 44px; height: 44px; border-radius: 8px; flex: none; }
+.device-icon { width: 44px; height: 44px; display: grid; place-items: center; border-radius: 8px; background: var(--surface-container-high); color: var(--on-surface-variant); flex: none; }
+.device .grow { min-width: 0; display: flex; flex-direction: column; }
+.device .title { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device .sub { font-size: 13px; color: var(--on-surface-variant); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.device-actions { display: flex; align-items: center; gap: 4px; flex: none; flex-wrap: wrap; justify-content: flex-end; }
+@media (max-width: 559px) {
+  .device { flex-wrap: wrap; }
+  .device .grow { flex: 1 1 calc(100% - 60px); }
+  .device-actions { flex: 1 1 100%; }
+  .device.this { flex-wrap: nowrap; }
+  .device.this .grow { flex: 1; }
+}
+.devices-button { position: relative; display: inline-flex; }
+.devices-button .badge { position: absolute; top: 4px; right: 4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 8px; background: var(--primary);
+  color: var(--on-primary, #fff); font-size: 11px; line-height: 16px; text-align: center; pointer-events: none; }
+.remote-label { display: inline-flex; align-items: center; gap: 4px; color: var(--primary); }
+.remote-label .icon { flex: none; }
+.player-bar .now .remote-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.remote-bar { background: var(--primary-container); color: var(--on-primary-container); }
+.remote-bar .sub, .remote-bar .bar-time { color: var(--on-primary-container); }
+.remote-busy { display: inline-flex; width: 24px; height: 24px; }
+.remote-busy .spinner { width: 18px; height: 18px; margin: 3px; }
+.remote-view .np-top { align-items: center; gap: 8px; }
+.remote-view .np-top .remote-label { font-weight: 500; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.player-bar.elsewhere { gap: 10px; }
+.player-bar.elsewhere .thumb { width: 48px; height: 48px; border-radius: 8px; flex: none; }
+.player-bar.elsewhere .track-text { display: flex; flex-direction: column; min-width: 0; }
+.player-bar.elsewhere .title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-bar.elsewhere .sub { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; color: var(--on-surface-variant); overflow: hidden; white-space: nowrap; }
+.player-bar.elsewhere .btn { flex: none; }
+.blocked-note { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px;
+  max-width: calc(100% - 32px); padding: 8px 14px; border: 0; border-radius: 20px; background: var(--primary); color: var(--on-primary, #fff);
+  font: inherit; font-size: 14px; cursor: pointer; box-shadow: 0 2px 8px rgb(0 0 0 / .25); }

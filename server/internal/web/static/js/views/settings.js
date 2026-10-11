@@ -7,6 +7,7 @@ import { showShortcuts } from '../shortcuts.js';
 import { player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { fromAgent } from '../presence.js';
 import { DiscordSettings } from './discord.js';
+import { DevicesSettings } from './remote.js';
 import { BangumiAccount } from './bangumi.js';
 import { href } from '../router.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
@@ -726,6 +727,7 @@ function SettingsPage({ first, onLogout }) {
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
     ${d && d.status.connected && html`<${Backups} />`}
     <${PlaybackSettings} />
+    <${DevicesSettings} />
     <h2 class="section-title">音效</h2>
     <div class="card pad"><${EffectsPanel} /></div>
     <${Appearance} />

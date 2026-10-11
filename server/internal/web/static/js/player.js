@@ -56,12 +56,24 @@ export const player = createStore({
   radio: null,
   radioError: null, // why the last pick from the library failed
   sleep: null, // the sleep timer (review #98): { until } (a time, ms) or { endOfTrack: true }; this device only
+  blocked: false, // the browser would not start playing without a click on this page (review #138)
   ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
 
 // clock is where the song is (seconds), apart from the player: it moves four times a second, and
 // only what shows it (the seek bar, the time, the lyrics' line) follows it (review #158).
 export const clock = createStore({ time: 0 });
+
+// While this tab controls another device's player (review #138), what is asked of the player here
+// (playing a list, adding to the queue, pausing, seeking, the volume...) goes there instead: the
+// remote hook (remote.js) sends it, and says so by returning true. What another device asks of
+// this one is carried out here past the hook. This device's settings (the settings page's play
+// mode) stay its own.
+let remote = null;
+export const setRemote = (f) => {
+  remote = f;
+};
+const routed = (op, args) => remote !== null && remote(op, args);
 export const now = () => clock.get().time;
 
 function savePrefs() {
@@ -189,8 +201,8 @@ const play = () => {
 };
 // refused: a play the browser turned down, or cut short by another song (which, playing, keeps the
 // silent sound).
-const refused = () => {
-  player.set({ playing: false, buffering: false });
+const refused = (e) => {
+  player.set({ playing: false, buffering: false, ...(e && e.name === 'NotAllowedError' && { blocked: true }) });
   if (audio.paused) keep(false);
 };
 
@@ -321,7 +333,7 @@ addEventListener('pagehide', () => report(false, true));
 // follow in random order; turning shuffle off goes back to the list's own order. Shuffling the
 // whole library, the chosen song plays first and songs from the library follow (review #72).
 export function playQueue(items, index = 0) {
-  if (!items.length) return;
+  if (!items.length || routed('playQueue', { items, index })) return;
   gen++;
   const list = tag(items);
   const s = player.get();
@@ -477,7 +489,7 @@ export function shuffled(items) {
 export function enqueue(items) {
   const raw = Array.isArray(items) ? items : [items];
   const s = player.get();
-  if (!raw.length) return;
+  if (!raw.length || routed('enqueue', { items: raw })) return;
   if (s.index < 0) return playQueue(raw);
   const list = tag(raw);
   const queue = [...s.queue];
@@ -492,7 +504,7 @@ export function enqueue(items) {
 export function playNext(items) {
   const raw = Array.isArray(items) ? items : [items];
   const s = player.get();
-  if (!raw.length) return;
+  if (!raw.length || routed('playNext', { items: raw })) return;
   if (s.index < 0) return playQueue(raw);
   const list = tag(raw);
   const queue = [...s.queue];
@@ -509,6 +521,7 @@ export function playNext(items) {
 // ---- modes and the queue (review #16) ----
 
 export function setVolume(v) {
+  if (routed('volume', { v })) return;
   player.set({ volume: Math.min(Math.max(v, 0), 1), muted: v <= 0 });
   applyVolume();
   savePrefs();
@@ -516,6 +529,7 @@ export function setVolume(v) {
 
 // toggleMute silences and brings back the volume it had.
 export function toggleMute() {
+  if (routed('mute')) return;
   const s = player.get();
   player.set({ muted: !s.muted, volume: s.muted && s.volume === 0 ? 0.5 : s.volume });
   applyVolume();
@@ -524,6 +538,7 @@ export function toggleMute() {
 
 // cycleMode goes in order → loop the queue → loop this song → shuffle → in order.
 export function cycleMode() {
+  if (routed('cycleMode')) return;
   const s = player.get();
   setMode(MODES[(MODES.indexOf(s.mode) + 1) % MODES.length]);
 }
@@ -732,6 +747,56 @@ export function restoreSession() {
   owner = true;
 }
 
+// ---- another device taking the playback over (review #138) ----
+
+// queueId is this tab's queue: another one at each change of it.
+export const queueId = () => sid;
+// generation is what plays here: another one once something else is played (a list, another
+// queue, cleared), not as the queue goes on by itself or is added to.
+export const generation = () => gen;
+
+// snapshot is this tab's playback, for another device to take over: the queue as kept for a reload
+// (the songs around the one playing), the place, the play mode and the sleep timer (what is left).
+export function snapshot() {
+  const s = player.get();
+  if (s.index < 0 || !s.queue[s.index]) return null;
+  const start = Math.max(0, Math.min(s.index - 100, s.queue.length - MAX_SAVED));
+  const strip = ({ resumeMs, ...it }) => it;
+  const sleep = s.sleep && (s.sleep.endOfTrack ? { endOfTrack: true } : { leftMs: Math.max(0, s.sleep.until - Date.now()) });
+  return {
+    sid, queue: s.queue.slice(start, start + MAX_SAVED).map(strip), index: s.index - start,
+    original: s.original && s.original.length <= MAX_SAVED ? s.original.map(strip) : null, from: s.from, radio: s.radio,
+    mode: s.mode, scope: s.scope, at: place(), playing: s.playing, sleep: sleep || null, gen,
+  };
+}
+
+// adopt plays another device's snapshot here: its queue, from its place (only for the song the place
+// was kept for; later by since ms when it was playing), in its play mode; with sleep, its sleep
+// timer too. It is the queue entry playing (numbered as there), or null when there was nothing.
+export function adopt(snap, { sleep = false, since = 0 } = {}) {
+  const ok = (list) => Array.isArray(list) && list.length > 0 && list.every((q) => q && q.assetId > 0 && q.qid > 0);
+  if (!snap || !ok(snap.queue)) return null;
+  const copy = (list) => list.map(({ resumeMs, ...q }) => q);
+  const queue = copy(snap.queue), original = ok(snap.original) ? copy(snap.original) : null;
+  const index = Math.min(Math.max(Number(snap.index) || 0, 0), queue.length - 1);
+  const item = queue[index], at = snap.at;
+  qseq = Math.max(qseq, ...queue.map((q) => q.qid), ...(original || []).map((q) => q.qid));
+  let t = at && at.qid === item.qid && at.asset === item.assetId ? Number(at.t) || 0 : 0;
+  if (t && snap.playing) t += since / 1000;
+  const d = (at && Number(at.d)) || (item.durationMs || 0) / 1000;
+  item.resumeMs = Math.round(Math.max(0, d ? Math.min(t, d - 1) : t) * 1000);
+  if (MODES.includes(snap.mode)) player.set({ ...modeState(snap.mode), ...((snap.scope === 'library' || snap.scope === 'queue') && { scope: snap.scope }) });
+  savePrefs();
+  gen++;
+  player.set({ queue, index, original, from: snap.from || 0, radio: snap.radio || null, radioError: null });
+  if (sleep && snap.sleep) {
+    if (snap.sleep.endOfTrack) sleepAfterTrack();
+    else setSleep(Math.max(0, Number(snap.sleep.leftMs) || 0) / 60_000);
+  }
+  load(index);
+  return item.qid;
+}
+
 function forgetSession() {
   try {
     localStorage.removeItem(SESSION);
@@ -771,7 +836,7 @@ export function resetPlayer(withReport = true, signOut = false) {
 }
 
 export function toggle() {
-  if (!current()) return;
+  if (routed('toggle') || !current()) return;
   if (stopped() && !onward && !cut) resume();
   else pause();
 }
@@ -781,14 +846,16 @@ export function toggle() {
 // when it comes: the song that ended does not start again. A song cut off by the network (cut):
 // play asks for it at once, pause ends the wait.
 export function resume() {
+  if (routed('play')) return;
   if (cut) {
     tryCut(); // asked at once
   } else if (onward !== null) {
     if (!onward) goOn(true);
-  } else if (current() && stopped()) play().catch(() => {});
+  } else if (current() && stopped()) play().catch(refused);
 }
 
 export function pause() {
+  if (routed('pause')) return;
   if (endCut()) { // the song cut off waits no more
     player.set({ playing: false, buffering: false });
     playbackState('paused');
@@ -816,6 +883,9 @@ function goOn(play) {
 // round of a shuffled queue; else a shuffled queue starts over in a new order, and in order it
 // stops (review #73: looping a song or the list comes first).
 export async function next() {
+  if (!routed('next')) return advance();
+}
+async function advance() {
   const s = player.get();
   if (s.index + 1 < s.queue.length) return load(s.index + 1);
   if (!s.queue.length) return;
@@ -853,6 +923,7 @@ function stopAtEnd() {
 }
 
 export function prev() {
+  if (routed('prev')) return;
   const s = player.get();
   if (now() > 3 || (s.index === 0 && s.repeat === 'off')) seek(0);
   else load(s.index > 0 ? s.index - 1 : s.queue.length - 1);
@@ -863,7 +934,7 @@ export const playAt = (i) => load(i);
 // seek jumps there and shows it at once. Dragging the seek bar only previews (scrubTo) and seeks
 // once on release, so a drag is one jump, not one per pointer move (review #41).
 export const seek = (sec) => {
-  if (!isFinite(sec) || !current()) return;
+  if (!isFinite(sec) || routed('seek', { sec }) || !current()) return;
   seeks++;
   // Not loaded yet, or not far enough to seek: it starts there, whatever place was asked for before
   // (0 too). Loaded: there now, and no place asked for before is gone to later (review #174).
@@ -876,6 +947,25 @@ export const seek = (sec) => {
   clock.set({ time: sec });
   savePlace();
 };
+// seekBy moves the place by seconds (the keys, the lock screen's skip buttons), from where the song is.
+export function seekBy(by) {
+  if (routed('seekBy', { by })) return;
+  const s = player.get(), t = (s.scrub ?? now()) + by;
+  seek(Math.min(Math.max(t, 0), s.duration || t));
+}
+
+// nudgeVolume turns the volume a step up or down; muted, up brings back the volume it had (down:
+// silent already).
+export function nudgeVolume(up) {
+  if (routed('volumeBy', { up })) return;
+  const s = player.get();
+  if (s.muted) {
+    if (up) toggleMute();
+    return;
+  }
+  setVolume(Math.round((s.volume + (up ? 0.05 : -0.05)) * 100) / 100);
+}
+
 export const scrubTo = (sec) => isFinite(sec) && player.set({ scrub: sec });
 export const endScrub = (commit) => {
   const { scrub } = player.get();
@@ -1028,7 +1118,7 @@ on('waiting', () => player.set({ buffering: true }));
 on('playing', () => {
   const s = player.get();
   warm = s.queue[s.index] ? s.queue[s.index].qid : null;
-  player.set({ buffering: false, playing: true });
+  player.set({ buffering: false, playing: true, blocked: false });
   topUp();
 });
 on('ended', () => {
@@ -1042,7 +1132,7 @@ on('ended', () => {
     return;
   }
   if (player.get().repeat === 'one') load(player.get().index, true, true);
-  else next();
+  else advance();
 });
 // A song that cannot be played says why (review #167): the server is asked for its first byte,
 // and answers with the reason Drive failed. One that can be read now (Drive failed a moment, the
@@ -1179,7 +1269,7 @@ function positionState() {
 
 if ('mediaSession' in navigator) {
   const ms = navigator.mediaSession;
-  const step = (by) => seek(Math.min(Math.max(now() + by, 0), player.get().duration || now() + by));
+  const step = seekBy;
   const actions = [
     ['play', resume], ['pause', pause], ['previoustrack', prev], ['nexttrack', next],
     ['seekto', (d) => seek(d.seekTime)],

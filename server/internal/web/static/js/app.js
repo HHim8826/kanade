@@ -3,7 +3,8 @@ import { useEffect, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
 import { player, resetPlayer, restoreSession } from './player.js';
-import { checkPresence } from './presence.js';
+import { checkPresence, stopPresence } from './presence.js';
+import { control, startRemote, stopRemote } from './remote.js';
 import './scrollbars.js';
 import './shortcuts.js';
 import { href, useRoute } from './router.js';
@@ -18,6 +19,7 @@ import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
 import { Edits, Missing } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
+import { RemoteNowPlaying } from './views/remote.js';
 import { Settings } from './views/settings.js';
 import { Tasks } from './views/tasks.js';
 import { Upload } from './views/upload.js';
@@ -66,12 +68,20 @@ function App() {
     get('/status', { allow401: true, timeout: 15000 }).then(() => setAuth('in'), (e) => setAuth(e.status === 401 ? 'out' : 'in'));
   }, []);
   // Leaving a page closes the full-screen player, so it never hides the page you went to.
-  useEffect(() => player.set({ nowPlayingOpen: false }), [route]);
+  useEffect(() => {
+    player.set({ nowPlayingOpen: false });
+    control.set({ open: false });
+  }, [route]);
   useEffect(() => {
     if (auth !== 'in') return;
     loadFavorites();
     restoreSession(); // the queue this browser had, paused where it was
-    checkPresence(); // whether to tell what plays, for the Discord status (review #135)
+    checkPresence(); // what plays here, told for the other devices and Discord (reviews #135, #138)
+    startRemote(); // the other devices, and what they ask of this one (review #138)
+    return () => {
+      stopRemote();
+      stopPresence();
+    };
   }, [auth]);
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
@@ -89,6 +99,7 @@ function App() {
     <${PlayerBar} />
     </div>
     <${NowPlaying} />
+    <${RemoteNowPlaying} />
     <${MenuHost} />
     <${DialogHost} />
     <${Toasts} />`;

@@ -28,8 +28,8 @@ func (s *Server) presenceInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"publish": s.discord.Linked(r.Context(), userID(r))})
 }
 
-// reportPlayer takes what a web player plays; publish says whether to go on telling. Nothing is
-// kept while the account is not linked.
+// reportPlayer takes what a web player plays, kept for the account's other devices (review #138)
+// and, when linked, shown on Discord; publish says whether it is.
 func (s *Server) reportPlayer(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("pid")
 	if !playerID.MatchString(id) {
@@ -41,13 +41,8 @@ func (s *Server) reportPlayer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	linked := s.discord.Linked(r.Context(), userID(r))
-	if linked {
-		s.presence.Put(userID(r), sessionID(r), id, rep)
-	} else {
-		s.presence.Remove(userID(r), id)
-	}
-	writeJSON(w, http.StatusOK, map[string]bool{"publish": linked})
+	s.presence.Put(userID(r), sessionID(r), id, rep)
+	writeJSON(w, http.StatusOK, map[string]bool{"publish": s.discord.Linked(r.Context(), userID(r))})
 }
 
 func (s *Server) removePlayer(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +61,7 @@ func (s *Server) discordInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"client_id": app.ClientID, "has_secret": app.Secret != "", "image": s.discord.Image(ctx),
-		"redirect_uri": app.RedirectURI, "link": link, "state": s.discord.StateOf(userID(r)), "players": s.presence.Players(userID(r))})
+		"redirect_uri": app.RedirectURI, "link": link, "state": s.discord.StateOf(userID(r)), "players": s.named(ctx, userID(r), s.presence.Players(userID(r)))})
 }
 
 func (s *Server) setDiscordApp(w http.ResponseWriter, r *http.Request) {
@@ -147,7 +142,6 @@ func (s *Server) unlinkDiscord(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	s.presence.EndSessions(userID(r), -1) // nothing to tell any more
 	w.WriteHeader(http.StatusNoContent)
 }
 

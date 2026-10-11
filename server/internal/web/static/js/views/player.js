@@ -13,6 +13,8 @@ import { BookmarkDialog, BookmarkList } from './bookmarks.js';
 import { viewCover } from './coverview.js';
 import { showEffects } from './effects.js';
 import { Field } from './organize.js';
+import { DevicesButton, Elsewhere, RemoteBar } from './remote.js';
+import { control } from '../remote.js';
 
 const open = (v) => player.set({ nowPlayingOpen: v });
 
@@ -74,11 +76,16 @@ function Volume({ s }) {
   </div>`;
 }
 
+// PlayerBar is what plays here; while controlling another device (review #138), that device; with
+// nothing here, what another device plays.
 export function PlayerBar() {
   const s = useStore(player);
+  const remote = useStore(control, (c) => !!c.target);
   const item = s.queue[s.index];
-  if (!item) return null;
+  if (remote) return html`<${RemoteBar} />`;
+  if (!item) return html`<${Elsewhere} />`;
   return html`<div class="player-bar">
+    ${s.blocked && html`<button class="blocked-note" onClick=${toggle}><${Icon} name="play" size=${18} />瀏覽器要你點一下才能開始播放：按這裡開始</button>`}
     <${Seek} s=${s} className="bar-seek" />
     <button class="now" onClick=${() => open(true)} aria-label="開啟正在播放">
       <${Cover} id=${item.coverId} size=${96} className="thumb" />
@@ -96,6 +103,7 @@ export function PlayerBar() {
       <span class="wide-only">${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}</span>
       <span class="wide-only"><${IconButton} icon="lyrics" label="歌詞" onClick=${() => openTab('lyrics')} /></span>
       <${IconButton} icon="queue" label="播放佇列" onClick=${() => openTab('queue')} />
+      <${DevicesButton} />
       <span class="wide-only"><${Volume} s=${s} /></span>
     </div>
   </div>`;
@@ -186,6 +194,7 @@ function NowPlayingView() {
           <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled size=${40} />
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
           <${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} />
+          <${DevicesButton} />
         </div>
         <${Volume} s=${s} />
         <div class="np-tools">

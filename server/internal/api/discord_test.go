@@ -10,14 +10,15 @@ import (
 	"github.com/HHim8826/kanade/server/internal/library"
 )
 
-// The Discord endpoints (review #135): the secret never comes back; players tell nothing while the
-// account is not linked; Discord's callback goes back to the settings page saying how it went.
+// The Discord endpoints (review #135): the secret never comes back; players are kept, for the
+// account's devices (review #138), but not published while the account is not linked; Discord's
+// callback goes back to the settings page saying how it went.
 func TestDiscordEndpoints(t *testing.T) {
 	s, h := newTestServer(t)
 	tok := loginToken(t, s, h)
 	report := map[string]any{"device": "desk", "seq": 1, "state": "playing", "title": "Undine", "duration_ms": 1000}
 	rec := do(t, h, "PUT", "/api/v1/presence/players/tab-aaaa-1", tok, report)
-	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"publish":false`) || len(s.presence.Players(1)) != 0 {
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"publish":false`) || len(s.presence.Players(1)) != 1 {
 		t.Fatalf("not linked: %d %s", rec.Code, rec.Body)
 	}
 	if rec := do(t, h, "PUT", "/api/v1/presence/players/x", tok, report); rec.Code != http.StatusBadRequest {

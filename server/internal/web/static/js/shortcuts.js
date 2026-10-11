@@ -1,4 +1,5 @@
-import { current, next, now, player, prev, seek, setVolume, toggle, toggleMute } from './player.js';
+import { current, next, nudgeVolume, player, prev, seekBy, toggle, toggleMute } from './player.js';
+import { control } from './remote.js';
 import { Dialog, html, showDialog } from './ui.js';
 
 // ---- keyboard shortcuts ----
@@ -63,20 +64,12 @@ addEventListener('keydown', (e) => {
   if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
   if (document.querySelector('.scrim, .menu-scrim, .cover-view')) return;
   if (ownKey(document.activeElement, e.key)) return;
-  const s = player.get(), playing = !!current(), here = inPlayer(document.activeElement, s);
+  // Controlling another device (review #138), the keys control it.
+  const s = player.get(), playing = !!current() || !!control.get().target, here = inPlayer(document.activeElement, s);
   const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
   const arrow = key === 'ArrowLeft' || key === 'ArrowRight', upDown = key === 'ArrowUp' || key === 'ArrowDown';
-  const step = (by) => {
-    const t = (s.scrub ?? now()) + by;
-    seek(Math.min(Math.max(t, 0), s.duration || t));
-  };
-  const volume = (up) => {
-    if (s.muted) {
-      if (up) toggleMute(); // back to the volume it had; down: already silent
-      return;
-    }
-    setVolume(Math.round((s.volume + (up ? 0.05 : -0.05)) * 100) / 100);
-  };
+  const step = seekBy;
+  const volume = nudgeVolume;
   switch (true) {
     case key === '?':
       showShortcuts();

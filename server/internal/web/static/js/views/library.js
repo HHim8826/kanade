@@ -4,6 +4,7 @@ import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { clock, enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { useStore } from '../store.js';
+import { control } from '../remote.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumActions, Categorize, SongActions, editSections } from './batch.js';
 import { CategoriesTab } from './categories.js';
@@ -87,7 +88,9 @@ const downloadLabels = { metadata: '取得清單', selecting: '等待選檔', qu
 export function Home() {
   const home = useLoad(() => get('/home'), []);
   const d = home.data;
-  const live = useStore(player, (s) => s.queue[s.index]); // re-renders on track change, not on every tick
+  const local = useStore(player, (s) => s.queue[s.index]); // re-renders on track change, not on every tick
+  // Controlling another device (review #138): what is paused here is not what the buttons play.
+  const live = useStore(control, (c) => !c.target) ? local : null;
   const busy = d && (Object.keys(d.tasks.downloads).length > 0 || d.tasks.importing > 0);
   const att = d && d.attention;
   const empty = d && !d.recently_added.length;
