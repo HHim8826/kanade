@@ -7,7 +7,7 @@
 - 單一 Go 執行檔 `kanade`（`server/`），純 Go、不需 cgo，可交叉編譯 amd64／arm64。
 - `kanade serve --data DIR --listen 127.0.0.1:8080`：主服務。開發期經 Cloudflare Tunnel 對外為 `music.ser1ka.com`。
 - 主服務自行管理 aria2 子程序（D5）：產生設定與 RPC 密鑰、只綁 loopback、異常退出時退避重啟。
-- 首頁 `/` 與 `/privacy` 由主服務提供（D4），取代 `deploy/landing`。
+- 首頁 `/` 與 `/privacy` 由主服務提供（D4），取代 `deploy/landing`；名稱依站名產生（見「站名、圖示與分頁標題」）。
 
 ### 資料目錄
 
@@ -54,11 +54,12 @@ DIR/
 | `logfile` | 日誌檔輪替（P2-6） |
 | `proc` | 讓 aria2、FFmpeg 子程序隨主程序結束（P2-6） |
 | `settings` | 網頁設定頁可改的服務設定（資源、下載、Drive 同步），存在 settings 表、立即套用（#74、#75、#77） |
+| `site` | 站名與圖示：存在 settings 表（圖示是 512px PNG），產生分頁、iPhone、PWA 用的各種大小 |
 | `staging` | 匯入暫存的容量預算：上傳、下載與匯入共用，放不下時排隊 |
 | `uploads` | 客戶端分塊上傳（B4） |
 | `lrclib` | LRCLIB 線上歌詞：搜尋、排序、快取、忙碌時重試 |
 | `webauthn` | passkey 註冊與登入 |
-| `web` | 內嵌的網頁端（`static/`，Preact＋htm，不需建置），於 `/app/` 提供 |
+| `web` | 內嵌的網頁端（`static/`，Preact＋htm，不需建置），於 `/app/` 提供；首頁 HTML 與 manifest 依站名與圖示產生 |
 | `api` | HTTP 路由、驗證中介層、頁面 |
 
 ## 資料模型（計畫書 §4 三層）
@@ -176,6 +177,7 @@ DIR/
 | `GET /library/missing` | 音檔在 Drive 遺失的歌曲 |
 | `POST /account/password` | `{"current", "password"}` 改自己的密碼：結束所有登入、保留 passkey（#76） |
 | `GET /sessions`、`DELETE /sessions/{id}`、`POST /sessions/end-others` | 自己的登入（裝置、最後使用）；結束一個；結束其他全部 |
+| `GET /site`、`PUT /site`、`PUT`／`DELETE /site/icon` | 站名與圖示：`{"name","default","icon"}`（icon 是上傳圖示的版本，空字串為內建圖示）；改名送 `{"name"}`（空字串恢復預設）；圖示以請求本文上傳 PNG、JPEG 或 WebP。錯誤回 400 與 `reason`：`name`、`format`、`small`、`large` |
 | `GET /settings`、`PUT /settings/resources`、`/settings/downloads`、`/settings/drive` | 服務設定：播放快取與暫存容量、磁碟保留空間；下載與上傳限速、同時下載數、每個種子的連線數、是否做種與分享率、時數；收件匣自動匯入、檢查間隔、資料夾靜置時間。儲存時檢查並立即套用 |
 | `POST /cache/trim` | 清空播放快取與省流檔（播放中的檔案、省流的目前與下一首保留） |
 | `GET /tracks/random?n&kind&not` | 從全曲庫隨機挑歌（以歌曲為單位、只挑可播放的；`kind` 為 `music`、`spoken` 或 `all`）；`not` 由新到舊列出不要再挑的歌，全部挑過時從最久以前的再繞一輪（#72、#105） |
@@ -749,6 +751,20 @@ DIR/
 - 驗證：
   - Go 測試（`internal/lite`、`internal/api`）：同一首同時請求只轉一次、重啟後保留；跳過的歌停止並清掉暫存檔；預載、換預載、取消預載、磁碟不足時不預先轉；被播放又在等的那首不會因預載換掉而停止；Drive 失敗回原因且下次重試；轉檔失敗後送原檔且一段時間內不重試；容量上限保留最近播放的；沒有編碼器時照原檔。用真的 FFmpeg 把 5.1 聲道的 FLAC（管線）與 AAC（M4A，從檔案）轉出 Ogg Opus：48 kHz 立體聲、長度 3 秒、沒有標籤，重轉位元組相同。API：省流回應的 Content-Type、ETag、Range；128k MP3 與未知的 `q` 送原檔；轉檔失敗兩次都送原檔；Drive 失敗回 503；預載改成省流並放掉原檔預載；`/status`、設定的用量、簽名網址帶 `q`。
   - Chromium（示範資料，串流由測試回應：原檔 FLAC 與伺服器參數轉出的 Opus）：預設送原檔；在設定開啟後正在播的不變、下一首預載改帶 `q`；下一首起每個請求都帶 `q`、長度 30.0 秒、拖到 20 秒後繼續播、播完接下一首；伺服器回 503 時探測問原檔、重試仍帶 `q`；從播放頁選單關閉後回到原檔；伺服器不能轉時不帶 `q`，設定與提示說明原因。
+
+### 站名、圖示與分頁標題（2026-10-12）
+
+- 使用者要求：可以改站名和站的圖示，凡是顯示站名的地方都改成使用者指定的名稱；另外可以切換在站名後面用一個點分隔，顯示播放進度等資訊。使用者選擇：「站名 · 資訊」的寫法、資訊為歌名＋進度、說明文字裡的 Kanade 也一起換。
+- 跟著站名的：分頁標題、PWA 名稱（manifest）、登入頁、首頁 `/` 與 `/privacy`、Discord 狀態的 activity 名稱、新建立的 passkey（rp.name）、Google 授權完成頁，以及網頁說明文字裡指「這個網站」的 Kanade（例如「無法在 Kanade 撤回」、建立 Google／Discord／Bangumi 應用程式時要填的名稱）。
+- 不跟著改的：Drive 上的 `Kanade/inbox`、`Kanade/backups`（真實的資料夾名稱）、設定頁的「Kanade 版本」（軟體本身的名稱，連到 GitHub）、首頁頁尾的原始碼連結（寫成「Source code (Kanade, AGPL-3.0)」）、`kanade-manager`、對外 API 的 User-Agent、Discord Gateway 的 IDENTIFY 屬性。
+- 伺服器（`internal/site`）：站名存在 settings 的 `site.name`（空字串為預設 Kanade；去掉前後空白後最多 32 個字，不能有控制字元），圖示存在 `site.icon`（base64 的 512px PNG），所以每天的資料庫備份也帶著。上傳的 PNG、JPEG 或 WebP（最多 10 MB、2500 萬像素，短邊至少 64px）取中間的正方形縮成 512px；第一次被要求時才做出各種大小並留在記憶體：`icon-32`（分頁）、`icon-180`（iPhone 主畫面，iOS 會把透明處填黑，所以鋪在圖示邊緣的平均色上，邊緣大多透明時用白色）、`icon-192`、`icon-512`（PWA）、`icon-maskable`（Android 會裁成各種形狀：圖示縮到 80%、鋪在邊緣的平均色上）。版本是 PNG 的 SHA-256 前 12 碼。
+- 網頁殼（`internal/web`）：`index.html` 每次送出時填入站名（`<title>`、`<meta name="application-name" data-icon="版本">`）與圖示的 `<link>`；ETag 依送出的內容算，所以改名後重新整理就是新的。manifest 改由伺服器產生（`/app/manifest.webmanifest`，no-cache）；PWA 的身分是 start_url（`/app/`）不變，所以已安裝的不會變成另一個 App。上傳的圖示在 `/app/site/<版本>/<檔名>`：版本相符時永久快取；舊版本的網址送目前的圖示、不快取。內建圖示另外加了一張 180px、沒有圓角的 PNG 給 iPhone 主畫面（原本只有 SVG，iOS 不支援）。
+- 首頁與隱私權政策每次依站名產生（原本快取一小時，改為 no-cache）。Google 的品牌檢查會比對 OAuth 同意畫面上的應用程式名稱和首頁，改了站名也要到 Google Auth Platform 改成一樣；設定頁有說明。Discord 狀態送出的 activity 名稱是站名（改名後下一次回報就換），但 Social SDK 的狀態看起來顯示的是 Discord 應用程式的名稱（設定說明原本就寫「名稱填 Kanade，狀態會顯示正在聽 Kanade」），所以也請使用者到 Developer Portal 一起改；這點沒有用真的 Discord 帳號確認。
+- 網頁端（`site.js`）：站名與圖示從網頁殼的 meta 讀，登入頁不用另外問伺服器；設定 →「網站」改名或換圖示後，立刻更新這一頁的標題與 `<link>`，`App` 訂閱站名，改名時整頁重畫一次，說明文字跟著換。其他裝置重新整理後才換。
+- 分頁標題：設定 → 外觀「分頁標題顯示播放進度」，每個瀏覽器各自記住（`localStorage` 的 `kanade.title`），預設關閉。開啟時有歌就顯示「站名 · ▶ 1:23 / 3:45 · 歌名」，暫停時 ▶ 換成 ❚❚；進度放在歌名前面，分頁窄時被截掉的是歌名。還原的暫停佇列還沒載入音檔時，長度用曲庫記錄的長度。沒有歌時只顯示站名。標題跟著播放器的位置（音訊的 timeupdate 事件，不是計時器）更新，所以分頁在背景時也每秒更新。
+- 驗證：
+  - Go 測試（`internal/site`）：預設名稱、去空白、32 個字的上限、控制字元與無效 UTF-8、恢復預設、重開後保留；圖示取中間的正方形、各種大小、maskable 的底色與位置、透明邊緣在 iPhone 版鋪白色、WebP、拒絕文字檔、GIF、太小、太大（像素與檔案大小）、清除後回到內建。`internal/web`：網頁殼與 manifest 的名稱（含 HTML 跳脫）與圖示、改名後 ETag 改變、圖示檔的快取。`internal/api`：改名後網頁殼、manifest、首頁、隱私權政策、passkey 選項都跟著換；太長的名稱與 GIF 回 400 與 reason；上傳、清除、恢復預設。`internal/discord`：改名後下一次送出的狀態用新名稱。
+  - Chromium（示範資料）：預設的登入頁與圖示；設定頁改名（太長時提示並不能儲存）、分頁標題、說明文字、meta、manifest、首頁與隱私權政策跟著換，Drive 資料夾與版本仍是 Kanade；GIF 與 40px 的圖被拒絕並說明原因；上傳 PNG 與 WebP 後預覽、`<link>`、manifest 與五種大小；重新整理與登出後的登入頁；分頁標題開啟後顯示並每秒更新（另一個分頁在前景、這頁 hidden 時也是）、暫停顯示 ❚❚、重新整理後還原的暫停佇列仍顯示、關閉後只剩站名；恢復預設；手機寬度沒有橫向捲動；沒有頁面錯誤或 CSP 拒絕。
 
 ## 使用方式（開發環境）
 

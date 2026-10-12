@@ -14,7 +14,7 @@ A private, self-hosted music library: find releases through BitTorrent, choose t
 - **Play**: queue, shuffle, repeat, shuffling the whole library or carrying on with it, resuming dramas where they stopped, synced lyrics (from the files, LRC, or found on LRCLIB), bookmarks, a sleep timer, lock-screen controls, a low-data mode (songs streamed as Opus at 128 kbit/s, about a sixth of a FLAC), your devices (continue on your phone what your computer plays, with its queue and place, or use one device as the remote of another), and what you play shown as your Discord status ("Listening to Kanade"), set by the server once you link your Discord account, with nothing to install on your computer or phone.
 - **Collect**: favorites, playlists, smart playlists that pick by rules (category, artist, plays, last played…). They are on the 我的 (Me) page, with your bookmarks, play history, listening statistics and Bangumi collections; the library holds the music itself.
 - **My listening**: time actually heard per day as a year's heat map, rankings and trends for any period, export as CSV or JSON.
-- **Sign in** with a password or a passkey; a single Go binary sized for a 1.5 GB VPS.
+- **Your site**: sign in with a password or a passkey; give the site your own name and icon (the tab, the installed app, the login page and the Discord status follow), and let the tab's title show the song playing and where it is. A single Go binary sized for a 1.5 GB VPS.
 
 | | |
 |---|---|

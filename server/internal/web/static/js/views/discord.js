@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { device, deviceName } from '../presence.js';
 import { keepInAddress, parseHash } from '../router.js';
+import { siteName } from '../site.js';
 import { ErrorBox, Icon, Spinner, html, toast } from '../ui.js';
 import { confirmDialog } from './organize.js';
 
@@ -67,7 +68,7 @@ export function DiscordSettings() {
   };
   const unlink = () => confirmDialog({
     title: '解除 Discord 連結', action: '解除連結', danger: true,
-    children: html`<p>Kanade 會停止更新你的 Discord 狀態，並向 Discord 撤銷這次授權。之後要再顯示，需要重新連結。</p>`,
+    children: html`<p>${siteName()} 會停止更新你的 Discord 狀態，並向 Discord 撤銷這次授權。之後要再顯示，需要重新連結。</p>`,
     onConfirm: () => api('DELETE', '/discord/link').then(load),
   });
   const l = info && info.link;
@@ -78,7 +79,7 @@ export function DiscordSettings() {
   for (const p of info ? info.players : []) if (!browsers.has(p.device)) browsers.set(p.device, p.device_name || '另一個瀏覽器');
   return html`<h2 class="section-title">Discord 狀態</h2>
     <div class="card pad discord-settings">
-      <div class="sub">像 Spotify 一樣，在你的 Discord 個人狀態顯示 Kanade 正在播放的歌（「正在聽 Kanade」）。由伺服器回報，電腦和手機都不用另外安裝程式；只有在播放時才會連上 Discord（選了暫停時顯示，暫停後最多再顯示 10 分鐘）。會送出歌名，以及下面選擇的歌手、專輯、進度和專輯封面的圖片網址；不會送出音檔網址或登入資訊。</div>
+      <div class="sub">像 Spotify 一樣，在你的 Discord 個人狀態顯示 ${siteName()} 正在播放的歌（「正在聽 ${siteName()}」）。由伺服器回報，電腦和手機都不用另外安裝程式；只有在播放時才會連上 Discord（選了暫停時顯示，暫停後最多再顯示 10 分鐘）。會送出歌名，以及下面選擇的歌手、專輯、進度和專輯封面的圖片網址；不會送出音檔網址或登入資訊。</div>
       <${ErrorBox} error=${error} onRetry=${load} />
       ${!info && !error && html`<${Spinner} />`}
       ${info && html`<${AppForm} info=${info} onSaved=${load} />`}
@@ -110,7 +111,7 @@ export function DiscordSettings() {
         <label class="field">專輯封面
           <select value=${l.show.cover || 'bangumi'} onChange=${(e) => change({ show: { cover: e.target.value } })}>
             <option value="bangumi">只用專輯綁定的 Bangumi 條目封面（公開圖片）</option>
-            <option value="all">也用 Kanade 的封面（會產生公開的封面網址）</option>
+            <option value="all">也用 ${siteName()} 的封面（會產生公開的封面網址）</option>
             <option value="none">不顯示封面</option>
           </select></label>
         ${l.show.cover === 'all' && html`<p class="hint tight">沒有 Bangumi 條目的專輯，會用一個無法猜到、只有封面圖片的公開網址讓 Discord 抓取；這個網址會出現在 Discord 的狀態資料裡（看得到你的網域）。改回其他選項後網址即失效。</p>`}
@@ -118,7 +119,7 @@ export function DiscordSettings() {
           <select value=${l.status} onChange=${(e) => change({ status: e.target.value })}>
             ${statuses.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
           </select></label>
-        <p class="hint tight">Kanade 播放時會以這個狀態連上 Discord；你在其他裝置上線時，Discord 會合併顯示。若你在 Discord 設成隱身，播放時好友仍可能看到你。</p>
+        <p class="hint tight">${siteName()} 播放時會以這個狀態連上 Discord；你在其他裝置上線時，Discord 會合併顯示。若你在 Discord 設成隱身，播放時好友仍可能看到你。</p>
       </div>`}
     </div>`;
 }
@@ -146,7 +147,7 @@ function AppForm({ info, onSaved }) {
   return html`<details class="app-setup" open=${!(info.client_id && info.has_secret)}>
     <summary>Discord 應用程式${info.client_id ? `：${info.client_id}` : '（還沒設定）'}</summary>
     <ol class="steps">
-      <li>到 <a class="link" href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer">Discord Developer Portal</a> 建立應用程式，名稱填「Kanade」（狀態會顯示「正在聽 Kanade」）；可以在 App Icon 上傳圖示。</li>
+      <li>到 <a class="link" href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer">Discord Developer Portal</a> 建立應用程式，名稱填「${siteName()}」（狀態會顯示「正在聽」加上應用程式的名稱，之後改了站名，這裡也要一起改）；可以在 App Icon 上傳圖示。</li>
       <li>左側「Discord Social SDK」→「Getting Started」填表送出，開啟 Social SDK（這樣 Discord 才會給「更新狀態」的權限；不需要下載 SDK）。</li>
       <li>「OAuth2」→「Redirects」加入下面這個網址並儲存：
         <div class="command"><code>${info.redirect_uri}</code><button class="btn text" onClick=${copy}><${Icon} name="copy" />複製</button></div></li>

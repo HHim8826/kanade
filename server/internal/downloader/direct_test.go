@@ -199,7 +199,7 @@ func TestDirectLinksRefused(t *testing.T) {
 	}
 	for path, want := range map[string]string{
 		"/page":        "web page",
-		"/setup.exe":   "not a file Kanade imports",
+		"/setup.exe":   "not a file that can be imported",
 		"/stream.flac": "does not say how large",
 		"/gone.zip":    "HTTP 404",
 	} {

@@ -256,6 +256,9 @@ func playing(seq int64, state, title string, pos int64) presence.Report {
 // renewed; unlinking revokes it.
 func TestServiceShowsWhatPlays(t *testing.T) {
 	s, f, hub, _ := setup(t)
+	var name atomic.Pointer[string]
+	name.Store(new("Kanade"))
+	s.Name = func() string { return *name.Load() }
 	if _, err := s.Begin(context.Background(), 1); !errors.Is(err, ErrInvalid) {
 		t.Fatalf("no application yet: %v", err)
 	}
@@ -291,8 +294,10 @@ func TestServiceShowsWhatPlays(t *testing.T) {
 	if p := f.next(3); p["status"] != "online" || p["activities"].([]any)[0].(map[string]any)["assets"].(map[string]any)["large_text"] != nil {
 		t.Fatalf("changed %v", p)
 	}
+	// The site renamed: the next status is named so.
+	name.Store(new("奏の音楽室"))
 	hub.Put(1, 7, "tab-a-1234", playing(2, presence.Paused, "Undine", 40_000))
-	if a := f.next(3)["activities"].([]any)[0].(map[string]any); a["state"] != "Round Table · 已暫停" || a["timestamps"] != nil {
+	if a := f.next(3)["activities"].([]any)[0].(map[string]any); a["state"] != "Round Table · 已暫停" || a["timestamps"] != nil || a["name"] != "奏の音楽室" {
 		t.Fatalf("paused, shown %v", a)
 	}
 	// Stopped: cleared, then the connection goes.
@@ -396,14 +401,14 @@ func TestServiceShowsCover(t *testing.T) {
 
 func TestActivity(t *testing.T) {
 	now := time.UnixMilli(1_800_000_000_000)
-	a := Activity(presence.Shown{State: presence.Playing, Title: "A", Artist: "B", Album: "C", PositionMS: 1000, DurationMS: 5000}, "", now)
+	a := Activity("Kanade", presence.Shown{State: presence.Playing, Title: "A", Artist: "B", Album: "C", PositionMS: 1000, DurationMS: 5000}, "", now)
 	if a["details"] != "A ♪" || a["state"] != "B · C" || a["assets"] != nil || a["timestamps"].(map[string]any)["start"] != now.UnixMilli()-1000 {
 		t.Fatalf("%v", a)
 	}
-	if Activity(presence.Shown{State: "none"}, "", now) != nil {
+	if Activity("Kanade", presence.Shown{State: "none"}, "", now) != nil {
 		t.Fatal("none")
 	}
-	long := Activity(presence.Shown{State: presence.Playing, Title: strings.Repeat("長", 300)}, "", now)
+	long := Activity("Kanade", presence.Shown{State: presence.Playing, Title: strings.Repeat("長", 300)}, "", now)
 	if n := len([]rune(long["details"].(string))); n != 128 {
 		t.Fatal(n)
 	}

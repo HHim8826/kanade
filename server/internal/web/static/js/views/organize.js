@@ -3,6 +3,7 @@ import { api, get, post } from '../api.js';
 import { forgetAlbums } from '../effects.js';
 import { go, href } from '../router.js';
 import { createStore, useStore } from '../store.js';
+import { siteName } from '../site.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { hasKana, parseVGMdb } from '../vgmdb.js';
 
@@ -181,7 +182,7 @@ function TrackEditor({ id, close }) {
   const destroy = () => confirmDialog({
     title: '永久刪除歌曲', action: '永久刪除', danger: true,
     children: html`<p>要永久刪除「${d.title}」嗎？</p>
-      <p class="hint">會一併刪除它在所有專輯的收錄、歌單項目、收藏、歌詞與播放記錄。沒有其他歌曲使用的音檔會移到 Google Drive 垃圾桶（30 天內可在 Drive 還原）。這個操作無法在 Kanade 撤回。</p>`,
+      <p class="hint">會一併刪除它在所有專輯的收錄、歌單項目、收藏、歌詞與播放記錄。沒有其他歌曲使用的音檔會移到 Google Drive 垃圾桶（30 天內可在 Drive 還原）。這個操作無法在 ${siteName()} 撤回。</p>`,
     onConfirm: async () => {
       const r = await api('DELETE', '/tracks/' + id);
       changed();
@@ -251,7 +252,7 @@ function AlbumEditor({ album, close }) {
   return html`<${Dialog} title="編輯專輯資訊" wide onClose=${close} actions=${html`
       <button class="btn text" onClick=${close}>取消</button>
       <button class="btn filled" disabled=${busy} onClick=${save}>儲存</button>`}>
-    <p class="hint">只改 Kanade 的資料，不改寫音檔。每次儲存都會記在修改紀錄，可以撤回。</p>
+    <p class="hint">只改 ${siteName()} 的資料，不改寫音檔。每次儲存都會記在修改紀錄，可以撤回。</p>
     <div class="form-grid">
       <${Field} label="專輯名稱" value=${f.title} onInput=${set('title')} wide />
       <${Field} label="專輯歌手" value=${f.album_artist} onInput=${set('album_artist')} />
@@ -335,7 +336,7 @@ function RemoveAlbum({ album, close }) {
       <label class=${mode === 'keep' ? 'on' : ''}><input type="radio" checked=${mode === 'keep'} onChange=${() => setMode('keep')} />
         <span><b>只移除專輯</b><span class="sub">歌曲留在「歌曲」分頁，音檔不動。可在修改紀錄撤回。</span></span></label>
       <label class=${mode === 'delete' ? 'on' : ''}><input type="radio" checked=${mode === 'delete'} onChange=${() => setMode('delete')} />
-        <span><b>連同歌曲永久刪除</b><span class="sub">只在這張專輯的歌曲從曲庫刪除，音檔移到 Google Drive 垃圾桶（30 天內可在 Drive 還原），無法在 Kanade 撤回。也收錄在其他專輯的歌曲與音檔不受影響。</span></span></label>
+        <span><b>連同歌曲永久刪除</b><span class="sub">只在這張專輯的歌曲從曲庫刪除，音檔移到 Google Drive 垃圾桶（30 天內可在 Drive 還原），無法在 ${siteName()} 撤回。也收錄在其他專輯的歌曲與音檔不受影響。</span></span></label>
     </div>
   <//>`;
 }
@@ -628,7 +629,7 @@ function VGMdbImport({ album, close }) {
     return html`<${Dialog} title="從 VGMdb 匯入" wide onClose=${close} actions=${html`
         <button class="btn text" onClick=${close}>取消</button>
         <button class="btn filled" disabled=${!text.trim()} onClick=${() => read({ text })}>讀取</button>`}>
-      <p class="hint">VGMdb 沒有開放 API，也會擋下伺服器的連線，所以請在你自己的瀏覽器打開專輯頁，複製後貼到這裡。Kanade 不會連到 vgmdb.net；只有在你選擇套用封面時，才會從 VGMdb 的圖片網址（media.vgm.io）下載封面。</p>
+      <p class="hint">VGMdb 沒有開放 API，也會擋下伺服器的連線，所以請在你自己的瀏覽器打開專輯頁，複製後貼到這裡。${siteName()} 不會連到 vgmdb.net；只有在你選擇套用封面時，才會從 VGMdb 的圖片網址（media.vgm.io）下載封面。</p>
       <ol class="steps">
         <li>搜尋「${words}」：<a class="link" href=${search} target="_blank" rel="noopener noreferrer">在 VGMdb 搜尋</a>，找不到時
           <a class="link" href=${google} target="_blank" rel="noopener noreferrer">用 Google 搜尋 VGMdb</a>；打開對的專輯頁。</li>

@@ -1,6 +1,8 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get, post } from '../api.js';
 import { loginWithPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
+import { iconURL, site } from '../site.js';
+import { useStore } from '../store.js';
 import { ErrorBox, Icon, html } from '../ui.js';
 
 export function Login({ onLogin }) {
@@ -8,6 +10,7 @@ export function Login({ onLogin }) {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const s = useStore(site);
   // The passkey button shows only once a passkey was added (in the settings) and the browser can use
   // it. The form shows once that is known, whole, so nothing moves under the user's hands: null is
   // still asking, for at most three seconds; a failure or no answer shows the password alone.
@@ -48,7 +51,7 @@ export function Login({ onLogin }) {
   if (passkeys === null) return html`<main class="login" aria-busy="true"><div class="spinner late"></div></main>`;
   return html`<main class="login">
     <form class="card pad login-card" onSubmit=${submit}>
-      <div class="brand"><${Icon} name="library" size=${40} /><h1>Kanade</h1></div>
+      <div class="brand">${s.icon ? html`<img class="brand-icon" src=${iconURL(s.icon, 192)} alt="" />` : html`<${Icon} name="library" size=${40} />`}<h1>${s.name}</h1></div>
       <label class="field"><span>帳號</span><input autocomplete="username" value=${username} onInput=${(e) => setUsername(e.target.value)} required /></label>
       <label class="field"><span>密碼</span><input type="password" autocomplete="current-password" value=${password} onInput=${(e) => setPassword(e.target.value)} required /></label>
       <${ErrorBox} error=${error} />

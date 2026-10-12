@@ -44,6 +44,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
+	"github.com/HHim8826/kanade/server/internal/site"
 	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
@@ -176,6 +177,10 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 		return err
 	}
 	store := &settings.Store{DB: d}
+	named, err := site.Open(ctx, d)
+	if err != nil {
+		return err
+	}
 	res, err := store.Resources(ctx)
 	if err != nil {
 		return err
@@ -319,7 +324,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
-		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Lite: lites, Backup: backups, Presence: players, Discord: status})
+		Settings: store, Site: named, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Lite: lites, Backup: backups, Presence: players, Discord: status})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()

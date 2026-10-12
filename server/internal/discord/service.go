@@ -66,6 +66,8 @@ type Service struct {
 	PausedFor time.Duration
 	// CoverURL is a public address of an album's picture (all: Kanade's own too), or "".
 	CoverURL func(ctx context.Context, album int64, all bool) string
+	// Name is the site's name, the activity's (nil: Kanade).
+	Name func() string
 
 	mu       sync.Mutex
 	ctx      context.Context // Run's; nil until it runs
@@ -191,7 +193,7 @@ func (s *Service) Begin(ctx context.Context, user int64) (string, error) {
 }
 
 var (
-	ErrState = errors.New("this link request is unknown or expired: start again from Kanade's settings page")
+	ErrState = errors.New("this link request is unknown or expired: start again from the settings page")
 	// ErrScope is a link without the presence permission: the application has no Social SDK.
 	ErrScope = errors.New("Discord did not grant the presence permission; turn on the Social SDK for the application")
 )
@@ -528,10 +530,14 @@ func (s *Service) follow(ctx context.Context, user int64) {
 				}
 			}
 		}
-		act := Activity(shown, image, time.Now())
+		name := "Kanade"
+		if s.Name != nil {
+			name = s.Name()
+		}
+		act := Activity(name, shown, image, time.Now())
 		key := []byte("none")
 		if act != nil {
-			key, _ = json.Marshal([]any{shown.State, shown.Title, shown.Artist, shown.Album, shown.DurationMS > 0, l.Status, image})
+			key, _ = json.Marshal([]any{shown.State, shown.Title, shown.Artist, shown.Album, shown.DurationMS > 0, l.Status, image, name})
 			key = fmt.Appendf(key, "|%d|%s", p.Changed, p.Player)
 		}
 		switch {

@@ -81,7 +81,7 @@ func probe(ctx context.Context, uri string) ([]byte, *direct, error) {
 	case ctype == "text/html" || ctype == "application/xhtml+xml":
 		return nil, nil, errors.New("the link opens a web page, not a file: use the link of the file itself (or of its .torrent)")
 	default:
-		return nil, nil, fmt.Errorf("%q is not a file Kanade imports: a direct download is an audio file or a .zip of them", name)
+		return nil, nil, fmt.Errorf("%q is not a file that can be imported: a direct download is an audio file or a .zip of them", name)
 	}
 	if resp.ContentLength <= 0 {
 		return nil, nil, errors.New("the server does not say how large the file is, so no staging space can be set aside for it")

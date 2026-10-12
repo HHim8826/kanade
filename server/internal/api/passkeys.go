@@ -183,7 +183,7 @@ func (s *Server) passkeyOptions(w http.ResponseWriter, r *http.Request) {
 		params = append(params, credParam{"public-key", alg})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"challenge": b64(ch), "rp": map[string]string{"id": rp.ID, "name": "Kanade"},
+		"challenge": b64(ch), "rp": map[string]string{"id": rp.ID, "name": s.site.Name()},
 		"user":             map[string]any{"id": b64(auth.UserHandle(uid)), "name": name, "displayName": name},
 		"pubKeyCredParams": params, "timeout": 300000, "excludeCredentials": exclude, "attestation": "none",
 		"authenticatorSelection": map[string]any{"residentKey": "required", "requireResidentKey": true, "userVerification": "required"},

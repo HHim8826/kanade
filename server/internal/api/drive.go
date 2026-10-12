@@ -91,7 +91,7 @@ func (s *Server) driveAuthPaste(w http.ResponseWriter, r *http.Request) {
 // It only succeeds with a state that an authenticated /drive/auth call created.
 func (s *Server) oauthCallback(w http.ResponseWriter, r *http.Request) {
 	st, err := s.drive.Complete(r.Context(), r.URL.Query())
-	title, msg, code := "授權完成", "Kanade 已連線 Google Drive，可以關閉這個頁面。", http.StatusOK
+	title, msg, code := "授權完成", s.site.Name()+" 已連線 Google Drive，可以關閉這個頁面。", http.StatusOK
 	if err != nil {
 		title, msg, code = "授權未完成", err.Error(), http.StatusBadRequest
 		if errors.Is(err, gdrive.ErrBadState) {

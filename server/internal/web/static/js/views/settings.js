@@ -10,6 +10,7 @@ import { DiscordSettings } from './discord.js';
 import { DevicesSettings } from './remote.js';
 import { BangumiAccount } from './bangumi.js';
 import { href } from '../router.js';
+import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName } from '../site.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
 import { StatsTimeZone } from './stats.js';
@@ -334,9 +335,11 @@ function PlaybackSettings() {
     </div>`;
 }
 
-// Appearance: the color theme and light or dark, applied at once and kept in this browser.
+// Appearance: the color theme, light or dark, and what the tab's title says, applied at once and
+// kept in this browser.
 function Appearance() {
   const [t, setT] = useState(loadTheme);
+  const info = useStore(site, (v) => v.info);
   const choose = (patch) => {
     const next = { ...t, ...patch };
     setT(next);
@@ -354,6 +357,70 @@ function Appearance() {
         ${modes.map(([k, label]) => html`<button type="button" class="choice" role="radio" aria-checked=${t.mode === k}
           onClick=${() => choose({ mode: k })}>${label}</button>`)}
       </div>
+      <${Toggle} label="分頁標題顯示播放進度" sub=${`在分頁標題的站名後面顯示播放狀態、進度和歌名，例如「${siteName()} · ▶ 1:23 / 3:45 · 歌名」。`}
+        checked=${info} onChange=${setTitleInfo} />
+      <p class="hint tight">這些設定存在這個瀏覽器。</p>
+    </div>`;
+}
+
+// SiteSettings: the site's name and icon, the whole service's like the settings below it. A bad
+// name or image is said in the page's words (the server's reason).
+const siteReasons = {
+  name: '站名最多 32 個字，不能含換行等控制字元。',
+  format: '只接受 PNG、JPEG 或 WebP 圖片。',
+  small: '圖片的短邊至少要 64 像素。',
+  large: '圖片太大：上限 10 MB、2500 萬像素。',
+};
+
+function SiteSettings({ first }) {
+  const data = useSection('/site', first);
+  const [name, setName] = useState(null); // as typed; null: as saved
+  const [busy, setBusy] = useState(false);
+  const v = data.data;
+  if (!v) return html`<h2 class="section-title">網站</h2><div class="card pad"><${ErrorBox} error=${data.error} onRetry=${data.reload} /></div>`;
+  const change = async (method, path, body, done, opts) => {
+    setBusy(true);
+    try {
+      const r = await api(method, path, body, opts);
+      data.reload(r);
+      applySite(r);
+      toast(done);
+      return true;
+    } catch (e) {
+      toast((e.body && siteReasons[e.body.reason]) || e.message, 'error');
+      return false;
+    } finally {
+      setBusy(false);
+    }
+  };
+  const typed = name === null ? v.name : name;
+  const tooLong = [...typed.trim()].length > 32;
+  const saveName = async () => {
+    if (await change('PUT', '/site', { name: typed.trim() }, typed.trim() ? '已更改站名' : `已恢復為「${v.default}」`)) setName(null);
+  };
+  const pick = (e) => {
+    const f = e.target.files[0];
+    e.target.value = '';
+    if (!f) return;
+    if (!/^image\/(png|jpeg|webp)$/.test(f.type)) return toast(siteReasons.format, 'error');
+    if (f.size > 10 << 20) return toast(siteReasons.large, 'error');
+    change('PUT', '/site/icon', f, '已更換圖示', { contentType: f.type });
+  };
+  return html`<h2 class="section-title">網站</h2>
+    <div class="card pad">
+      <label class="field"><span>站名</span>
+        <input value=${typed} placeholder=${v.default} maxlength="64" disabled=${busy} onInput=${(e) => setName(e.target.value)} /></label>
+      ${tooLong && html`<p class="hint tight state-failed">${siteReasons.name}</p>`}
+      <p class="hint tight">分頁標題、安裝的 App、登入頁、首頁與隱私權政策、Discord 狀態和新增的 passkey 都會用這個名稱；留空恢復為「${v.default}」。</p>
+      <p class="hint tight">Google 的品牌檢查會比對 OAuth 同意畫面上的應用程式名稱和首頁：改了站名，也要到 Google Auth Platform 把應用程式名稱改成一樣。Discord 狀態的「正在聽 ○○」以 Discord 應用程式的名稱為準，也要到 Developer Portal 一起改。已建立的 passkey 仍顯示建立時的名稱，照常可用。</p>
+      <div class="actions"><button class="btn filled" disabled=${busy || name === null || typed.trim() === v.name || tooLong} onClick=${saveName}>儲存站名</button></div>
+      <div class="sub">圖示</div>
+      <div class="site-icon-row">
+        <img class="site-icon" src=${v.icon ? iconURL(v.icon, 192) : builtInIcon()} alt=${v.icon ? '目前的圖示' : '預設圖示'} />
+        <${FilePick} label="上傳圖片" icon="upload" accept="image/png,image/jpeg,image/webp" onPick=${pick} disabled=${busy} />
+        ${v.icon && html`<button class="btn text" disabled=${busy} onClick=${() => change('DELETE', '/site/icon', undefined, '已恢復預設圖示')}>恢復預設</button>`}
+      </div>
+      <p class="hint tight">PNG、JPEG 或 WebP，短邊至少 64 像素；會取中間的正方形，做成分頁、手機主畫面和 App 用的各種大小。已安裝的 App：Android 和電腦版 Chrome 通常一天內會更新名稱與圖示（可能會先詢問）；iPhone 主畫面上的要刪掉重新加入。</p>
     </div>`;
 }
 
@@ -567,7 +634,7 @@ function Drive({ drive }) {
   return html`<div class="card pad">
     <${ErrorBox} error=${drive.error} onRetry=${drive.reload} />
     ${st && !st.has_client && html`<div class="title">尚未設定</div>
-      <div class="sub">Kanade 透過你自己在 Google Cloud 建立的 OAuth 用戶端存取 Google Drive，音樂存在你的 Drive。先建立用戶端（約 10 分鐘，設定頁會帶著做），再連線。</div>
+      <div class="sub">${siteName()} 透過你自己在 Google Cloud 建立的 OAuth 用戶端存取 Google Drive，音樂存在你的 Drive。先建立用戶端（約 10 分鐘，設定頁會帶著做），再連線。</div>
       <div class="actions"><button class="btn filled" onClick=${setup}>設定 OAuth 用戶端</button></div>`}
     ${st && st.has_client && html`${!st.connected
         ? html`<div class="title">尚未連線</div>
@@ -579,7 +646,7 @@ function Drive({ drive }) {
         : html`<div class="title">無法讀取 Google Drive</div>
           <div class="task-error">${d.account_error}</div>
           <div class="sub">${d.reconnect
-            ? `Google 不再接受這次的授權：可能已過期${st.testing_mode ? '（應用程式在「測試中」，授權 7 天後失效）' : ''}，或在 Google 帳號移除了 Kanade 的存取權。按「重新連線」重新授權。`
+            ? `Google 不再接受這次的授權：可能已過期${st.testing_mode ? '（應用程式在「測試中」，授權 7 天後失效）' : ''}，或在 Google 帳號移除了 ${siteName()} 的存取權。按「重新連線」重新授權。`
             : '可能暫時連不上 Google：稍後按「重試」。一直失敗的話，按「重新連線」重新授權。'}</div>`}
       <div class="sub break">OAuth 用戶端：${st.client_id}</div>
       <div class="actions"><button class=${'btn ' + (d.reconnect ? 'filled' : 'tonal')} onClick=${connect}><${Icon} name="refresh" />${st.connected ? '重新連線' : '連線 Google Drive'}</button>
@@ -634,10 +701,10 @@ function ClientSetup({ status, close, onSaved }) {
   return html`<${Dialog} title="設定 OAuth 用戶端" wide onClose=${close} actions=${html`
       <button class="btn text" onClick=${close}>取消</button>
       <button type="submit" form="client-form" class="btn filled" disabled=${busy || !id.trim() || !secret.trim()}>${busy ? '儲存中…' : '儲存'}</button>`}>
-    <p class="hint">Kanade 用你自己在 Google Cloud 建立的 OAuth 用戶端存取 Drive，不經過其他服務。請用要存放音樂的 Google 帳號操作：</p>
+    <p class="hint">${siteName()} 用你自己在 Google Cloud 建立的 OAuth 用戶端存取 Drive，不經過其他服務。請用要存放音樂的 Google 帳號操作：</p>
     <ol class="steps">
       <li>${cloud('projectcreate', '建立 Google Cloud 專案')}（或選一個現有的），然後${cloud('apis/library/drive.googleapis.com', '啟用 Google Drive API')}。</li>
-      <li>到 ${cloud('auth/overview', 'Google Auth Platform')} 按「開始」：應用程式名稱填 Kanade，填支援與聯絡信箱，目標對象選「外部」。</li>
+      <li>到 ${cloud('auth/overview', 'Google Auth Platform')} 按「開始」：應用程式名稱填 ${siteName()}，填支援與聯絡信箱，目標對象選「外部」。</li>
       <li>到${cloud('auth/audience', '「目標對象」')}按「發布應用程式」改為正式版。若停在「測試中」，要把自己的帳號加為測試使用者，而且授權每 7 天就失效。</li>
       <li>到${cloud('auth/clients/create', '「用戶端」建立用戶端')}：應用程式類型選「網頁應用程式」，在「已授權的重新導向 URI」新增下面這個網址。</li>
       <li>按「建立」後，用戶端密鑰只會顯示這一次：按「下載 JSON」，在下面選擇這個檔案；或複製用戶端 ID 與密鑰貼上。</li>
@@ -645,7 +712,7 @@ function ClientSetup({ status, close, onSaved }) {
     <div class="field"><span>重新導向 URI</span>
       <div class="inline-form"><input readonly value=${status.redirect_uri} onFocus=${(e) => e.target.select()} />
         <button type="button" class="btn tonal" onClick=${copy}><${Icon} name="copy" />複製</button></div></div>
-    ${status.paste && html`<p class="hint">這台的公開網址不是 https 網域，Google 不會把瀏覽器導回這裡，所以用 localhost：連線時，授權後瀏覽器會停在一個打不開的頁面，把那個網址貼回 Kanade 就完成了。之後設好 https 網域、改了公開網址（kanade-manager config），要在用戶端加上新的重新導向 URI。</p>`}
+    ${status.paste && html`<p class="hint">這台的公開網址不是 https 網域，Google 不會把瀏覽器導回這裡，所以用 localhost：連線時，授權後瀏覽器會停在一個打不開的頁面，把那個網址貼回 ${siteName()} 就完成了。之後設好 https 網域、改了公開網址（kanade-manager config），要在用戶端加上新的重新導向 URI。</p>`}
     <form id="client-form" onSubmit=${save}>
       <div class="field"><span>下載的 JSON 檔</span>
         <${FilePick} label="選擇 JSON 檔" icon="upload" accept=".json,application/json" onPick=${pick} chosen=${jsonName} /></div>
@@ -705,10 +772,10 @@ function PasteConnect({ close, onDone }) {
 // section appears above one already shown. A read that failed shows its error in its section.
 export function Settings({ onLogout }) {
   const first = useLoad(async () => {
-    const [status, drive, passkeys, sessions, conf] = await Promise.all([read('/status'), read('/drive'), read('/passkeys'),
-      read('/sessions'), read('/settings')]);
+    const [status, drive, passkeys, sessions, conf, named] = await Promise.all([read('/status'), read('/drive'), read('/passkeys'),
+      read('/sessions'), read('/settings'), read('/site')]);
     const sync = drive.data && drive.data.status.connected ? await read('/drive/sync') : null;
-    return { status, drive, passkeys, sessions, conf, sync };
+    return { status, drive, passkeys, sessions, conf, sync, named };
   }, []);
   if (!first.data) return html`<section><h1 class="page-title">設定</h1><div class="spinner late"></div></section>`;
   return html`<${SettingsPage} first=${first.data} onLogout=${onLogout} />`;
@@ -740,6 +807,7 @@ function SettingsPage({ first, onLogout }) {
     <${BangumiAccount} />
     <${StatsTimeZone} />
     <${DownloadSettings} conf=${conf} />
+    <${SiteSettings} first=${first.named} />
     <h2 class="section-title">服務</h2>
     <div class="card pad">
       <${ErrorBox} error=${status.error} onRetry=${status.reload} />

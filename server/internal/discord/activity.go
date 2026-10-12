@@ -18,14 +18,15 @@ func text(s string) string {
 	return s
 }
 
-// Activity is the Discord activity for what is shown (nil: nothing): listening to the song, by its
-// artist, from its album, and where in it as of now. image, when set, is the picture (an asset of
-// the application or an https address); the album is then its caption, else it follows the artist.
-func Activity(s presence.Shown, image string, now time.Time) map[string]any {
+// Activity is the Discord activity for what is shown (nil: nothing): listening (on the site named)
+// to the song, by its artist, from its album, and where in it as of now. image, when set, is the
+// picture (an asset of the application or an https address); the album is then its caption, else
+// it follows the artist.
+func Activity(name string, s presence.Shown, image string, now time.Time) map[string]any {
 	if s.State != presence.Playing && s.State != presence.Paused || s.Title == "" {
 		return nil
 	}
-	a := map[string]any{"type": 2, "name": "Kanade", "details": text(s.Title)}
+	a := map[string]any{"type": 2, "name": name, "details": text(s.Title)}
 	state := s.Artist
 	if image == "" && s.Album != "" {
 		if state != "" {

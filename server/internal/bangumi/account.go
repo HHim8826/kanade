@@ -28,7 +28,7 @@ const (
 var (
 	ErrInvalid   = errors.New("invalid")
 	ErrNotLinked = errors.New("not linked to Bangumi")
-	ErrState     = errors.New("this link request is unknown or expired: start again from Kanade's settings page")
+	ErrState     = errors.New("this link request is unknown or expired: start again from the settings page")
 )
 
 // Link is a Kanade account's link to a Bangumi account.

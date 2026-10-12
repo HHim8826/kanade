@@ -3,6 +3,7 @@ import { api, get, post } from '../api.js';
 import { addToPlaylist, favs } from '../actions.js';
 import { enqueue, fromEntry, playNext, playQueue } from '../player.js';
 import { go } from '../router.js';
+import { siteName } from '../site.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { Field, KindPicker, changed, done, useRunner } from './organize.js';
 import { linkAlbumsWorks } from './works.js';
@@ -163,7 +164,7 @@ function RemoveAlbums({ ids, close, onDone }) {
       <label class=${mode === 'keep' ? 'on' : ''}><input type="radio" checked=${mode === 'keep'} onChange=${() => setMode('keep')} />
         <span><b>只移除專輯</b><span class="sub">歌曲留在「歌曲」分頁，音檔不動。可在修改紀錄一次撤回。</span></span></label>
       <label class=${mode === 'delete' ? 'on' : ''}><input type="radio" checked=${mode === 'delete'} onChange=${() => setMode('delete')} />
-        <span><b>連同歌曲永久刪除</b><span class="sub">只在這些專輯的歌曲從曲庫刪除，音檔移到 Google Drive 垃圾桶（30 天內可在 Drive 還原），無法在 Kanade 撤回。也收錄在其他專輯的歌曲不受影響。</span></span></label>
+        <span><b>連同歌曲永久刪除</b><span class="sub">只在這些專輯的歌曲從曲庫刪除，音檔移到 Google Drive 垃圾桶（30 天內可在 Drive 還原），無法在 ${siteName()} 撤回。也收錄在其他專輯的歌曲不受影響。</span></span></label>
     </div>
   <//>`;
 }
@@ -306,7 +307,7 @@ function DeleteSongs({ items, close, onDone }) {
       ? html`<p class="state-failed">${left.length} 首沒能刪除：</p>
         <ul class="plain-list">${left.map((it) => html`<li key=${it.trackId}>${it.title}：${failed[it.trackId]}</li>`)}</ul>`
       : html`<p>要永久刪除這 ${left.length} 首歌嗎？</p>
-        <p class="hint">會一併刪除它們在所有專輯的收錄、歌單項目、收藏、歌詞與播放記錄。沒有其他歌曲使用的音檔會移到 Google Drive 垃圾桶（30 天內可在 Drive 還原）。這個操作無法在 Kanade 撤回。</p>`}
+        <p class="hint">會一併刪除它們在所有專輯的收錄、歌單項目、收藏、歌詞與播放記錄。沒有其他歌曲使用的音檔會移到 Google Drive 垃圾桶（30 天內可在 Drive 還原）。這個操作無法在 ${siteName()} 撤回。</p>`}
   <//>`;
 }
 

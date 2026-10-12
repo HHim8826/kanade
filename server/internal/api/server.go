@@ -43,6 +43,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
+	"github.com/HHim8826/kanade/server/internal/site"
 	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
@@ -78,6 +79,7 @@ type Deps struct {
 	Presence  *presence.Hub    // what web players play (review #135); nil: one of its own
 	Discord   *discord.Service // shows it as the Discord status; nil: one that is not run
 	Settings  *settings.Store  // the service settings the settings page changes
+	Site      *site.Store      // the site's name and icon; nil: Kanade's own
 	Staging   *staging.Budget  // shared by downloads, uploads and the importer
 	Pinned    map[string]bool  // resources given as serve flags: they win until the next start
 	StreamKey []byte           // HMAC key for signed stream URLs
@@ -96,6 +98,7 @@ type Server struct {
 	downloads   *downloader.Service
 	aria2       *downloader.Aria2
 	settings    *settings.Store
+	site        *site.Store
 	staging     *staging.Budget
 	pinned      map[string]bool
 	uploads     *uploads.Store
@@ -145,8 +148,9 @@ func New(d Deps) *Server {
 	}
 	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, lite: d.Lite, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
-		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
+		settings: d.Settings, site: d.Site, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 	d.Discord.CoverURL = srv.publicCoverURL
+	d.Discord.Name = srv.site.Name
 	return srv
 }
 
@@ -165,7 +169,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/discord/callback", s.discordCallback)
 	mux.HandleFunc("GET /oauth/bangumi/callback", s.bgmCallback)
 	mux.HandleFunc("GET /pub/covers/{id}/{file}", s.publicCover)
-	mux.Handle("GET /app/", web.Handler())
+	mux.Handle("GET /app/", web.Handler(s.site))
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
 
 	mux.Handle("POST /api/v1/setup", sameOrigin(s.setup))
@@ -187,6 +191,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /api/v1/settings/resources", s.authed(s.setResources))
 	mux.Handle("PUT /api/v1/settings/downloads", s.authed(s.setDownloads))
 	mux.Handle("PUT /api/v1/settings/drive", s.authed(s.setDriveSync))
+	mux.Handle("GET /api/v1/site", s.authed(s.siteInfo))
+	mux.Handle("PUT /api/v1/site", s.authed(s.setSiteName))
+	mux.Handle("PUT /api/v1/site/icon", s.authed(s.setSiteIcon))
+	mux.Handle("DELETE /api/v1/site/icon", s.authed(s.clearSiteIcon))
 	mux.Handle("POST /api/v1/cache/trim", s.authed(s.trimCache))
 	mux.Handle("GET /api/v1/status", s.authed(s.status))
 	mux.Handle("GET /api/v1/drive", s.authed(s.driveInfo))
@@ -529,21 +537,22 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 	})
 }
 
-// page serves an embedded page, naming this site where it says {{SITE}}.
+// page serves an embedded page, with this site's address where it says {{SITE}} and its name where
+// it says {{NAME}}.
 func (s *Server) page(name string) http.HandlerFunc {
 	body, err := pages.ReadFile(name)
 	if err != nil {
 		panic(err)
 	}
-	site := strings.TrimRight(s.cfg.PublicURL, "/")
-	if u, err := url.Parse(site); err == nil && u.Host != "" {
-		site = u.Host
+	host := strings.TrimRight(s.cfg.PublicURL, "/")
+	if u, err := url.Parse(host); err == nil && u.Host != "" {
+		host = u.Host
 	}
-	body = bytes.ReplaceAll(body, []byte("{{SITE}}"), []byte(html.EscapeString(site)))
+	body = bytes.ReplaceAll(body, []byte("{{SITE}}"), []byte(html.EscapeString(host)))
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "public, max-age=3600")
-		w.Write(body)
+		w.Header().Set("Cache-Control", "no-cache") // a renamed site shows its name at once
+		w.Write(bytes.ReplaceAll(body, []byte("{{NAME}}"), []byte(html.EscapeString(s.site.Name()))))
 	}
 }
 

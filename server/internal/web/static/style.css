@@ -296,6 +296,8 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
 input::placeholder, textarea::placeholder { color: var(--on-surface-variant); opacity: .85; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .file-pick { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; min-width: 0; }
+.site-icon-row { display: flex; align-items: center; gap: 12px 16px; flex-wrap: wrap; margin: 8px 0; }
+.site-icon { width: 64px; height: 64px; border-radius: 14px; flex: none; object-fit: cover; }
 .file-chosen { font-size: 14px; color: var(--on-surface); overflow-wrap: anywhere; min-width: 0; }
 .field .file-pick { margin-top: 2px; }
 .items li.current .sub { color: var(--primary); }
@@ -489,7 +491,8 @@ kbd { display: inline-block; min-width: 1.9em; padding: 1px 7px; border: 1px sol
 .passkeys .row > .icon { color: var(--on-surface-variant); }
 .passkeys .grow { display: flex; flex-direction: column; min-width: 0; }
 .brand { display: flex; align-items: center; gap: 12px; color: var(--primary); margin-bottom: 24px; }
-.brand h1 { font-size: 24px; margin: 0; color: var(--on-surface); }
+.brand h1 { font-size: 24px; margin: 0; color: var(--on-surface); overflow-wrap: anywhere; }
+.brand-icon { width: 40px; height: 40px; border-radius: 10px; flex: none; }
 .spinner { width: 32px; height: 32px; margin: 32px auto; border-radius: 50%; border: 3px solid var(--surface-container-high); border-top-color: var(--primary); animation: spin .8s linear infinite; }
 /* A spinner for a wait that is usually too short to see: it shows only if the wait goes on. */
 .spinner.late { animation: spin .8s linear infinite, appear 0s .4s backwards; }

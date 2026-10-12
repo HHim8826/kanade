@@ -7,6 +7,8 @@ import { checkPresence, stopPresence } from './presence.js';
 import { control, startRemote, stopRemote } from './remote.js';
 import './scrollbars.js';
 import './shortcuts.js';
+import { site } from './site.js';
+import { useStore } from './store.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
 import { Playlist } from './views/collections.js';
@@ -59,6 +61,7 @@ function Page({ route, onLogout }) {
 function App() {
   const [auth, setAuth] = useState('checking');
   const route = useRoute();
+  useStore(site, (v) => v.name); // what the pages say names the site: renamed, they say it again
   useEffect(() => {
     setUnauthorizedHandler(() => { // logged out elsewhere: nothing may keep playing (review #14)
       resetPlayer(false, true);

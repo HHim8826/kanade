@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
+import { siteName } from '../site.js';
 import { Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast } from '../ui.js';
 import { confirmDialog, useLibRev, useRunner } from './organize.js';
 import { WorkImage, bindSubject, workLine } from './works.js';
@@ -164,7 +165,7 @@ export function BangumiAccount() {
   });
   const unlink = () => confirmDialog({
     title: '解除 Bangumi 連結', action: '解除連結', danger: true,
-    children: html`<p>Kanade 會忘記這個帳號的授權，之後無法在這裡管理收藏；已綁定的條目會保留。Bangumi 沒有撤銷授權的功能，舊授權會在一週內自動失效。</p>`,
+    children: html`<p>${siteName()} 會忘記這個帳號的授權，之後無法在這裡管理收藏；已綁定的條目會保留。Bangumi 沒有撤銷授權的功能，舊授權會在一週內自動失效。</p>`,
     onConfirm: () => api('DELETE', '/bangumi/link').then(() => { forgetKept(); load(); }),
   });
   const l = info && info.link;
@@ -179,7 +180,7 @@ export function BangumiAccount() {
       ${info && html`<details class="app-setup" open=${!ready}>
         <summary>Bangumi 應用程式${info.app_id ? `：${info.app_id}` : '（還沒設定）'}</summary>
         <ol class="steps">
-          <li>到 <a class="link" href="https://bgm.tv/dev/app" target="_blank" rel="noopener noreferrer">bgm.tv/dev/app</a> 建立應用程式（名稱例如「Kanade」）。</li>
+          <li>到 <a class="link" href="https://bgm.tv/dev/app" target="_blank" rel="noopener noreferrer">bgm.tv/dev/app</a> 建立應用程式（名稱例如「${siteName()}」）。</li>
           <li>回調地址（Callback URL）填：
             <div class="command"><code>${info.redirect_uri}</code><button class="btn text" onClick=${copy}><${Icon} name="copy" />複製</button></div></li>
           <li>把 App ID 與 App Secret 填在下面。Secret 只存在伺服器上，不會再顯示。</li>
