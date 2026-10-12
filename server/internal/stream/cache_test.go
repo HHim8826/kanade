@@ -442,6 +442,42 @@ func TestPreloadNoLongerNextStops(t *testing.T) {
 	}
 }
 
+// A song played without a request here (lite mode re-encodes it) is the one played all the same:
+// the download of the one played before stops; the preload goes on (review #208).
+func TestPlayStopsTheOneBefore(t *testing.T) {
+	const size = 64 * blockSize
+	src := &slowSource{data: make([]byte, size)}
+	c, err := NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := func(id string) bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		cf := c.files[id]
+		if cf == nil {
+			return false
+		}
+		cf.mu.Lock()
+		defer cf.mu.Unlock()
+		for _, fl := range cf.fillers {
+			if !fl.done {
+				return true
+			}
+		}
+		return false
+	}
+	get(c, "a", size, "bytes=0-1000")
+	c.Prefetch("n", size)
+	if !running("a") || !running("n") {
+		t.Fatalf("a %v, n %v", running("a"), running("n"))
+	}
+	c.Play("b")
+	if cur, next := c.Playing(); cur != "b" || next != "n" || running("a") || !running("n") {
+		t.Fatalf("playing %q, next %q; a %v, n %v", cur, next, running("a"), running("n"))
+	}
+}
+
 // A prefetch waits while downloads are running; a request never does.
 func TestPrefetchWaitsItsTurn(t *testing.T) {
 	const size = 64 * blockSize

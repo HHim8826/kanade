@@ -116,9 +116,11 @@ function CollectionDialog({ album, onSaved, close }) {
       <label class="field">標籤（用空格分開，最多 10 個）
         <input value=${form.tags} onInput=${(e) => setForm({ ...form, tags: e.target.value })} /></label>
       ${tags.length > 10 && html`<p class="hint tight warn-text">標籤超過 10 個。</p>`}
-      ${[['常用標籤', data.subject_tags], ['我的標籤', data.my_tags]].map(([label, list]) => list.length > 0 && html`<div key=${label} class="tag-picks">
+      ${[['常用標籤', data.subject_tags], ['我的標籤', data.my_tags]].map(([label, list]) => list.length > 0 && html`<div key=${label} class="tag-picks"
+        role="group" aria-label=${label}>
         <span class="sub">${label}</span>
-        ${list.map((t) => html`<button key=${t} type="button" class=${'chip-check' + (tags.includes(t) ? ' on' : '')} onClick=${() => toggleTag(t)}>${t}</button>`)}
+        <div class="tag-list">${list.map((t) => html`<button key=${t} type="button" class=${'chip-check' + (tags.includes(t) ? ' on' : '')}
+          aria-pressed=${tags.includes(t)} onClick=${() => toggleTag(t)}>${tags.includes(t) && html`<${Icon} name="check" size=${16} />`}${t}</button>`)}</div>
       </div>`)}
       <label class="field">吐槽<textarea rows="3" maxLength=${1000} value=${form.comment} onInput=${(e) => setForm({ ...form, comment: e.target.value })}></textarea></label>
       <label class="check-row"><input type="checkbox" checked=${form.private} onChange=${(e) => setForm({ ...form, private: e.target.checked })} />僅自己可見</label>

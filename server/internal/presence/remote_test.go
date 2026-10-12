@@ -236,3 +236,73 @@ func TestDevices(t *testing.T) {
 		t.Fatalf("%d listed after every login ended", n)
 	}
 }
+
+// A player that has played nothing tells its controls (review #211): listed idle with them, for a
+// device controlling it to start from; still not a player (nothing for Discord, nothing kept once it
+// goes). Told before it connected, it is not kept (it tells again once connected); an older report,
+// or another account's, changes nothing.
+func TestIdleControls(t *testing.T) {
+	h := NewHub()
+	changes, stop := h.Watch(1)
+	defer stop()
+	told := func() bool {
+		select {
+		case <-changes:
+			return true
+		default:
+			return false
+		}
+	}
+	only := func() Now {
+		t.Helper()
+		list := h.Devices(1)
+		if len(list) != 1 {
+			t.Fatalf("listed %+v", list)
+		}
+		return list[0]
+	}
+	idle := Report{Device: "phone", DeviceName: "Android · Chrome", Seq: 1, State: Idle, Control: Control{Volume: 0.6, Muted: true, Mode: "order"}}
+	h.Put(1, 10, "tab-c-000", idle)
+	conn, _ := h.Connect(1, 10, "tab-c-000", "phone", "Android · Chrome")
+	told()
+	if d := only(); d.State != Idle || d.Muted || d.Volume != 0 || d.Mode != "" {
+		t.Fatalf("told before it connected: %+v", d)
+	}
+	idle.Seq = 2
+	h.Put(1, 10, "tab-c-000", idle)
+	if d := only(); !told() || d.State != Idle || !d.Muted || d.Volume != 0.6 || d.Mode != "order" || !d.Online || d.Title != "" {
+		t.Fatalf("idle: %+v", d)
+	}
+	idle.Seq = 3
+	if h.Put(1, 10, "tab-c-000", idle); told() {
+		t.Fatal("the same again is news")
+	}
+	old := idle
+	old.Seq, old.Muted = 2, false
+	h.Put(1, 10, "tab-c-000", old)
+	other := idle
+	other.Seq, other.Muted = 9, false
+	h.Put(2, 20, "tab-c-000", other)
+	if d := only(); !d.Muted || told() {
+		t.Fatalf("an older report, or another account's: %+v", d)
+	}
+	if len(h.Players(1)) != 0 || h.Pick(1, "") != nil {
+		t.Fatal("an idle player shows on Discord")
+	}
+	// It plays: a player. It stops: idle again, with its controls as they are then.
+	r := song(Playing, "One", 10_000)
+	r.Seq, r.Device, r.Control = 4, "phone", Control{AssetID: 7, Count: 1, Volume: 0.6, Muted: true, Mode: "order"}
+	h.Put(1, 10, "tab-c-000", r)
+	if d := only(); d.State != Playing || d.Title != "One" {
+		t.Fatalf("playing: %+v", d)
+	}
+	idle.Seq, idle.Muted, idle.Mode = 5, false, "shuffle"
+	h.Put(1, 10, "tab-c-000", idle)
+	if d := only(); d.State != Idle || d.Muted || d.Mode != "shuffle" || d.AssetID != 0 || d.Title != "" {
+		t.Fatalf("idle again: %+v", d)
+	}
+	h.Disconnect(conn)
+	if list := h.Devices(1); len(list) != 0 {
+		t.Fatalf("kept once gone: %+v", list)
+	}
+}

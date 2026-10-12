@@ -1,4 +1,5 @@
 import { clock, player } from './player.js';
+import { control, devices, positionOf, target } from './remote.js';
 import { createStore } from './store.js';
 import { fmtTime } from './ui.js';
 
@@ -60,22 +61,40 @@ export function applySite({ name, icon }) {
 }
 
 // The tab's title: the site's name, and while there is a song (with info on) where it is and what
-// it is, the time first since a narrow tab cuts the end: 「Kanade · ▶ 1:23 / 3:45 · 歌名」.
+// it is, the time first since a narrow tab cuts the end: 「Kanade · ▶ 1:23 / 3:45 · 歌名」. While
+// this tab controls another device, the song is that device's, as the player bar shows it (review
+// #210).
 function title() {
   const { name, info } = site.get();
+  if (!info) return name;
+  if (control.get().target) {
+    const d = target();
+    if (!d || (d.state !== 'playing' && d.state !== 'paused')) return name;
+    return line(name, d.state === 'playing', positionOf(d), d.duration_ms, d.title);
+  }
   const s = player.get(), item = s.queue[s.index];
-  if (!info || !item) return name;
+  if (!item) return name;
   const length = s.duration > 0 ? s.duration * 1000 : item.durationMs; // a queue restored is not loaded yet
-  const at = fmtTime(clock.get().time * 1000) + (length > 0 ? ' / ' + fmtTime(length) : '');
-  return `${name} · ${s.playing ? '▶' : '❚❚'} ${at} · ${item.title}`;
+  return line(name, s.playing, clock.get().time * 1000, length, item.title);
 }
 
+const line = (name, playing, at, length, song) =>
+  `${name} · ${playing ? '▶' : '❚❚'} ${fmtTime(at)}${length > 0 ? ' / ' + fmtTime(length) : ''} · ${song}`;
+
+// A device controlled goes on playing with nothing new from it: its place is worked out a second at
+// a time.
+let ticking = 0;
 function showTitle() {
   const t = title();
   if (document.title !== t) document.title = t;
+  const d = site.get().info && control.get().target && target();
+  const on = !!d && d.state === 'playing';
+  if (on && !ticking) ticking = setInterval(showTitle, 1000);
+  else if (!on && ticking) {
+    clearInterval(ticking);
+    ticking = 0;
+  }
 }
 
-site.subscribe(showTitle);
-player.subscribe(showTitle);
-clock.subscribe(showTitle);
+for (const store of [site, player, clock, control, devices]) store.subscribe(showTitle);
 showTitle();

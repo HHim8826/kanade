@@ -19,8 +19,9 @@ import (
 	"github.com/HHim8826/kanade/server/internal/ffmpeg"
 )
 
-// source serves originals from memory; a song with a gate sends its first half, then waits for the
-// gate to close (or the copy to be cancelled).
+// source serves originals from memory, each with padding the encoder drops (so what it makes is
+// smaller); a song with a gate sends its first half, then waits for the gate to close (or the copy
+// to be cancelled).
 type source struct {
 	mu     sync.Mutex
 	files  map[string][]byte
@@ -34,7 +35,18 @@ func newSource(t *testing.T) *source {
 	return &source{files: map[string][]byte{}, gates: map[string]chan struct{}{}, fail: map[string]error{}, dir: t.TempDir()}
 }
 
+const padding = "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~"
+
 func (s *source) add(id string, data []byte) Song {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data = append(data, padding...)
+	s.files[id] = data
+	return Song{DriveID: id, SHA256: "sha-" + id, Size: int64(len(data)), Format: "flac", Channels: 2}
+}
+
+// raw adds a song as it is, without padding (real files, for FFmpeg).
+func (s *source) raw(id string, data []byte) Song {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.files[id] = data
@@ -83,7 +95,9 @@ func (s *source) Hold(id string) (string, func(), bool) {
 	return p, func() {}, true
 }
 
-// encoder "encodes" by prefixing what it reads; it fails for inputs starting with "bad".
+// encoder "encodes" by prefixing what it reads, less the padding; it gives up on inputs starting
+// with "bad" once it read that much, the rest unread (as FFmpeg does data it cannot make out), and
+// keeps the padding of those starting with "big" (they come out larger).
 type encoder struct {
 	runs      atomic.Int32
 	cancelled atomic.Int32
@@ -102,18 +116,31 @@ func (e *encoder) Opus(ctx context.Context, src string, in io.Reader, dst string
 	done := make(chan struct{})
 	var data []byte
 	var err error
-	go func() { data, err = io.ReadAll(in); close(done) }()
+	go func() {
+		defer close(done)
+		head := make([]byte, 3)
+		n, err1 := io.ReadFull(in, head)
+		data, err = head[:n], err1
+		if err != nil || string(data) == "bad" {
+			return
+		}
+		rest, err2 := io.ReadAll(in)
+		data, err = append(data, rest...), err2
+	}()
 	select {
 	case <-done:
 	case <-ctx.Done():
 		e.cancelled.Add(1)
 		return ctx.Err()
 	}
+	if bytes.HasPrefix(data, []byte("bad")) {
+		return errors.New("cannot decode")
+	}
 	if err != nil {
 		return err
 	}
-	if bytes.HasPrefix(data, []byte("bad")) {
-		return errors.New("cannot decode")
+	if !bytes.HasPrefix(data, []byte("big")) {
+		data = bytes.TrimRight(data, "~")
 	}
 	return os.WriteFile(dst, append([]byte("opus:"), data...), 0o600)
 }
@@ -162,8 +189,8 @@ func TestShrinks(t *testing.T) {
 		format  string
 		bitrate int
 		want    bool
-	}{{"flac", 900_000, true}, {"flac", 0, true}, {"mp3", 128_000, false}, {"mp3", 160_000, false}, {"mp3", 320_000, true},
-		{"m4a", 256_000, true}, {"ogg", 0, false}} {
+	}{{"flac", 900_000, true}, {"flac", 0, true}, {"flac", 108_521, false}, {"flac", 160_000, false}, {"mp3", 128_000, false},
+		{"mp3", 160_000, false}, {"mp3", 320_000, true}, {"m4a", 256_000, true}, {"ogg", 0, false}} {
 		if got := Shrinks(c.format, c.bitrate); got != c.want {
 			t.Errorf("Shrinks(%s, %d) = %v", c.format, c.bitrate, got)
 		}
@@ -319,6 +346,118 @@ func TestEncodeFailureSentAsIs(t *testing.T) {
 	}
 }
 
+// FFmpeg giving up early on what it cannot make out, while the original waits for more of it (Drive
+// slow), stops the copy at once: the song is sent as it is, and its turn is free (review #207).
+func TestEncoderStopsEarly(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	a := src.add("a", []byte("bad song"))
+	src.gate("a") // the rest never comes
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err := s.Get(ctx, a)
+	var se *SourceError
+	if err == nil || ctx.Err() != nil || errors.As(err, &se) || errors.Is(err, ErrFailed) {
+		t.Fatalf("got %v (%v)", err, ctx.Err())
+	}
+	if _, err := s.Get(ctx, a); !errors.Is(err, ErrFailed) {
+		t.Fatalf("again: %v", err)
+	}
+	eventually(t, "its turn is free", func() bool { return len(s.turns) == 0 })
+}
+
+// What the original does wrong is still its own: a copy failing on its own, before FFmpeg stopped,
+// is the original's fault, not the song's (TestSourceFailure); one the request ended is the request's.
+func TestEncodeEndsWithRequest(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	a, b := src.add("a", []byte("song a")), src.add("b", []byte("song b"))
+	src.gate("a")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { _, err := s.Get(ctx, a); done <- err }()
+	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	got(t, s, context.Background(), b) // a stops: not counted as a song that failed
+	eventually(t, "a stopped", func() bool { return enc.cancelled.Load() == 1 })
+	s.mu.Lock()
+	_, bad := s.bad[a.SHA256]
+	s.mu.Unlock()
+	if bad {
+		t.Fatal("a song stopped was taken for one that failed")
+	}
+}
+
+// A song that comes out no smaller re-encoded is sent as it is, now and later, and is not made
+// ahead again (review #212).
+func TestNotSmallerSentAsIs(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	a := src.add("a", []byte("big song"))
+	for i := 0; i < 2; i++ {
+		if _, err := s.Get(context.Background(), a); !errors.Is(err, ErrNotSmaller) {
+			t.Fatalf("%d: %v", i, err)
+		}
+	}
+	s.Prefetch(a)
+	time.Sleep(20 * time.Millisecond)
+	if enc.runs.Load() != 1 || s.Has(a.SHA256) {
+		t.Fatalf("made %d times; kept: %v", enc.runs.Load(), s.Has(a.SHA256))
+	}
+	if names, _ := os.ReadDir(s.dir); len(names) != 0 {
+		t.Fatalf("left in the folder: %v", names)
+	}
+	b := src.add("b", []byte("song b")) // smaller: kept
+	if got(t, s, context.Background(), b); !s.Has(b.SHA256) {
+		t.Fatal("not kept")
+	}
+}
+
+// A song played as it is (lite mode turned off, a song lite mode sends as it is) is the song played:
+// the one being made before it stops, unless waited for or preloaded (review #208).
+func TestPlayedAsItIsStopsTheOneBefore(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	a, n := src.add("a", []byte("song a")), src.add("n", []byte("song n"))
+	src.gate("a")
+	gate := src.gate("n")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { _, err := s.Get(ctx, a); done <- err }()
+	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
+	s.Prefetch(n) // the next song, preloaded
+	eventually(t, "n started", func() bool { return src.copies.Load() == 2 })
+	s.Played("sha-b") // b plays as it is, while a's request still waits: a goes on
+	time.Sleep(20 * time.Millisecond)
+	if enc.cancelled.Load() != 0 {
+		t.Fatal("a stopped while waited for")
+	}
+	cancel() // a's request goes too: a stops, n (next) goes on
+	<-done
+	eventually(t, "a stopped", func() bool { return enc.cancelled.Load() == 1 })
+	s.Played("sha-b") // the same again: nothing more
+	close(gate)
+	eventually(t, "n made", func() bool { return s.Has(n.SHA256) })
+	if enc.cancelled.Load() != 1 {
+		t.Fatalf("%d stopped", enc.cancelled.Load())
+	}
+	// A request of the same song going and coming back (a seek) leaves it be.
+	c := src.add("c", []byte("song c"))
+	gc := src.gate("c")
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	go func() { s.Get(ctx2, c) }()
+	eventually(t, "c started", func() bool { return src.copies.Load() == 3 })
+	cancel2()
+	time.Sleep(20 * time.Millisecond)
+	close(gc)
+	if g := got(t, s, context.Background(), c); g != "opus:song c" || enc.cancelled.Load() != 1 || src.copies.Load() != 3 {
+		t.Fatalf("got %q, %d stopped, %d copies", g, enc.cancelled.Load(), src.copies.Load())
+	}
+}
+
 func TestBudgetKeepsSongsPlayedLast(t *testing.T) {
 	src, enc := newSource(t), &encoder{}
 	s := store(t, 3*(5+100), enc, src) // three files of 105 bytes
@@ -365,11 +504,7 @@ func TestUnavailableWithoutEncoder(t *testing.T) {
 // With FFmpeg: a FLAC original read from a pipe and an M4A one read from the cached copy become
 // Ogg Opus as long as the original, the same bytes each time.
 func TestFFmpeg(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	ff := ffmpeg.Find(filepath.Join(filepath.Dir(file), "..", "..", "..", "var")) // tools/ is next to the data directory
-	if ff == nil || !ff.CanOpus() {
-		t.Skip("no ffmpeg with libopus")
-	}
+	ff := withFFmpeg(t)
 	ctx := context.Background()
 	dir := t.TempDir()
 	src := newSource(t)
@@ -381,7 +516,7 @@ func TestFFmpeg(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		song := src.add(f.name, data)
+		song := src.raw(f.name, data)
 		song.Format, song.Channels = f.format, 6
 		songs = append(songs, song)
 	}
@@ -409,6 +544,57 @@ func TestFFmpeg(t *testing.T) {
 			t.Fatalf("%s: made again, different bytes", song.DriveID)
 		}
 	}
+}
+
+// With FFmpeg: a FLAC of a low bitrate (a plain tone, stereo) comes out larger as Ogg Opus, and is
+// sent as it is (review #212); data FFmpeg cannot make out, the rest of it slow to come, ends at once
+// as a song that failed (review #207).
+func TestFFmpegEdges(t *testing.T) {
+	ff := withFFmpeg(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	src := newSource(t)
+	p := filepath.Join(t.TempDir(), "low.flac")
+	out, err := exec.Command(ff.Path(), "-nostdin", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=20",
+		"-ac", "2", "-c:a", "flac", p).CombinedOutput()
+	if err != nil {
+		t.Fatalf("%v: %s", err, out)
+	}
+	data, _ := os.ReadFile(p)
+	low := src.raw("low", data)
+	s := store(t, 1<<30, ff, src)
+	if rate := len(data) * 8 / 20; rate > keepRate {
+		t.Fatalf("not a low bitrate: %d", rate)
+	}
+	if _, err := s.Get(ctx, low); !errors.Is(err, ErrNotSmaller) || s.Has(low.SHA256) {
+		t.Fatalf("got %v; kept: %v", err, s.Has(low.SHA256))
+	}
+
+	junk := append([]byte("fLaC"), make([]byte, 128<<10)...) // FFmpeg gives up on it (exit status 183)
+	bad := src.raw("bad", junk)                              // 64 KiB of it, then nothing more
+	src.gate("bad")
+	start := time.Now()
+	_, err = s.Get(ctx, bad)
+	var se *SourceError
+	if err == nil || ctx.Err() != nil || errors.As(err, &se) || errors.Is(err, ErrFailed) {
+		t.Fatalf("got %v (%v)", err, ctx.Err())
+	}
+	if _, err := s.Get(ctx, bad); !errors.Is(err, ErrFailed) {
+		t.Fatalf("again: %v", err)
+	}
+	if len(s.turns) != 0 || time.Since(start) > 10*time.Second {
+		t.Fatalf("%d turns held; took %v", len(s.turns), time.Since(start))
+	}
+}
+
+func withFFmpeg(t *testing.T) *ffmpeg.Tool {
+	t.Helper()
+	_, file, _, _ := runtime.Caller(0)
+	ff := ffmpeg.Find(filepath.Join(filepath.Dir(file), "..", "..", "..", "var")) // tools/ is next to the data directory
+	if ff == nil || !ff.CanOpus() {
+		t.Skip("no ffmpeg with libopus")
+	}
+	return ff
 }
 
 // makeTone makes a three-second 5.1 test file with tags (lite files have none).

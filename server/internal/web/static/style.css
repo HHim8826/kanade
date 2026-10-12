@@ -887,9 +887,11 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .rule-n { display: inline-flex; align-items: center; gap: 6px; }
 .rule-n input { width: 80px; }
 .rule-picks { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1 1 240px; }
-.chip-check { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; border-radius: 16px; font-size: 13px; cursor: pointer;
-  background: var(--surface-container-high); border: 0; color: var(--on-surface); font-family: inherit; }
-.chip-check.on, .chip-check:has(input:checked) { background: var(--secondary-container); color: var(--on-secondary-container); }
+.chip-check { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 16px; font-size: 13px; cursor: pointer;
+  background: transparent; border: 1px solid var(--outline-variant); color: var(--on-surface); font-family: inherit; }
+.chip-check:hover { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+.chip-check.on, .chip-check:has(input:checked) { background: var(--secondary-container); border-color: var(--secondary-container); color: var(--on-secondary-container); }
+.chip-check.on:hover, .chip-check:has(input:checked):hover { background: color-mix(in srgb, var(--on-secondary-container) 8%, var(--secondary-container)); }
 .chip-check input { margin: 0; width: 16px; height: 16px; }
 .album-pick { position: relative; }
 .pick-list { position: absolute; z-index: 5; top: 100%; left: 0; min-width: 240px; display: flex; flex-direction: column; background: var(--surface-container);
@@ -958,8 +960,12 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .stars button.on { color: #f5a623; }
 .stars .star-clear { display: grid; place-items: center; width: 30px; height: 30px; color: var(--on-surface-variant); }
 .stars .sub { margin-left: 8px; }
-.tag-picks { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: -8px 0 12px; }
-.tag-picks .sub { min-width: 4.5em; }
+.tag-picks { display: grid; grid-template-columns: 4.5em 1fr; gap: 8px; align-items: start; margin: -4px 0 12px; }
+.tag-picks .sub { padding-top: 4px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; min-width: 0; }
+.tag-list .chip-check { max-width: 100%; overflow-wrap: anywhere; text-align: start; }
+.tag-list .chip-check.on { padding-left: 5px; }
+.tag-list .chip-check svg { flex: none; }
 .check-row { display: flex; align-items: center; gap: 8px; margin: 0 0 8px; cursor: pointer; }
 .check-row input { width: 18px; height: 18px; margin: 0; }
 .collections li { flex-wrap: nowrap; gap: 12px; padding: 10px 0; }

@@ -1,6 +1,6 @@
 import { ApiError, post } from './api.js';
 import * as P from './player.js';
-import { device, deviceName, tab } from './presence.js';
+import { connected, device, deviceName, tab } from './presence.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
@@ -67,6 +67,7 @@ function connect() {
     offset = JSON.parse(e.data).now - Date.now();
     wait = 1000;
     devices.set({ connected: true });
+    connected();
   });
   es.addEventListener('players', (e) => devices.set({ list: JSON.parse(e.data), at: Date.now() }));
   es.addEventListener('command', (e) => run(JSON.parse(e.data)));

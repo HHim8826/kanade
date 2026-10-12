@@ -74,6 +74,8 @@ type Conn struct {
 	since             time.Time
 	out               chan Event
 	done              chan struct{}
+	ctl               Control // as its player told while idle
+	seq               int64   // of that report
 }
 
 func (c *Conn) Events() <-chan Event  { return c.out }
@@ -181,7 +183,7 @@ func (h *Hub) Devices(user int64) []Now {
 		if c.user != user || listed[id] {
 			continue
 		}
-		out = append(out, Now{Player: id, Device: c.device, DeviceName: c.name, State: Idle, Changed: c.since.UnixMilli(), Online: true})
+		out = append(out, Now{Player: id, Device: c.device, DeviceName: c.name, State: Idle, Changed: c.since.UnixMilli(), Control: c.ctl, Online: true})
 	}
 	for device, p := range h.recent[user] {
 		if playing[device] {

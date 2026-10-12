@@ -217,10 +217,12 @@ function NowPlayingView() {
 
 // ---- lite mode ----
 
-// quality is what the song playing comes as: re-encoded in lite mode, or its original.
+// quality is what the song playing came as: re-encoded in lite mode, or its original; asked for
+// re-encoded, it is not said to be until the server said so (review #209).
 function quality(s, item) {
   const orig = fmtQuality(item.asset);
-  return s.liteLoaded && s.liteServer !== false && shrinks(item.asset) ? `省流 Opus 128k（原檔 ${orig}）` : orig;
+  if (!s.liteLoaded || !shrinks(item.asset)) return orig;
+  return s.liteGot ? `省流 Opus 128k（原檔 ${orig}）` : s.liteGot === false ? `${orig}（省流模式：這首播放原檔）` : `${orig}（省流確認中）`;
 }
 
 function toggleLite(s) {

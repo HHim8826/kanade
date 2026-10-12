@@ -60,6 +60,7 @@ export const player = createStore({
   sleep: null, // the sleep timer (review #98): { until } (a time, ms) or { endOfTrack: true }; this device only
   blocked: false, // the browser would not start playing without a click on this page (review #138)
   liteLoaded: false, // the song loaded was asked for re-encoded (lite mode)
+  liteGot: null, // and came so (true) or as it is (false): null until the server said (review #209)
   liteServer: null, // whether the server re-encodes for lite mode: null until asked
   ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
@@ -260,8 +261,10 @@ function report(finished = false, keepalive = false) {
 // While it is on, songs come re-encoded as Ogg Opus at 128 kbit/s, about a sixth of a FLAC, when
 // this browser plays Opus and the server can make it (an FFmpeg with libopus: liteServer, asked
 // once; not known yet, the server decides). A song takes it as it is loaded: the one playing goes
-// on as it came. Lossy originals of 160 kbit/s or less come as they are: shrinks says which the
-// server re-encodes (lite.Shrinks).
+// on as it came. Originals of 160 kbit/s or less come as they are: shrinks says which the server
+// re-encodes (lite.Shrinks). One may come as it is all the same (not smaller re-encoded, or not
+// made): once its stream answered, the server says how it came (liteGot), and the player page shows
+// that (review #209, #212).
 export const LITE = 'opus128';
 export const canOpus = (() => {
   try {
@@ -270,7 +273,7 @@ export const canOpus = (() => {
     return false; // no media elements
   }
 })();
-export const shrinks = (a) => !!a && (a.format === 'flac' || a.bitrate > 160_000);
+export const shrinks = (a) => !!a && (a.bitrate > 160_000 || (a.format === 'flac' && !(a.bitrate > 0)));
 const liteQ = () => {
   const s = player.get();
   return s.lite && canOpus && s.liteServer !== false ? LITE : '';
@@ -319,7 +322,7 @@ function load(index, autoplay = true, again = false, lazy = false) {
   const q = liteQ();
   if (q) askLite();
   loadedURL = streamURL(item.assetId, q);
-  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay, liteLoaded: !!q });
+  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay, liteLoaded: !!q, liteGot: null });
   clock.set({ time: (pendingSeek || 0) / 1000 });
   applyVolume(); // this song's balance
   learn(near());
@@ -349,7 +352,18 @@ on('loadedmetadata', () => {
     audio.currentTime = pendingSeek / 1000;
     pendingSeek = null;
   }
+  askGot();
 });
+
+// askGot asks the server how the song loaded in lite mode came, once its stream answered.
+function askGot() {
+  const s = player.get(), item = s.queue[s.index];
+  if (!s.liteLoaded || s.liteGot !== null || !item || !shrinks(item.asset)) return;
+  const loaded = loads;
+  get(`/stream/${item.assetId}/lite`).then((r) => {
+    if (loads === loaded) player.set({ liteGot: !!r.lite });
+  }, () => {});
+}
 on('timeupdate', () => {
   if (!session || audio.paused) return;
   const t = audio.currentTime;

@@ -346,6 +346,18 @@ func (c *Cache) Playing() (current, next string) {
 	return c.current, c.next
 }
 
+// Play makes file id the one played without a request for it here: a song lite mode re-encodes,
+// its original read by Copy, if at all. The download of the one played before stops unless a
+// request holds it (review #208).
+func (c *Cache) Play(id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.current != id {
+		c.current = id
+		c.settleLocked()
+	}
+}
+
 // SetLean keeps the cache to the files being played while the disk is low; prefetching stops.
 func (c *Cache) SetLean(on bool) { c.lean.Store(on) }
 

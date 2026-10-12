@@ -20,7 +20,7 @@ const (
 	Playing = "playing"
 	Paused  = "paused"
 	Stopped = "stopped"
-	Idle    = "idle" // a player connected (remote.go) that has played nothing
+	Idle    = "idle" // a player connected (remote.go) that has played nothing: it tells its controls only
 )
 
 // Report is what a player tells of itself.
@@ -135,6 +135,9 @@ func (h *Hub) Put(user, session int64, id string, r Report) bool {
 			delete(h.players, id)
 			h.tell(user)
 		}
+		if r.State == Idle {
+			h.idleLocked(user, id, r)
+		}
 		return true
 	}
 	if h.recent[user][r.Device] != nil { // its browser plays again: what it played before is no news
@@ -173,6 +176,21 @@ func (h *Hub) Put(user, session int64, id string, r Report) bool {
 		h.tell(user)
 	}
 	return true
+}
+
+// idleLocked keeps what an idle player tells, its controls (review #211), with its connection: a
+// device controlling it starts from them (the volume, muted, the mode). It is not a player: no song,
+// nothing on Discord, nothing kept once it goes. Told before it connected, it tells again then.
+func (h *Hub) idleLocked(user int64, id string, r Report) {
+	c := h.conns[id]
+	if c == nil || c.user != user || r.Seq <= c.seq {
+		return
+	}
+	c.seq = r.Seq
+	if ctl := (Control{Volume: r.Volume, Muted: r.Muted, Mode: r.Mode, Blocked: r.Blocked}); ctl != c.ctl {
+		c.ctl = ctl
+		h.tell(user)
+	}
 }
 
 // jump is how far a position may be from where the clock puts it before it counts as moved (ms).

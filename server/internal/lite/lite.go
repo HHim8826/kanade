@@ -2,10 +2,11 @@
 // Opus at 128 kbit/s, about a sixth of a CD-quality FLAC. A song is made as it is played, or ahead
 // as the song preloaded next, from its original read through the stream cache into FFmpeg as it
 // arrives, and is served whole like an original (ranges, seeking, a known length): written aside,
-// then renamed in place, so a request never gets one half made. The same song asked for at once is
-// made once; two are made at a time; one that nobody waits for, plays or preloads any more stops;
-// and the folder is held to a budget, the songs played longest ago going first. Files are named
-// after their original's checksum, so they stay good across restarts.
+// then renamed in place, so a request never gets one half made. One that does not come out smaller
+// is not kept: the original is sent instead. The same song asked for at once is made once; two are
+// made at a time; one that nobody waits for, plays or preloads any more stops; and the folder is
+// held to a budget, the songs played longest ago going first. Files are named after their original's
+// checksum, so they stay good across restarts.
 package lite
 
 import (
@@ -28,11 +29,12 @@ const Quality = "opus128"
 
 const (
 	kbps = 128
-	// A lossy original of at most this many bits a second is sent as it is: encoding it again
-	// would save little and lose some.
-	keepLossy = 160_000
-	workers   = 2
-	timeout   = 15 * time.Minute
+	// An original of at most this many bits a second is sent as it is: lite mode's Ogg Opus comes
+	// to about as much (VBR, and Ogg's own), so a lossy one would lose some for little, and a lossless
+	// one would grow (review #212).
+	keepRate = 160_000
+	workers  = 2
+	timeout  = 15 * time.Minute
 	// A song that could not be made is sent as it is for this long, so the requests of one playing
 	// never get two different files (a range of each).
 	badFor = time.Hour
@@ -40,10 +42,11 @@ const (
 )
 
 // Shrinks reports whether lite mode re-encodes an original of this format and bitrate (bits a
-// second): lossless ones, and lossy ones well above the lite bitrate. The web client says the same
-// (player.js shrinks).
+// second, on average): those well above the lite bitrate, and lossless ones of a bitrate not known.
+// What comes out no smaller is sent as it is all the same (ErrNotSmaller). The web client says the
+// same (player.js shrinks).
 func Shrinks(format string, bitrate int) bool {
-	return format == "flac" || bitrate > keepLossy
+	return bitrate > keepRate || format == "flac" && bitrate <= 0
 }
 
 // Song is an original to re-encode.
@@ -78,6 +81,11 @@ func (e *SourceError) Unwrap() error { return e.Err }
 // ErrFailed is a song that could not be made a short while ago: it is sent as it is.
 var ErrFailed = errors.New("this song could not be re-encoded")
 
+// ErrNotSmaller is a song that, re-encoded, came out not even a tenth smaller than its original
+// (review #212): lossless at a low bitrate, say. It is sent as it is from then on, every request of
+// it alike.
+var ErrNotSmaller = errors.New("this song re-encoded is not smaller")
+
 type Store struct {
 	dir    string
 	budget int64
@@ -90,6 +98,7 @@ type Store struct {
 	mu            sync.Mutex
 	calls         map[string]*call
 	bad           map[string]time.Time // songs that could not be made -> until when they are sent as they are
+	plain         map[string]bool      // songs not smaller re-encoded: sent as they are until a restart
 	current, next string               // the song played last and the one preloaded last (checksums)
 	used          int64                // bytes in dir; -1 until counted
 }
@@ -108,7 +117,7 @@ func New(dir string, budget int64, enc Encoder, src Source, log *slog.Logger) (*
 		return nil, err
 	}
 	s := &Store{dir: dir, budget: budget, enc: enc, src: src, log: log, turns: make(chan struct{}, workers),
-		calls: map[string]*call{}, bad: map[string]time.Time{}, used: -1}
+		calls: map[string]*call{}, bad: map[string]time.Time{}, plain: map[string]bool{}, used: -1}
 	for _, e := range s.list() {
 		if !strings.HasSuffix(e.path, ext) || e.size == 0 {
 			os.Remove(e.path)
@@ -124,20 +133,22 @@ func (s *Store) path(sha string) string { return filepath.Join(s.dir, sha+ext) }
 
 // Get opens the lite file of song o, made first if it is not here. o is the song played: it is
 // still made when its request goes (a player asks again), until another song is played.
-// ErrFailed: it could not be made a short while ago; a *SourceError: the original did not arrive.
+// ErrFailed: it could not be made a short while ago; ErrNotSmaller: it is not worth it; a
+// *SourceError: the original did not arrive.
 func (s *Store) Get(ctx context.Context, o Song) (*os.File, error) {
 	if !s.Available() {
 		return nil, ErrFailed
 	}
 	key := o.SHA256
 	s.mu.Lock()
-	if s.current != key {
-		s.current = key
-		s.settleLocked()
-	}
+	s.playLocked(key)
 	if f, err := s.openLocked(key); err == nil {
 		s.mu.Unlock()
 		return f, nil
+	}
+	if s.plain[key] {
+		s.mu.Unlock()
+		return nil, ErrNotSmaller
 	}
 	if until, ok := s.bad[key]; ok {
 		if time.Now().Before(until) {
@@ -164,6 +175,35 @@ func (s *Store) Get(ctx context.Context, o Song) (*os.File, error) {
 		return nil, c.err
 	}
 	return s.openLocked(key)
+}
+
+// Played tells the store that song sha (a checksum) is played as it is: lite mode is off, or sends
+// it as it is. What was being made for the song played before stops, unless it is waited for or
+// preloaded, as when another song is played re-encoded (review #208).
+func (s *Store) Played(sha string) {
+	if !s.Available() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.playLocked(sha)
+}
+
+func (s *Store) playLocked(key string) {
+	if s.current != key {
+		s.current = key
+		s.settleLocked()
+	}
+}
+
+// Has reports whether song sha's lite file is here: once a request for it was answered with the
+// song re-encoded, the song it plays (review #209).
+func (s *Store) Has(sha string) bool {
+	if !s.Available() {
+		return false
+	}
+	_, err := os.Stat(s.path(sha))
+	return err == nil
 }
 
 // openLocked opens a lite file that is here, marking it played now (the budget keeps the songs
@@ -195,7 +235,7 @@ func (s *Store) Prefetch(o Song) {
 		f.Close()
 		return
 	}
-	if until, ok := s.bad[key]; ok && time.Now().Before(until) {
+	if until, ok := s.bad[key]; (ok && time.Now().Before(until)) || s.plain[key] {
 		return
 	}
 	s.startLocked(o)
@@ -230,7 +270,11 @@ func (s *Store) startLocked(o Song) *call {
 			delete(s.calls, key)
 		}
 		var se *SourceError
-		if err != nil && ctx.Err() == nil && !errors.As(err, &se) {
+		switch {
+		case errors.Is(err, ErrNotSmaller):
+			s.plain[key] = true
+			s.log.Info("lite: not smaller re-encoded; sent as it is", "file", o.DriveID, "size", o.Size)
+		case err != nil && ctx.Err() == nil && !errors.As(err, &se):
 			s.bad[key] = time.Now().Add(badFor)
 			s.log.Warn("lite: re-encoding failed; sent as it is", "file", o.DriveID, "err", err)
 		}
@@ -279,6 +323,9 @@ func (s *Store) make(ctx context.Context, o Song) error {
 	if info.Size() == 0 {
 		return errors.New("ffmpeg made an empty file")
 	}
+	if o.Size > 0 && info.Size()*10 > o.Size*9 {
+		return ErrNotSmaller
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := os.Rename(tmp.Name(), s.path(o.SHA256)); err != nil {
@@ -294,9 +341,6 @@ func (s *Store) make(ctx context.Context, o Song) error {
 	}
 	return nil
 }
-
-// errDone ends a copy of the original once FFmpeg stopped reading it.
-var errDone = errors.New("ffmpeg stopped reading")
 
 // encode writes o re-encoded to dst: read from the original as it arrives, or, for MP4 (which
 // FFmpeg reads with seeking), from the whole copy the stream cache then keeps.
@@ -317,21 +361,27 @@ func (s *Store) encode(ctx context.Context, o Song, dst string) error {
 	if err != nil {
 		return err
 	}
+	// The copy has a context of its own: one waiting for more of the original (the cache, Drive) when
+	// FFmpeg stops would not see the pipe closed until it wrote again (review #207).
+	copyCtx, stopCopy := context.WithCancel(ctx)
+	defer stopCopy()
 	var srcErr error
 	copied := make(chan struct{})
 	go func() {
 		defer close(copied)
-		srcErr = s.src.Copy(ctx, pw, o.DriveID, o.Size)
+		srcErr = s.src.Copy(copyCtx, pw, o.DriveID, o.Size)
 		pw.Close() // the end: FFmpeg reads to it
 	}()
 	err = s.enc.Opus(ctx, "pipe:0", pr, dst, kbps, downmix)
 	pr.Close() // FFmpeg is done: a copy still writing fails (EPIPE)
+	stopCopy() // and one waiting stops
 	<-copied
-	if srcErr != nil && !errors.Is(srcErr, syscall.EPIPE) {
+	stopped := errors.Is(srcErr, syscall.EPIPE) || ctx.Err() == nil && errors.Is(srcErr, context.Canceled)
+	if srcErr != nil && !stopped {
 		// Not all of it arrived: what FFmpeg made of it, if anything, is cut short.
 		return s.sourceErr(ctx, srcErr)
 	}
-	return err
+	return err // what FFmpeg said, stopping early (bad data, say) or not
 }
 
 func (s *Store) sourceErr(ctx context.Context, err error) error {

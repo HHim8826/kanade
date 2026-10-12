@@ -196,10 +196,37 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no such asset"))
 		return
 	}
-	if s.wantsLite(r, a) && s.serveLite(w, r, a) {
+	// Whichever way it comes, this song is the one played: what the server was making or downloading
+	// for the one before, the other way, stops unless a request or the preload holds it (review #208).
+	if s.wantsLite(r, a) {
+		s.cache.Play(a.DriveFileID)
+		if s.serveLite(w, r, a) {
+			return
+		}
+	}
+	s.lite.Played(a.SHA256)
+	s.cache.Serve(w, r, a.DriveFileID, a.Size, contentType(a.Format), a.SHA256)
+}
+
+// streamLite tells a player in lite mode how song id came, asked once its stream answered (review
+// #209): re-encoded when its lite file is here, as it is otherwise (lossy at a low bitrate, not
+// smaller re-encoded, not made, or a server without lite mode).
+func (s *Server) streamLite(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	s.cache.Serve(w, r, a.DriveFileID, a.Size, contentType(a.Format), a.SHA256)
+	a, err := s.lib.StreamTarget(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+	if a == nil {
+		writeError(w, http.StatusNotFound, errors.New("no such asset"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"lite": lite.Shrinks(a.Format, a.Bitrate) && s.lite.Has(a.SHA256)})
 }
 
 // wantsLite reports whether a player in lite mode (?q=opus128) gets the song re-encoded: when the
@@ -214,8 +241,8 @@ func liteSong(a *library.Asset) lite.Song {
 
 // serveLite answers with the song re-encoded for lite mode, made first if need be (the answer waits
 // for it). It reports false when the original is to be sent instead: the song could not be
-// re-encoded, now or a short while ago (lite.ErrFailed), so every request of one playing gets the
-// same file.
+// re-encoded, now or a short while ago (lite.ErrFailed), or is not smaller re-encoded
+// (lite.ErrNotSmaller), so every request of one playing gets the same file.
 func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.Asset) bool {
 	f, err := s.lite.Get(r.Context(), liteSong(a))
 	var se *lite.SourceError
