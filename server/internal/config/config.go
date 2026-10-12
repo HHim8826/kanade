@@ -119,6 +119,7 @@ const (
 	DirDownloads = "downloads"
 	DirCache     = "cache"
 	DirThumbs    = "thumbs"
+	DirLite      = "lite" // songs re-encoded for lite mode
 	DirAria2     = "aria2"
 	DirImports   = "imports" // drop folders here (e.g. over SSH) to import them
 )
@@ -130,7 +131,7 @@ func (c Config) Path(sub ...string) string {
 
 // Prepare creates the data directory tree, private to the service user.
 func (c Config) Prepare() error {
-	for _, d := range []string{"", DirStaging, DirDownloads, DirCache, DirThumbs, DirAria2, DirImports} {
+	for _, d := range []string{"", DirStaging, DirDownloads, DirCache, DirThumbs, DirLite, DirAria2, DirImports} {
 		if err := os.MkdirAll(c.Path(d), 0o700); err != nil {
 			return err
 		}

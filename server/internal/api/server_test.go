@@ -23,7 +23,8 @@ import (
 	"github.com/HHim8826/kanade/server/internal/uploads"
 )
 
-func newTestServer(t *testing.T) (*Server, http.Handler) {
+// newTestServer is a server on a fresh data directory; opts change its services first.
+func newTestServer(t *testing.T, opts ...func(*Deps)) (*Server, http.Handler) {
 	t.Helper()
 	cfg := config.Config{DataDir: t.TempDir(), PublicURL: "https://music.example"}
 	if err := cfg.Prepare(); err != nil {
@@ -41,9 +42,13 @@ func newTestServer(t *testing.T) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := New(Deps{Config: cfg, DB: d, Auth: auth.New(d), Drive: drive, Library: lib,
+	deps := Deps{Config: cfg, DB: d, Auth: auth.New(d), Drive: drive, Library: lib,
 		Importer: importer.New(d, lib, drive, cfg.Path(config.DirStaging), log), Cache: cache,
-		Uploads: uploads.New(d, cfg.Path(config.DirStaging, "uploads"), 1<<30), StreamKey: []byte("test-key"), Log: log})
+		Uploads: uploads.New(d, cfg.Path(config.DirStaging, "uploads"), 1<<30), StreamKey: []byte("test-key"), Log: log}
+	for _, o := range opts {
+		o(&deps)
+	}
+	s := New(deps)
 	return s, s.Handler()
 }
 

@@ -37,6 +37,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/lite"
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
 	"github.com/HHim8826/kanade/server/internal/presence"
@@ -71,6 +72,7 @@ type Deps struct {
 	Sync      *drivesync.Syncer
 	Loudness  *loudness.Service
 	Thumbs    *thumbs.Store    // covers made for the web client; nil: one in the data directory
+	Lite      *lite.Store      // songs re-encoded for lite mode; nil: players get the originals
 	Backup    *backup.Service  // copies of the database in Drive; nil: none
 	Bangumi   *bangumi.Client  // works' descriptions (review #94); nil: one for this version
 	Presence  *presence.Hub    // what web players play (review #135); nil: one of its own
@@ -104,6 +106,7 @@ type Server struct {
 	sync        *drivesync.Syncer
 	loudness    *loudness.Service
 	thumbs      *thumbs.Store
+	lite        *lite.Store
 	backup      *backup.Service
 	bgm         *bangumi.Client
 	bgmAccounts *bangumi.Accounts
@@ -122,6 +125,9 @@ type Server struct {
 // ThumbsBudget is the most the covers made for the web client take on disk.
 const ThumbsBudget = 256 << 20
 
+// LiteBudget is the most the songs re-encoded for lite mode take on disk: about 35 hours.
+const LiteBudget = 2 << 30
+
 // New makes the server; d.Config.TrustedProxy was checked (clientip.Parse) by the caller.
 func New(d Deps) *Server {
 	proxy, _ := clientip.Parse(d.Config.TrustedProxy)
@@ -137,7 +143,7 @@ func New(d Deps) *Server {
 	if d.Discord == nil {
 		d.Discord = discord.New(d.DB, d.Presence, d.Config.PublicURL, d.Log)
 	}
-	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
+	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, lite: d.Lite, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 	d.Discord.CoverURL = srv.publicCoverURL
@@ -676,6 +682,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"drive":          ds,
 		"aria2_ready":    s.aria2 != nil && s.aria2.Ready(),
 		"ffmpeg":         s.importer != nil && s.importer.FFmpeg != nil, // converting and splitting (D2)
+		"lite":           s.lite.Available(),                            // songs re-encoded for lite mode
 		"disk":           s.diskStatus(),
 	})
 }

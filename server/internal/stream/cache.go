@@ -603,7 +603,7 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 		return
 	}
 	if err != nil {
-		c.unavailable(w, err)
+		c.Unavailable(w, err)
 		return
 	}
 	defer c.release(cf)
@@ -616,7 +616,7 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 	if err := cf.await(r.Context(), start/blockSize); err != nil {
 		if r.Context().Err() == nil {
 			c.log.Warn("stream", "file", id, "err", err)
-			c.unavailable(w, err)
+			c.Unavailable(w, err)
 		}
 		return
 	}
@@ -626,9 +626,35 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 	}
 }
 
-// unavailable answers 503 for a file that cannot be read now, with why as JSON ({"error",
+// Copy writes the whole of file id to w as it arrives, through the cache (left there for the next
+// time), or straight from Drive when the cache has no room: an original read to be re-encoded for
+// lite mode. Drive failing again and again ends it, as it does a request.
+func (c *Cache) Copy(ctx context.Context, w io.Writer, id string, size int64) error {
+	cf, err := c.acquire(id, size)
+	if errors.Is(err, errFull) {
+		c.Stats.SourceRequests.Add(1)
+		resp, err := c.src.OpenRange(ctx, id, 0, -1)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		n, err := io.Copy(w, io.LimitReader(resp.Body, size))
+		c.Stats.SourceBytes.Add(n)
+		if err == nil && n < size {
+			err = io.ErrUnexpectedEOF
+		}
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	defer c.release(cf)
+	return cf.copyRange(ctx, w, 0, size-1)
+}
+
+// Unavailable answers 503 for a file that cannot be read now, with why as JSON ({"error",
 // "reason"}) and, unless the reason lasts (Drive not connected, the file gone), when to try again.
-func (c *Cache) unavailable(w http.ResponseWriter, err error) {
+func (c *Cache) Unavailable(w http.ResponseWriter, err error) {
 	h := w.Header()
 	for _, k := range []string{"Content-Length", "Content-Range", "ETag", "Accept-Ranges"} {
 		h.Del(k)
@@ -652,7 +678,7 @@ func (c *Cache) passThrough(w http.ResponseWriter, r *http.Request, id string, s
 	resp, err := c.src.OpenRange(r.Context(), id, start, end)
 	if err != nil {
 		if r.Context().Err() == nil {
-			c.unavailable(w, err)
+			c.Unavailable(w, err)
 		}
 		return
 	}

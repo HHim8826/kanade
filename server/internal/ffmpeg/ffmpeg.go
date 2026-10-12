@@ -31,6 +31,8 @@ type Tool struct {
 	ffmpeg, ffprobe string
 	nice            string // nice(1), when the system has it
 	mu              sync.Mutex
+	opus            sync.Once
+	hasOpus         bool
 }
 
 // Find locates FFmpeg: $KANADE_FFMPEG (the ffmpeg binary, with ffprobe beside it), then
@@ -77,9 +79,13 @@ func (t *Tool) command(ctx context.Context, bin string, args ...string) *exec.Cm
 	return cmd
 }
 
-func (t *Tool) run(ctx context.Context, args ...string) error {
+func (t *Tool) run(ctx context.Context, args ...string) error { return t.runIn(ctx, nil, args...) }
+
+// runIn runs FFmpeg reading in as its standard input (pipe:0).
+func (t *Tool) runIn(ctx context.Context, in io.Reader, args ...string) error {
 	var stderr bytes.Buffer
 	cmd := t.command(ctx, t.ffmpeg, append([]string{"-nostdin", "-hide_banner", "-v", "error", "-y"}, args...)...)
+	cmd.Stdin = in
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -307,6 +313,27 @@ func (t *Tool) PCMMD5(ctx context.Context, bits int, files ...string) (string, e
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// CanOpus reports whether this FFmpeg has the libopus encoder lite mode needs (asked once).
+func (t *Tool) CanOpus() bool {
+	t.opus.Do(func() {
+		out, err := t.command(context.Background(), t.ffmpeg, "-hide_banner", "-encoders").Output()
+		t.hasOpus = err == nil && regexp.MustCompile(`(?m)^\s*A\S*\s+libopus\s`).Match(out)
+	})
+	return t.hasOpus
+}
+
+// Opus encodes the first audio stream of src (a path, or pipe:0 reading in: a format that can be
+// read without seeking) to Ogg Opus at kbps kilobits a second, without tags or pictures, as lite
+// mode plays it. downmix makes it stereo. The output is the same bytes each time (bitexact: no
+// random stream serial), so a file made again matches one a player already read part of.
+func (t *Tool) Opus(ctx context.Context, src string, in io.Reader, dst string, kbps int, downmix bool) error {
+	args := []string{"-i", src, "-map", "0:a:0", "-map_metadata", "-1", "-c:a", "libopus", "-b:a", strconv.Itoa(kbps) + "k"}
+	if downmix {
+		args = append(args, "-ac", "2")
+	}
+	return t.runIn(ctx, in, append(args, "-fflags", "+bitexact", "-flags:a", "+bitexact", "-f", "ogg", dst)...)
 }
 
 var (

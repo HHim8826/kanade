@@ -37,6 +37,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/lite"
 	"github.com/HHim8826/kanade/server/internal/logfile"
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
@@ -206,6 +207,17 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	cache.OnWhole = loud.Cached
 	cache.Explain = gdrive.Explain
 	imp.Measure = loud.File
+	// Songs re-encoded for players in lite mode (Ogg Opus), from originals read through the cache.
+	var opus lite.Encoder
+	if imp.FFmpeg != nil && imp.FFmpeg.CanOpus() {
+		opus = imp.FFmpeg
+	} else {
+		log.Warn("no ffmpeg with libopus: players in lite mode get the original files")
+	}
+	lites, err := lite.New(cfg.Path(config.DirLite), api.LiteBudget, opus, cache, log)
+	if err != nil {
+		return err
+	}
 	streamKey, err := db.Secret(ctx, d, "stream_signing_key", 32)
 	if err != nil {
 		return err
@@ -264,7 +276,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	feeds := rss.New(d, downloads, strings.TrimRight(cfg.PublicURL, "/")+"/", log)
 	covers := thumbs.New(cfg.Path(config.DirThumbs), api.ThumbsBudget, log)
 	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace,
-		Cache: trimmed{cache, covers}, DL: downloads, UL: ups, Log: log}
+		Cache: trimmed{cache, covers, lites}, DL: downloads, UL: ups, Log: log}
 	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget}
 
 	// The settings page's settings (reviews #74, #75, #77): applied now, and again when saved.
@@ -307,7 +319,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
-		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Backup: backups, Presence: players, Discord: status})
+		Settings: store, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Lite: lites, Backup: backups, Presence: players, Discord: status})
 	go imp.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
@@ -366,14 +378,20 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	return nil
 }
 
-// trimmed is what the disk guard empties when space runs low: the stream cache, then the covers
-// made for the web client (review #157).
+// trimmed is what the disk guard empties when space runs low: the stream cache, the covers made
+// for the web client (review #157) and the songs re-encoded for lite mode.
 type trimmed struct {
 	*stream.Cache
 	covers *thumbs.Store
+	lite   *lite.Store
 }
 
-func (t trimmed) Trim() int64 { return t.Cache.Trim() + t.covers.Trim() }
+func (t trimmed) Trim() int64 { return t.Cache.Trim() + t.covers.Trim() + t.lite.Trim() }
+
+func (t trimmed) SetLean(on bool) {
+	t.Cache.SetLean(on)
+	t.lite.SetLean(on)
+}
 
 func readPassword() (string, error) {
 	fmt.Fprint(os.Stderr, "password: ")

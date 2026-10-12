@@ -24,7 +24,8 @@ export function modeFrom(p) {
 //   scope: what shuffle draws from, the queue or the whole library (#72);
 //   autoContinue: when the queue's songs run out, go on with songs from the library (#73);
 //   resume: per kind, whether choosing a song starts it over or where it was left;
-//   preload: warm the next song's stream ahead.
+//   preload: warm the next song's stream ahead;
+//   lite: lite mode, songs re-encoded to use less data (below).
 function loadPrefs() {
   let p = {};
   try {
@@ -37,6 +38,7 @@ function loadPrefs() {
     scope: p.scope === 'library' ? 'library' : 'queue',
     autoContinue: !!p.autoContinue,
     preload: p.preload !== false,
+    lite: !!p.lite,
     resume: { music: r.music === 'resume' ? 'resume' : 'start', spoken: r.spoken === 'start' ? 'start' : 'resume' },
   };
 }
@@ -57,6 +59,8 @@ export const player = createStore({
   radioError: null, // why the last pick from the library failed
   sleep: null, // the sleep timer (review #98): { until } (a time, ms) or { endOfTrack: true }; this device only
   blocked: false, // the browser would not start playing without a click on this page (review #138)
+  liteLoaded: false, // the song loaded was asked for re-encoded (lite mode)
+  liteServer: null, // whether the server re-encodes for lite mode: null until asked
   ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
 
@@ -77,9 +81,9 @@ const routed = (op, args) => remote !== null && remote(op, args);
 export const now = () => clock.get().time;
 
 function savePrefs() {
-  const { volume, muted, mode, scope, autoContinue, preload, resume } = player.get();
+  const { volume, muted, mode, scope, autoContinue, preload, lite, resume } = player.get();
   try {
-    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, preload, resume }));
+    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, preload, lite, resume }));
   } catch { /* private mode: the choice lasts for this page */ }
 }
 
@@ -89,6 +93,7 @@ function savePrefs() {
 export function setPrefs(patch) {
   player.set(patch);
   savePrefs();
+  if (patch.lite) askLite();
   const s = player.get();
   if (patch.autoContinue === false && s.radio && !(s.shuffle && s.scope === 'library') && !s.radio.chosen) {
     endRadio();
@@ -251,6 +256,33 @@ function report(finished = false, keepalive = false) {
   }, { keepalive }).catch(() => {});
 }
 
+// ---- lite mode ----
+// While it is on, songs come re-encoded as Ogg Opus at 128 kbit/s, about a sixth of a FLAC, when
+// this browser plays Opus and the server can make it (an FFmpeg with libopus: liteServer, asked
+// once; not known yet, the server decides). A song takes it as it is loaded: the one playing goes
+// on as it came. Lossy originals of 160 kbit/s or less come as they are: shrinks says which the
+// server re-encodes (lite.Shrinks).
+export const LITE = 'opus128';
+export const canOpus = (() => {
+  try {
+    return new Audio().canPlayType('audio/ogg; codecs=opus') !== '';
+  } catch {
+    return false; // no media elements
+  }
+})();
+export const shrinks = (a) => !!a && (a.format === 'flac' || a.bitrate > 160_000);
+const liteQ = () => {
+  const s = player.get();
+  return s.lite && canOpus && s.liteServer !== false ? LITE : '';
+};
+let askingLite = false;
+export function askLite() {
+  if (askingLite || player.get().liteServer !== null) return;
+  askingLite = true;
+  get('/status').then((st) => player.set({ liteServer: !!st.lite }), () => {}).finally(() => { askingLite = false; });
+}
+let loadedURL = ''; // the song loaded's stream as it was asked for, lite or not: asked again the same
+
 let pendingSeek = null; // ms to jump to once the new track can seek
 let loads = 0; // counts songs loaded: a wait begun for one song controls nothing once another began (review #125)
 let seeks = 0; // counts places asked for (seek, a bookmark): resuming found late gives way to them (review #142)
@@ -284,7 +316,10 @@ function load(index, autoplay = true, again = false, lazy = false) {
       if (loads === loaded && seeks === sought && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
   }
-  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay });
+  const q = liteQ();
+  if (q) askLite();
+  loadedURL = streamURL(item.assetId, q);
+  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay, liteLoaded: !!q });
   clock.set({ time: (pendingSeek || 0) / 1000 });
   applyVolume(); // this song's balance
   learn(near());
@@ -292,9 +327,9 @@ function load(index, autoplay = true, again = false, lazy = false) {
   if (lazy && !autoplay) {
     audio.removeAttribute('src');
     audio.load();
-    deferred = streamURL(item.assetId);
+    deferred = loadedURL;
   } else {
-    audio.src = streamURL(item.assetId);
+    audio.src = loadedURL;
   }
   if (autoplay) play().catch(refused);
   else keep(false); // a song that ended, followed by one that waits
@@ -823,7 +858,7 @@ export function resetPlayer(withReport = true, signOut = false) {
   if (signOut) { // nothing to let go of: it would be refused
     clearTimeout(retry);
     retry = 0;
-    target = told = 0;
+    target = told = '';
     signedIn++;
   }
   session = null;
@@ -1004,8 +1039,8 @@ export const endScrub = (commit) => {
 // One ask is sent at a time, for what is wanted when it is sent: one wanted no more is never sent
 // later. One that fails leaves the server's preload unknown, and is tried again a few times, further
 // and further apart (review #199); a change of what is wanted is sent at once.
-let target = 0; // the asset to preload (0: none)
-let told = 0; // what the server was told and took (null: not known)
+let target = ''; // the preload to ask for: its path, re-encoded in lite mode ('': none)
+let told = ''; // what the server was told and took (null: not known)
 let sending = false;
 let retry = 0; // the timer of the next try
 let tries = 0; // failed tries for target
@@ -1016,7 +1051,8 @@ function prefetchNext() {
   const cur = s.queue[s.index];
   if (cur && cur.qid !== warm) return; // another queue, its song not started yet
   const n = !cur || !s.preload || s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
-  const want = n ? n.assetId : 0;
+  const q = liteQ();
+  const want = n ? `/stream/${n.assetId}/prefetch${q ? '?q=' + q : ''}` : '';
   if (want !== target) {
     target = want;
     tries = 0;
@@ -1029,7 +1065,7 @@ function tell() {
   if (sending || retry || target === told || tries > 4) return;
   const want = target, my = signedIn;
   sending = true;
-  (want ? post(`/stream/${want}/prefetch`) : api('DELETE', '/stream/prefetch')).then(() => {
+  (want ? post(want) : api('DELETE', '/stream/prefetch')).then(() => {
     if (my !== signedIn) return;
     told = want;
     tries = 0;
@@ -1176,7 +1212,7 @@ on('error', async () => {
     retried = { loaded, at: where };
     if (!p.wanted) keep(false);
     if (where > 0) pendingSeek = Math.round(where * 1000);
-    audio.src = streamURL(item.assetId);
+    audio.src = loadedURL;
     if (p.wanted) play().catch(refused);
     return;
   }
@@ -1184,14 +1220,14 @@ on('error', async () => {
   player.set({ playing: false, buffering: false });
   playbackState('paused');
   keep(false); // nothing plays on
-  askAgain(item, where);
+  askAgain(where);
   cantPlay(item, why, code);
 });
 
 // askAgain has a song that failed asked for again when played, from where it stopped. The element
 // that failed is not paused, but nothing plays: stopped says so (one play plays again).
-function askAgain(item, at) {
-  deferred = streamURL(item.assetId);
+function askAgain(at) {
+  deferred = loadedURL;
   pendingSeek = Math.round(at * 1000);
 }
 const stopped = () => audio.paused || audio.error !== null;
@@ -1216,7 +1252,7 @@ function cantPlay(item, why, code) {
 let cut = null; // { since, tries, timer, asking }
 const CUT_WAIT_MS = 10 * 60_000;
 function waitForNetwork(item, at) {
-  askAgain(item, at);
+  askAgain(at);
   cut = { since: Date.now(), tries: 0, timer: 0, asking: false };
   cut.timer = setTimeout(tryCut, 2000);
   player.set({ playing: true, buffering: true });
@@ -1253,7 +1289,8 @@ addEventListener('online', () => cut && tryCut());
 document.addEventListener('visibilitychange', () => document.visibilityState === 'visible' && cut && tryCut());
 
 // streamProblem is why a song's stream cannot be read: null when it can now, a reason the server
-// gave, network (no answer within 10 s too), or another word.
+// gave, network (no answer within 10 s too), or another word. The original is asked about, lite
+// mode or not: a song re-encoded is made from it, and one being made would answer late.
 async function streamProblem(item) {
   try {
     const res = await fetch(streamURL(item.assetId), { headers: { Range: 'bytes=0-0' }, credentials: 'same-origin', signal: AbortSignal.timeout(10_000) });

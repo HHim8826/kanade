@@ -19,6 +19,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/lite"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
 
@@ -161,6 +162,9 @@ func (s *Server) streamURL(w http.ResponseWriter, r *http.Request) {
 	}
 	exp := time.Now().Add(12 * time.Hour).Unix()
 	u := fmt.Sprintf("%s/api/v1/stream/%d?exp=%d&sig=%s", strings.TrimRight(s.cfg.PublicURL, "/"), id, exp, s.streamSig(id, exp))
+	if r.URL.Query().Get("q") == lite.Quality {
+		u += "&q=" + lite.Quality
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"url": u, "expires_at": exp})
 }
 
@@ -192,7 +196,47 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no such asset"))
 		return
 	}
+	if s.wantsLite(r, a) && s.serveLite(w, r, a) {
+		return
+	}
 	s.cache.Serve(w, r, a.DriveFileID, a.Size, contentType(a.Format), a.SHA256)
+}
+
+// wantsLite reports whether a player in lite mode (?q=opus128) gets the song re-encoded: when the
+// server can, and the original is larger than lite (lite.Shrinks).
+func (s *Server) wantsLite(r *http.Request, a *library.Asset) bool {
+	return r.URL.Query().Get("q") == lite.Quality && s.lite.Available() && lite.Shrinks(a.Format, a.Bitrate)
+}
+
+func liteSong(a *library.Asset) lite.Song {
+	return lite.Song{DriveID: a.DriveFileID, SHA256: a.SHA256, Size: a.Size, Format: a.Format, Channels: a.Channels}
+}
+
+// serveLite answers with the song re-encoded for lite mode, made first if need be (the answer waits
+// for it). It reports false when the original is to be sent instead: the song could not be
+// re-encoded, now or a short while ago (lite.ErrFailed), so every request of one playing gets the
+// same file.
+func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.Asset) bool {
+	f, err := s.lite.Get(r.Context(), liteSong(a))
+	var se *lite.SourceError
+	switch {
+	case err == nil:
+	case r.Context().Err() != nil:
+		return true // the player went
+	case errors.As(err, &se):
+		s.log.Warn("stream", "file", a.DriveFileID, "lite", true, "err", se.Err)
+		s.cache.Unavailable(w, se.Err) // why, as for the original
+		return true
+	default:
+		return false
+	}
+	defer f.Close()
+	h := w.Header()
+	h.Set("Content-Type", "audio/ogg")
+	h.Set("Cache-Control", "private, max-age=86400")
+	h.Set("ETag", `"`+a.SHA256+"-"+lite.Quality+`"`)
+	http.ServeContent(w, r, "", time.Time{}, f)
+	return true
 }
 
 // prefetchStream starts filling the cache with a song a player will play next: a preload, which
@@ -209,8 +253,18 @@ func (s *Server) prefetchStream(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent) // nothing to preload: played, it says why
 		return
 	}
-	if err := s.cache.Prefetch(a.DriveFileID, a.Size); err != nil {
-		s.log.Info("prefetch", "asset", id, "err", err)
+	if s.wantsLite(r, a) {
+		// Made ahead, from the original read through the cache; an original preloaded before (lite
+		// mode turned on meanwhile) is let go of.
+		s.cache.Unprefetch()
+		s.lite.Prefetch(liteSong(a))
+	} else {
+		if s.lite != nil {
+			s.lite.Unprefetch()
+		}
+		if err := s.cache.Prefetch(a.DriveFileID, a.Size); err != nil {
+			s.log.Info("prefetch", "asset", id, "err", err)
+		}
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -219,6 +273,9 @@ func (s *Server) prefetchStream(w http.ResponseWriter, r *http.Request) {
 // preloading was turned off (review #193).
 func (s *Server) unprefetch(w http.ResponseWriter, r *http.Request) {
 	s.cache.Unprefetch()
+	if s.lite != nil {
+		s.lite.Unprefetch()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

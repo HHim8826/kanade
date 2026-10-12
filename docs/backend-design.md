@@ -18,6 +18,7 @@ DIR/
   downloads/          aria2 下載與做種資料
   cache/              串流快取（D7）
   thumbs/             封面縮圖
+  lite/               省流模式的 Opus 檔（上限 2 GB，以原檔的 SHA-256 命名，重啟後保留）
   aria2/              aria2 設定、session 檔、日誌
   logs/               服務日誌 kanade.log（10 MB 輪替、保留 5 份，P2-6）
 ```
@@ -43,10 +44,11 @@ DIR/
 | `library` | 曲庫資料模型與查詢、搜尋 |
 | `importer` | 匯入管線：解析 → 雜湊 → 去重 → 上傳 → 驗證 → 入庫 |
 | `downloader` | aria2 子程序與 JSON-RPC |
-| `ffmpeg` | FFmpeg 子程序：轉 FLAC、依 CUE 分軌、PCM MD5 驗證（P2-4） |
+| `ffmpeg` | FFmpeg 子程序：轉 FLAC、依 CUE 分軌、PCM MD5 驗證（P2-4）、省流模式的 Opus |
 | `identify` | MusicBrainz 查詢與差異比對（P2-2） |
 | `rss` | RSS／Atom 解析、輪詢、規則、自動下載（P2-5） |
 | `stream` | D7 播放快取（硬性容量上限，放不下時直接轉送） |
+| `lite` | 省流模式：播放時把原檔轉成 Opus 128k 存起來，預載下一首時先轉好 |
 | `drivesync` | Drive 變更與完整對帳、基準對帳、收件匣排程（P2-6） |
 | `diskguard` | 低磁碟監控：清快取、暫停下載、拒絕新上傳／下載（P2-6） |
 | `logfile` | 日誌檔輪替（P2-6） |
@@ -113,13 +115,13 @@ DIR/
 | `POST /login`、`POST /logout` | 登入取得 token（失敗 5 次／15 分鐘依 IP 節流，IPv6 依 /64，驗證中的請求也算；沒在這裡登入過的瀏覽器另受全體上限，回 429 `reason: throttled_all`，#148、#182）、登出。網頁登入成功時另發 `kanade_known` cookie，標示這個瀏覽器登入過。要 cookie 的登入（`"cookie": true`）需 `X-Requested-With: kanade`；登入路由拒絕瀏覽器標示為跨站的請求（審查 #60） |
 | `GET /passkeys/available`、`POST /passkeys/login/options`、`POST /passkeys/login` | 不需登入：是否有任何 passkey（登入頁據此顯示按鈕）、取得一次性 challenge、以 passkey 的回應登入（同密碼登入的節流與 cookie） |
 | `GET /passkeys`、`POST /passkeys/options`、`POST /passkeys`、`PATCH`／`DELETE /passkeys/{id}` | 列出自己的 passkey；`{"password"}` 確認密碼後取得建立選項（密碼錯回 403）；儲存裝置建立的 passkey；改名、移除 |
-| `GET /status` | Drive 連線、aria2 是否就緒 |
+| `GET /status` | Drive 連線、aria2 是否就緒、`lite`（能否轉省流檔） |
 | `GET /drive`、`POST /drive/client` | Drive 帳號與容量；載入 OAuth client JSON |
 | `POST /drive/auth`、`POST /drive/auth/paste` | 產生授權網址（回呼 `GET /oauth/google/callback`，公開但只接受本服務產生的 state）；貼上回呼網址完成授權 |
 | `GET /albums`、`GET /albums/{id}` | 專輯清單（`limit`、`offset`）與收錄 |
 | `GET /tracks`、`GET /artists`、`GET /search?q=` | 歌曲、歌手（只列有歌曲的）、搜尋；`/tracks?filter=no_album`／`no_artist` 只列沒有專輯／沒有歌手的歌曲 |
-| `GET`／`HEAD /stream/{asset_id}` | 播放（Range、D7 快取）。驗證：`Authorization` header，或 `POST /stream/{id}/url` 取得的 12 小時簽名網址 |
-| `POST /stream/{asset_id}/prefetch` | 預載下一首：記成快取的下一首並開始下載，不算播放；下載多或磁碟低時略過，回 204（#175） |
+| `GET`／`HEAD /stream/{asset_id}` | 播放（Range、D7 快取）。驗證：`Authorization` header，或 `POST /stream/{id}/url` 取得的 12 小時簽名網址。`?q=opus128`：省流模式，會轉檔的歌送轉好的 Ogg Opus（`audio/ogg`，ETag 為原檔 SHA-256 加 `-opus128`），其餘照原檔送 |
+| `POST /stream/{asset_id}/prefetch` | 預載下一首：記成快取的下一首並開始下載，不算播放；下載多或磁碟低時略過，回 204（#175）。`?q=opus128`：改成先轉好省流檔，並放掉原檔的預載 |
 | `DELETE /stream/prefetch` | 放掉預載：已經沒有下一首（或關閉預載、停止並清空），原本預載的那首若沒有請求在讀就停止下載，回 204（#193、#198） |
 | `GET /players`、`GET /players/{pid}/events` | 這個帳號的播放裝置（#138）；分頁的事件流（SSE：`hello` 伺服器時間、`players` 裝置清單、`command`、`ack`），參數 `device`、`name` |
 | `POST /players/{pid}/commands`、`POST /players/{pid}/acks` | 送指令給另一個分頁（`{from, op, args}`，對方沒連線回 409）；分頁回覆收到的指令（`{seq, ok, error, data}`），回覆轉給送出的分頁 |
@@ -175,7 +177,7 @@ DIR/
 | `POST /account/password` | `{"current", "password"}` 改自己的密碼：結束所有登入、保留 passkey（#76） |
 | `GET /sessions`、`DELETE /sessions/{id}`、`POST /sessions/end-others` | 自己的登入（裝置、最後使用）；結束一個；結束其他全部 |
 | `GET /settings`、`PUT /settings/resources`、`/settings/downloads`、`/settings/drive` | 服務設定：播放快取與暫存容量、磁碟保留空間；下載與上傳限速、同時下載數、每個種子的連線數、是否做種與分享率、時數；收件匣自動匯入、檢查間隔、資料夾靜置時間。儲存時檢查並立即套用 |
-| `POST /cache/trim` | 清空播放快取（播放中的檔案保留） |
+| `POST /cache/trim` | 清空播放快取與省流檔（播放中的檔案、省流的目前與下一首保留） |
 | `GET /tracks/random?n&kind&not` | 從全曲庫隨機挑歌（以歌曲為單位、只挑可播放的；`kind` 為 `music`、`spoken` 或 `all`）；`not` 由新到舊列出不要再挑的歌，全部挑過時從最久以前的再繞一輪（#72、#105） |
 | `GET /tasks/older?kind&before` | 更早的已結束任務，一次一頁（#68） |
 | `POST /albums/merge` | 合併多張專輯到 `into` 或新專輯（`title`、`album_artist`），`sections` 讓每張成為一個區段；`"preview": true` 只回傳計畫 |
@@ -726,6 +728,27 @@ DIR/
   - 新增兩個瀏覽器測試。`t-202` 用 Android UA，讓串流回 502、探測先扣住再放行，涵蓋 #202、#203 的情境。`t-204` 開三個瀏覽器，涵蓋 #204–#206。
   - 播放鍵量測：在 320、360、375、390、412px 寬，全螢幕播放頁與遙控頁的按鈕都是正圓；遙控播放列在等待與不等待時，各區塊寬度相同。
   - 修正前的程式在 `t-202` 失敗 8 項、在 `t-204` 失敗 12 項，修正後全部通過；原有的瀏覽器測試與 `-race` 也都通過。
+
+### 省流模式（2026-10-12）
+
+- 使用者要在音質與流量之間取捨，決定：只有一個檔位 Opus 128k、手動開關、播放時才轉並在預載下一首時先轉好（不預先轉整個曲庫）。
+- 曲庫現況（正式站資料庫備份）：1794 個 FLAC 共 137 小時，44.1k/16 位元平均 778 kbps，約每小時 350 MB；115 個 MP3 共 67 小時，多半 128k。Opus 128k 約每小時 58 MB，比 FLAC 少約 83%。
+- 哪些歌會轉（`lite.Shrinks`，網頁端 `player.js` 的 `shrinks` 與它一致）：FLAC 一律轉；有損原檔超過 160 kbps 才轉（例如 320k MP3），128k MP3 這類照原檔送，避免有損再轉有損。
+- 伺服器（`internal/lite`）：
+  - 播放器帶 `?q=opus128` 請求時才轉。原檔經過播放快取（`stream.Cache.Copy`，順便留在快取裡）一邊下載一邊用管線交給 FFmpeg（`-c:a libopus -b:a 128k`，去掉標籤與封面，超過兩聲道就混成立體聲，48 kHz）。MP4 要能跳著讀，先整個存進快取再從檔案轉。
+  - 整首轉完、寫到旁邊再改名後才送出，之後用 `http.ServeContent` 回應，所以 Range、拖進度條、總長度都和原檔一樣。這也表示第一次播放要等下載加轉檔：4 分鐘的歌轉檔約 2 秒（單核心），60 分鐘的檔案約 30–40 秒；預載的下一首會先轉好。
+  - 同一首同時只轉一次；同時最多轉兩首；沒有請求在等、也不是最後播放或預載的那首（跳過的歌）就停止。上限 2 GB（約 35 小時），超過時刪最久沒播的，保留目前與下一首；磁碟不足時跟播放快取一起清，並停止預先轉檔。
+  - 同一首的多個請求不能一半拿到 Opus、一半拿到原檔。所以輸出用 `-fflags +bitexact`（沒有隨機的串流序號），重轉的檔案每個位元組都相同；轉檔失敗的歌一小時內都直接送原檔。原檔讀不到（Drive）時回 503 和原因，和原檔一樣。
+  - 啟動時檢查 FFmpeg 有沒有 libopus（`Tool.CanOpus`）；沒有的話省流請求照原檔送，`/status` 的 `lite` 為 false。
+- 網頁端：
+  - 設定 → 播放「省流模式」，或正在播放的「⋯ → 開啟／關閉省流模式」，每台裝置各自記住（`kanade.player` 的 `lite`）。
+  - 從下一首開始生效：每首歌載入時決定要不要帶 `?q=`，出錯重試、重新整理後恢復都沿用同一個網址。正在播的不換，已預載的下一首改用省流版重新預載。
+  - 這個瀏覽器不能播 Ogg Opus（`canPlayType`），或伺服器回報不能轉時，不帶 `?q=`，設定與提示會說明原因。
+  - 出錯時的探測仍然問原檔網址：它要知道的是 Drive 與網路能不能讀，省流檔正在轉時也不會因為晚回而被當成斷線。
+  - 正在播放的格式那一行，省流時顯示「省流 Opus 128k（原檔 FLAC 44.1/16）」。
+- 驗證：
+  - Go 測試（`internal/lite`、`internal/api`）：同一首同時請求只轉一次、重啟後保留；跳過的歌停止並清掉暫存檔；預載、換預載、取消預載、磁碟不足時不預先轉；被播放又在等的那首不會因預載換掉而停止；Drive 失敗回原因且下次重試；轉檔失敗後送原檔且一段時間內不重試；容量上限保留最近播放的；沒有編碼器時照原檔。用真的 FFmpeg 把 5.1 聲道的 FLAC（管線）與 AAC（M4A，從檔案）轉出 Ogg Opus：48 kHz 立體聲、長度 3 秒、沒有標籤，重轉位元組相同。API：省流回應的 Content-Type、ETag、Range；128k MP3 與未知的 `q` 送原檔；轉檔失敗兩次都送原檔；Drive 失敗回 503；預載改成省流並放掉原檔預載；`/status`、設定的用量、簽名網址帶 `q`。
+  - Chromium（示範資料，串流由測試回應：原檔 FLAC 與伺服器參數轉出的 Opus）：預設送原檔；在設定開啟後正在播的不變、下一首預載改帶 `q`；下一首起每個請求都帶 `q`、長度 30.0 秒、拖到 20 秒後繼續播、播完接下一首；伺服器回 503 時探測問原檔、重試仍帶 `q`；從播放頁選單關閉後回到原檔；伺服器不能轉時不帶 `q`，設定與提示說明原因。
 
 ## 使用方式（開發環境）
 

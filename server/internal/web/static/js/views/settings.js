@@ -4,7 +4,7 @@ import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { EffectsPanel } from './effects.js';
 import { confirmDialog, textDialog } from './organize.js';
 import { showShortcuts } from '../shortcuts.js';
-import { player, resetPlayer, setMode, setPrefs } from '../player.js';
+import { askLite, canOpus, player, resetPlayer, setMode, setPrefs } from '../player.js';
 import { fromAgent } from '../presence.js';
 import { DiscordSettings } from './discord.js';
 import { DevicesSettings } from './remote.js';
@@ -303,7 +303,9 @@ function PlaybackSettings() {
   const s = {
     mode: useStore(player, (p) => p.mode), scope: useStore(player, (p) => p.scope), autoContinue: useStore(player, (p) => p.autoContinue),
     preload: useStore(player, (p) => p.preload), resume: useStore(player, (p) => p.resume),
+    lite: useStore(player, (p) => p.lite), liteServer: useStore(player, (p) => p.liteServer),
   };
+  useEffect(askLite, []);
   const choices = (label, list, value, pick) => html`<div class="sub">${label}</div>
     <div class="choices" role="radiogroup" aria-label=${label}>
       ${list.map(([k, text]) => html`<button type="button" class="choice" role="radio" aria-checked=${value === k} onClick=${() => pick(k)}>${text}</button>`)}
@@ -321,6 +323,9 @@ function PlaybackSettings() {
       <p class="hint tight">首頁的「繼續播放／繼續收聽」一定從記錄的位置開始；單曲與列表循環再播一次時一定從頭開始。</p>
       <${Toggle} label="預先載入下一首" sub="播放時先讓伺服器從 Drive 讀好下一首的開頭，切歌較快；網路流量有限時可以關閉。"
         checked=${s.preload} onChange=${(on) => setPrefs({ preload: on })} />
+      <${Toggle} label="省流模式" sub=${`歌曲轉成 Opus 128k 串流，每小時約 58 MB（FLAC 約 350 MB），一般聆聽很難聽出差別。從下一首開始生效；128k 這類較小的 MP3 照原檔播放。也可以在播放頁的「⋯」選單切換。${
+          !canOpus ? '這個瀏覽器不能播放 Opus，開了也會播放原檔。' : s.liteServer === false ? '伺服器的 FFmpeg 不支援 Opus，開了也會播放原檔。' : ''}`}
+        checked=${s.lite} onChange=${(on) => setPrefs({ lite: on })} />
       <div class="toggle-row">
         <span class="grow"><span class="title">鍵盤快捷鍵</span><span class="sub">空白鍵播放／暫停、← → 倒退快轉、↑ ↓ 調音量；隨時按 ? 查看全部。</span></span>
         <button class="btn tonal" onClick=${showShortcuts}>查看</button>

@@ -38,6 +38,9 @@ func (s *Server) serviceSettings(w http.ResponseWriter, r *http.Request) {
 	if s.cache != nil {
 		now["cache_mib"], usage["cache_bytes"] = s.cache.Budget()>>20, s.cache.Used()
 	}
+	if s.lite != nil {
+		usage["lite_bytes"] = s.lite.Used()
+	}
 	if s.staging != nil {
 		limit, reserve := s.staging.Limits()
 		now["staging_mib"], now["reserve_gib"], usage["staging_bytes"] = limit>>20, reserve>>30, s.staging.Used(ctx)
@@ -106,6 +109,9 @@ func (s *Server) trimCache(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, errors.New("no stream cache"))
 		return
 	}
-	freed := s.cache.Trim()
-	writeJSON(w, http.StatusOK, map[string]int64{"freed_bytes": freed, "cache_bytes": s.cache.Used()})
+	freed, kept := s.cache.Trim(), s.cache.Used()
+	if s.lite != nil { // the songs re-encoded for lite mode too, but for the one playing and the next
+		freed, kept = freed+s.lite.Trim(), kept+s.lite.Used()
+	}
+	writeJSON(w, http.StatusOK, map[string]int64{"freed_bytes": freed, "cache_bytes": kept})
 }

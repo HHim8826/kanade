@@ -65,5 +65,6 @@ export async function api(method, path, body, opts = {}) {
 export const get = (path, opts) => api('GET', path, undefined, opts);
 export const post = (path, body, opts) => api('POST', path, body, opts);
 
-export const streamURL = (assetId) => `/api/v1/stream/${assetId}`;
+// q: lite.Quality for a song re-encoded for lite mode (player.js LITE).
+export const streamURL = (assetId, q) => `/api/v1/stream/${assetId}${q ? '?q=' + q : ''}`;
 export const coverURL = (coverId, size = 300) => (coverId ? `/api/v1/covers/${coverId}?size=${size}` : null);

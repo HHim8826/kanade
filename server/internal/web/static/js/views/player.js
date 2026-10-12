@@ -2,8 +2,8 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import { ApiError, api, get, post } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import {
-  cancelSleep, clearUpcoming, clock, current, cycleMode, endScrub, extendSleep, moveItem, next, now, playAfterCurrent, playAt, player, prev,
-  removeAt, resetPlayer, retryRadio, scrubTo, seek, setPrefs, setSleep, setVolume, sleepAfterTrack, toggle, toggleMute,
+  canOpus, cancelSleep, clearUpcoming, clock, current, cycleMode, endScrub, extendSleep, moveItem, next, now, playAfterCurrent, playAt, player, prev,
+  removeAt, resetPlayer, retryRadio, scrubTo, seek, setPrefs, setSleep, setVolume, shrinks, sleepAfterTrack, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
 import { DragHandle, useReorder } from './common.js';
@@ -165,6 +165,7 @@ function NowPlayingView() {
     item.trackId && { icon: 'lyrics', label: '編輯歌詞', onClick: () => editLyrics(item) },
     item.coverId && { icon: 'image', label: '檢視封面', onClick: () => viewCover(item.coverId, item.album || item.title) },
     { icon: 'equalizer', label: '音效…', onClick: showEffects },
+    { icon: 'dataSaver', label: s.lite ? '關閉省流模式' : '開啟省流模式', onClick: () => toggleLite(s) },
   ]);
   return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放" ref=${root} onScroll=${onScroll}>
     <div class="np-top">
@@ -185,7 +186,7 @@ function NowPlayingView() {
           </div>
           ${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}
         </div>
-        <div class="quality">${fmtQuality(item.asset)}</div>
+        <div class="quality">${quality(s, item)}</div>
         <${Seek} s=${s} className="np-seek" />
         <div class="times"><span><${Elapsed} s=${s} /></span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
         <div class="np-controls">
@@ -212,6 +213,23 @@ function NowPlayingView() {
         : html`<${TrackBookmarks} item=${item} />`}
     </div>
   </div>`;
+}
+
+// ---- lite mode ----
+
+// quality is what the song playing comes as: re-encoded in lite mode, or its original.
+function quality(s, item) {
+  const orig = fmtQuality(item.asset);
+  return s.liteLoaded && s.liteServer !== false && shrinks(item.asset) ? `省流 Opus 128k（原檔 ${orig}）` : orig;
+}
+
+function toggleLite(s) {
+  const on = !s.lite;
+  setPrefs({ lite: on });
+  toast(!on ? '已關閉省流模式：下一首起播放原檔'
+    : !canOpus ? '已開啟省流模式，但這個瀏覽器不能播放 Opus，仍會播放原檔'
+      : s.liteServer === false ? '已開啟省流模式，但伺服器的 FFmpeg 不支援 Opus，仍會播放原檔'
+        : '已開啟省流模式：下一首起用 Opus 128k 播放');
 }
 
 // ---- sleep timer and bookmarks (review #98) ----
