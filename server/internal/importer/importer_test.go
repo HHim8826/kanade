@@ -96,7 +96,7 @@ func runUntilDone(t *testing.T, im *Importer, batch int64) *BatchView {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if b.State == "done" {
+		if b.State == "done" && im.finishing.Load() == 0 { // and cleared up (review #231)
 			return b
 		}
 		time.Sleep(20 * time.Millisecond)

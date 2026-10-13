@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -175,5 +176,42 @@ func TestPlayerEvents(t *testing.T) {
 	}
 	if res := post(t, srv.URL, tok, "/api/v1/players/tab-phone-1/commands", map[string]any{"from": "tab-desk-01", "op": "pause"}); res.StatusCode != http.StatusConflict {
 		t.Fatalf("sent after logout: %d", res.StatusCode)
+	}
+}
+
+// A login ended elsewhere (a password reset from the command line, which the server does not hear
+// of; the login's time up) ends its event streams at the next ping, and its device leaves the list
+// (review #230).
+func TestPlayerEventsEndWithTheLogin(t *testing.T) {
+	defer func(d time.Duration) { playerPing = d }(playerPing)
+	playerPing = 50 * time.Millisecond
+	s, h := newTestServer(t)
+	tok := loginToken(t, s, h)
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	desk := openEvents(t, srv.URL, tok, "tab-desk-01", "deskdevice01")
+	desk.wait("hello")
+	desk.wait("players")
+	for i, end := range []string{`DELETE FROM sessions WHERE id = ?`, `UPDATE sessions SET created_at = 0 WHERE id = ?`} {
+		rec := do(t, h, "POST", "/api/v1/login", "", map[string]string{"username": "admin", "password": "correct horse battery"})
+		var lr struct{ Token string }
+		json.Unmarshal(rec.Body.Bytes(), &lr)
+		tab := fmt.Sprintf("tab-spy-%02d", i)
+		spy := openEvents(t, srv.URL, lr.Token, tab, "spydevice01")
+		spy.wait("hello")
+		if list, _ := desk.wait("players"); !strings.Contains(list, tab) {
+			t.Fatalf("not listed: %s", list)
+		}
+		var session int64
+		s.db.QueryRow(`SELECT id FROM sessions ORDER BY id DESC LIMIT 1`).Scan(&session)
+		if _, err := s.db.Exec(end, session); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := spy.wait("never"); ok {
+			t.Fatalf("%s: the stream went on", end)
+		}
+		if list, _ := desk.wait("players"); strings.Contains(list, tab) {
+			t.Fatalf("%s: still listed: %s", end, list)
+		}
 	}
 }

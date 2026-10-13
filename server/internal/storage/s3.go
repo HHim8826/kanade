@@ -410,11 +410,11 @@ func (s *S3) prefixDir() string {
 }
 
 // Walk lists the files below the prefix; Kanade's own (the trash, the mark) are left out, and so
-// are what other tools list as folders.
+// are what other tools list as folders and the files in systems' folders, as in a folder.
 func (s *S3) Walk(ctx context.Context, fn func(Object) error) error {
 	return s.list(ctx, s.prefixDir(), func(name string, size int64, etag string) error {
 		key, ok := s.rel(name)
-		if !ok || key == "" || strings.HasSuffix(key, "/") || key == markFile || strings.HasPrefix(key, trashDir+"/") {
+		if !ok || key == "" || strings.HasSuffix(key, "/") || key == markFile || skipPath(key) || skipFile(path.Base(key)) {
 			return nil
 		}
 		return fn(Object{Key: key, Path: key, Size: size, Version: etag})

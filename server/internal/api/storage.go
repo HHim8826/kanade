@@ -46,13 +46,18 @@ func location(st storage.Store) string {
 	return "OneDrive " + v.Path
 }
 
+// storeInfo is a store as the settings show it. Whether it is being scanned is asked first and the
+// store read again after: a scan records what it found before it ends, so one not running any more
+// is shown with what it found, never with the scan before (review #219).
 func (s *Server) storeInfo(ctx context.Context, st storage.Store) (storeInfo, error) {
+	running := s.busy(st.ID)
+	if !running {
+		if now, err := s.files.Get(ctx, st.ID); err == nil && now != nil {
+			st = *now
+		}
+	}
 	use, err := s.lib.StoreUse(ctx, st.Kind, st.ID)
-	info := storeInfo{Store: st, Use: use, Location: location(st), SignedIn: st.SignedIn()}
-	s.storeMu.Lock()
-	info.Running = s.storeRunning[st.ID]
-	s.storeMu.Unlock()
-	return info, err
+	return storeInfo{Store: st, Use: use, Location: location(st), SignedIn: st.SignedIn(), Running: running}, err
 }
 
 func (s *Server) storageInfo(w http.ResponseWriter, r *http.Request) {
@@ -265,10 +270,12 @@ func (s *Server) checkStore(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, info)
 }
 
+// busy says whether a store is being scanned or checked: asked for here, or on schedule.
 func (s *Server) busy(id int64) bool {
 	s.storeMu.Lock()
-	defer s.storeMu.Unlock()
-	return s.storeRunning[id]
+	running := s.storeRunning[id]
+	s.storeMu.Unlock()
+	return running || (s.importer != nil && s.importer.Scanning(id)) || (s.storeSync != nil && s.storeSync.Running(id))
 }
 
 // scanStore scans a source ({"preview": true} has its new files wait in the import review), or

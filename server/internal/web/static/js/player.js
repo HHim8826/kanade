@@ -3,6 +3,7 @@ import { attach, balanceGain, learn, output, wake } from './effects.js';
 import { driveOnly } from './places.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
+import { uuid } from './uuid.js';
 
 // Queue item: { qid, assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? };
 // qid tells apart the same song queued twice.
@@ -306,7 +307,7 @@ function load(index, autoplay = true, again = false, lazy = false) {
   told = null; // the next one is preloaded again for this one, once it plays
   tries = 0;
   warm = null;
-  session = { id: crypto.randomUUID(), item, heard: 0, last: null, played: false };
+  session = { id: uuid(), item, heard: 0, last: null, played: false };
   // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
   // 0 is a place too, the start, which the settings' resuming does not override (review #106).
   pendingSeek = again ? null : item.resumeMs ?? null;
@@ -696,7 +697,7 @@ export function playAfterCurrent(i) {
 // (and its id) until it changes it.
 const SESSION = 'kanade.playback', PLACE = 'kanade.playback.at';
 const MAX_SAVED = 500; // songs kept around the one playing
-let sid = crypto.randomUUID(); // this tab's queue: a new one once the queue changes
+let sid = uuid(); // this tab's queue: a new one once the queue changes
 let savedSid = null; // the queue this tab kept last
 let restored = false; // nothing is saved before what was saved is brought back (the empty start would erase it)
 let owner = false; // what is kept is this tab's
@@ -749,7 +750,7 @@ player.subscribe((s) => { // the queue changed: saved shortly after (a burst of 
   const shape = [s.queue, s.index, s.original, s.from, s.radio];
   if (savedShape && shape.every((v, i) => v === savedShape[i])) return;
   // Other songs in it: another queue, which places kept for the old one do not fit.
-  if (savedShape && (s.queue !== savedShape[0] || s.original !== savedShape[2])) sid = crypto.randomUUID();
+  if (savedShape && (s.queue !== savedShape[0] || s.original !== savedShape[2])) sid = uuid();
   savedShape = shape;
   unsaved = true;
   clearTimeout(saveTimer);

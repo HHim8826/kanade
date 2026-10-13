@@ -7,7 +7,9 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/HHim8826/kanade/server/internal/storage/storagetest"
@@ -85,7 +87,9 @@ func TestOneDriveSource(t *testing.T) {
 	one := g.Add("Music/Album/01 One.flac", []byte("fLaC-one-0123456789"))
 	g.Add("Music/Album/02 Two.flac", []byte("fLaC-two"))
 	g.Add("Music/Album/cover.jpg", []byte("jpg"))
-	g.Add("Music/.hidden/x.flac", []byte("x"))
+	g.Add("Music/@eaDir/x.flac", []byte("x"))
+	g.Add("Music/#recycle/x.flac", []byte("x"))
+	g.Add("Music/@onefive/01.flac", []byte("fLaC-at")) // music, not a system's folder (review #223)
 	g.Add("Other/y.flac", []byte("y"))
 	s, _ := newSet(t)
 	st := signIn(t, s, g, Source)
@@ -112,7 +116,14 @@ func TestOneDriveSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	g.Fail = nil
-	if len(objs) != 3 || objs[0].Path != "Album/01 One.flac" || objs[0].Key != one || !strings.HasPrefix(objs[0].Hash, "quickxor:") || objs[0].Version == "" {
+	var paths []string
+	for _, o := range objs {
+		paths = append(paths, o.Path)
+	}
+	slices.Sort(paths)
+	i := slices.IndexFunc(objs, func(o Object) bool { return o.Path == "Album/01 One.flac" })
+	if strings.Join(paths, ",") != "@onefive/01.flac,Album/01 One.flac,Album/02 Two.flac,Album/cover.jpg" || i < 0 ||
+		objs[i].Key != one || !strings.HasPrefix(objs[i].Hash, "quickxor:") || objs[i].Version == "" {
 		t.Fatalf("walked %+v", objs)
 	}
 	ref := Ref(KindOneDrive, st.ID, one)
@@ -129,7 +140,7 @@ func TestOneDriveSource(t *testing.T) {
 		t.Fatalf("after the link expired: %q", got)
 	}
 	// The fetched copy checks against OneDrive's own checksum.
-	c := NewChecker(objs[0])
+	c := NewChecker(objs[i])
 	c.Write([]byte("fLaC-one-0123456789"))
 	if !c.Matches() {
 		t.Fatal("quickXorHash does not match")
@@ -307,5 +318,87 @@ func TestOneDriveClouds(t *testing.T) {
 	}
 	if _, err := add("de"); err == nil {
 		t.Fatal("Germany's cloud (closed in 2021) taken")
+	}
+}
+
+// A refresh that comes back after the sign-in it used was replaced keeps nothing of its own: a
+// client secret given meanwhile, or a sign-in made meanwhile, stays (review #215).
+func TestOneDriveLateRefresh(t *testing.T) {
+	ctx := context.Background()
+	g := fakeGraph(t)
+	music := g.Add("Music", nil)
+	one := g.Add("Music/01.flac", []byte("fLaC-one"))
+	s, _ := newSet(t)
+	st := signIn(t, s, g, Source)
+	if _, err := s.SetFolder(ctx, st.ID, music); err != nil {
+		t.Fatal(err)
+	}
+	ref := Ref(KindOneDrive, st.ID, one)
+	kept := func() OneDriveSecret {
+		t.Helper()
+		sec, err := s.oneDriveSecret(ctx, st.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sec
+	}
+	// late has a refresh go out (the access token ended) and come back only after during.
+	late := func(during func()) {
+		t.Helper()
+		held, release := make(chan struct{}), make(chan struct{})
+		var first atomic.Bool // only the first refresh is held: the others (a backend signed in again) go on
+		g.Hold = func(r *http.Request) {
+			if r.Form.Get("grant_type") == "refresh_token" && first.CompareAndSwap(false, true) {
+				close(held)
+				<-release
+			}
+		}
+		defer func() { g.Hold = nil }()
+		g.Expire()
+		done := make(chan error, 1)
+		go func() { _, err := s.Stat(ctx, ref); done <- err }()
+		<-held
+		during()
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatal("the request that asked:", err)
+		}
+	}
+
+	// The app's client secret replaced while a refresh is out.
+	late(func() {
+		g.ClientSecret = "the-new-secret"
+		if _, err := s.SetKeys(ctx, st.ID, json.RawMessage(`{"client_secret":"the-new-secret"}`)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if sec := kept(); sec.ClientSecret != "the-new-secret" || sec.Refresh != g.Refresh() {
+		t.Fatalf("after a late refresh: the client secret %q, the refresh token the last given %v", sec.ClientSecret, sec.Refresh == g.Refresh())
+	}
+	g.Expire()
+	if _, err := s.Stat(ctx, ref); err != nil {
+		t.Fatal("refreshed with the new secret:", err)
+	}
+
+	// Signed in again while a refresh is out.
+	var again string
+	late(func() {
+		g.Code = "the-code-again"
+		raw, err := s.OneDriveAuthURL(ctx, st.ID, odRedirect)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u, _ := url.Parse(raw)
+		if _, err := s.OneDriveComplete(ctx, url.Values{"state": {u.Query().Get("state")}, "code": {g.Code}}, odRedirect); err != nil {
+			t.Fatal(err)
+		}
+		again = kept().Refresh
+	})
+	if sec := kept(); sec.Refresh != again || sec.ClientSecret != "the-new-secret" {
+		t.Fatalf("after a late refresh: the sign-in made meanwhile replaced (%v)", sec.Refresh == again)
+	}
+	g.Expire()
+	if _, err := s.Stat(ctx, ref); err != nil {
+		t.Fatal("refreshed with the sign-in made meanwhile:", err)
 	}
 }

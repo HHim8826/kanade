@@ -578,7 +578,7 @@ func (im *Importer) driveLyrics(ctx context.Context, it *item, trackID int64, in
 	want := strings.ToLower(strings.TrimSuffix(path.Base(it.rel), path.Ext(it.rel)) + ".lrc")
 	for _, f := range im.siblings(ctx, it.driveParent) {
 		if strings.ToLower(f.Name) == want {
-			if b, err := im.readDrive(ctx, f, 256<<10); err == nil {
+			if b, err := im.readDrive(ctx, f, maxLrcFile); err == nil {
 				text, _ := media.DecodeText(b)
 				im.lib.SetLyrics(ctx, trackID, library.LyricsLRC, text)
 			}

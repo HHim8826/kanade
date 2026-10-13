@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { siteName } from '../site.js';
-import { Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast } from '../ui.js';
+import { Dialog, Empty, ErrorBox, Icon, Spinner, copyText, html, showDialog, toast } from '../ui.js';
 import { confirmDialog, useLibRev, useRunner } from './organize.js';
 import { WorkImage, bindSubject, workLine } from './works.js';
 
@@ -173,7 +173,7 @@ export function BangumiAccount() {
   const l = info && info.link;
   const ready = info && info.app_id && info.has_secret;
   const dirty = info && (id !== (info.app_id || '') || secret !== '');
-  const copy = () => navigator.clipboard.writeText(info.redirect_uri).then(() => toast('已複製'), () => toast('無法複製，請手動選取', 'error'));
+  const copy = () => copyText(info.redirect_uri).then(() => toast('已複製'), () => toast('無法複製，請手動選取', 'error'));
   return html`<h2 class="section-title">Bangumi 帳號</h2>
     <div class="card pad">
       <div class="sub">連結你的 Bangumi 帳號後，可以在專輯頁管理它的音樂條目收藏（想聽、聽過、評分、標籤、吐槽），在曲庫的「Bangumi」分頁看你的收藏和曲庫有沒有。只有你按儲存時才會寫到 Bangumi。</div>

@@ -220,18 +220,29 @@ func TestSourceScans(t *testing.T) {
 // marks nothing missing.
 func TestSourceNotAllThere(t *testing.T) {
 	ctx := context.Background()
-	im, _, _ := setup(t)
+	im, lib, _ := setup(t)
 	set := withStores(t, im)
 	src := t.TempDir()
 	for i := 1; i <= 30; i++ {
 		taggedMP3(t, filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)), map[string]string{"TIT2": fmt.Sprint("Song ", i), "TALB": "A", "TPE1": "B"})
 	}
+	os.WriteFile(filepath.Join(src, "A/99 broken.mp3"), []byte("not audio"), 0o644)
 	st := addFolder(t, set, src, storage.Source)
 	res, err := im.ScanSource(ctx, set, st.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runUntilDone(t, im, res.Batch)
+	// A song deleted from the library: its file is let go of.
+	var track int64
+	im.db.QueryRow(`SELECT t.id FROM tracks t WHERE t.title = 'Song 30'`).Scan(&track)
+	refs, err := lib.DeleteTrack(ctx, track)
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("delete: %v %v", refs, err)
+	}
+	if _, err := lib.TrashFile(ctx, refs[0], set.Trash); err != nil {
+		t.Fatal(err)
+	}
 	hidden := t.TempDir()
 	os.Rename(filepath.Join(src, "A"), filepath.Join(hidden, "A"))
 	if _, err := im.ScanSource(ctx, set, st.ID, false); err == nil || !strings.Contains(err.Error(), "empty") {
@@ -245,13 +256,96 @@ func TestSourceNotAllThere(t *testing.T) {
 		os.Rename(filepath.Join(hidden, fmt.Sprintf("A/%02d.mp3", i)), filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)))
 	}
 	res, err = im.ScanSource(ctx, set, st.ID, false)
-	if err != nil || res.Held != 25 || res.Gone != 0 {
+	if err != nil || res.Held != 24 || res.Gone != 0 { // 30 imported, one deleted since
 		t.Fatalf("most gone at once: %+v %v", res, err)
 	}
 	var missing int
 	im.db.QueryRow(`SELECT count(*) FROM assets WHERE state = 'missing'`).Scan(&missing)
 	if missing != 0 {
 		t.Fatalf("%d marked missing", missing)
+	}
+	// All back: the song deleted stays deleted, the broken file is not read again (review #227).
+	for _, f := range []string{"A/30.mp3", "A/99 broken.mp3"} {
+		if err := os.Rename(filepath.Join(hidden, f), filepath.Join(src, f)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 6; i <= 29; i++ {
+		os.Rename(filepath.Join(hidden, fmt.Sprintf("A/%02d.mp3", i)), filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)))
+	}
+	if res, err = im.ScanSource(ctx, set, st.ID, false); err != nil || res.New != 0 || res.Changed != 0 || res.Held != 0 {
+		t.Fatalf("all back: %+v %v", res, err)
+	}
+}
+
+// A preview canceled leaves its files to be found again; one imported remembers the files left
+// out of it as let go of, and those skipped when analyzed (review #228).
+func TestSourcePreviewCanceled(t *testing.T) {
+	ctx := context.Background()
+	im, _, _ := setup(t)
+	set := withStores(t, im)
+	startWorker(t, im)
+	src := t.TempDir()
+	for i := 1; i <= 3; i++ {
+		taggedMP3(t, filepath.Join(src, fmt.Sprintf("B/%02d.mp3", i)), map[string]string{"TIT2": fmt.Sprint("Song ", i), "TALB": "B", "TPE1": "C"})
+	}
+	os.WriteFile(filepath.Join(src, "B/99 broken.mp3"), []byte("not audio"), 0o644)
+	st := addFolder(t, set, src, storage.Source)
+	states := func() string {
+		t.Helper()
+		rows, err := im.db.Query(`SELECT path, state FROM source_files WHERE store_id = ? ORDER BY path`, st.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var p, s string
+			rows.Scan(&p, &s)
+			out = append(out, p+"="+s)
+		}
+		return strings.Join(out, " ")
+	}
+	res, err := im.ScanSource(ctx, set, st.ID, true)
+	if err != nil || res.New != 4 {
+		t.Fatalf("scanned: %+v %v", res, err)
+	}
+	waitState(t, im, res.Batch, BatchReview)
+	if err := im.Cancel(ctx, res.Batch); err != nil {
+		t.Fatal(err)
+	}
+	if got := states(); got != "" {
+		t.Fatalf("canceled, still known: %s", got)
+	}
+	res, err = im.ScanSource(ctx, set, st.ID, true)
+	if err != nil || res.New != 4 {
+		t.Fatalf("scanned again: %+v %v", res, err)
+	}
+	waitState(t, im, res.Batch, BatchReview)
+	p, err := im.Preview(ctx, res.Batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := group(t, p, "B")
+	if err := im.ApplyOp(ctx, res.Batch, PlanOp{Op: "exclude", Items: []int64{g.Items[2].ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := im.Start(ctx, res.Batch); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, im, res.Batch, BatchDone)
+	if got, want := states(), "B/01.mp3=imported B/02.mp3=imported B/03.mp3=ignored B/99 broken.mp3=skipped"; got != want {
+		t.Fatalf("imported: %s", got)
+	}
+	if res, err = im.ScanSource(ctx, set, st.ID, false); err != nil || res.New+res.Changed != 0 {
+		t.Fatalf("nothing new: %+v %v", res, err)
+	}
+	// The broken file mended: read again.
+	taggedMP3(t, filepath.Join(src, "B/99 broken.mp3"), map[string]string{"TIT2": "Mended", "TALB": "B", "TPE1": "C"})
+	future := time.Now().Add(time.Hour)
+	os.Chtimes(filepath.Join(src, "B/99 broken.mp3"), future, future)
+	if res, err = im.ScanSource(ctx, set, st.ID, false); err != nil || res.Changed != 1 {
+		t.Fatalf("mended: %+v %v", res, err)
 	}
 }
 

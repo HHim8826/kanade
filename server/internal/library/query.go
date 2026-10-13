@@ -480,9 +480,8 @@ func (s *Store) AlbumByTags(ctx context.Context, album, albumArtist string) (*Al
 	if err != nil {
 		return nil, err
 	}
-	for hops := 0; merged.Valid && hops < 10; hops++ {
-		id = merged.Int64
-		if err := s.db.QueryRowContext(ctx, `SELECT merged_into FROM albums WHERE id = ?`, id).Scan(&merged); err != nil {
+	if merged.Valid {
+		if id, err = albumEnd(ctx, s.db, merged.Int64); err != nil {
 			return nil, err
 		}
 	}

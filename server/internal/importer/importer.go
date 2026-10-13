@@ -89,6 +89,9 @@ type Importer struct {
 	settle       atomic.Int64             // SetInboxSettle's wait (ns); 0: the default; -1: none
 	albumArtists map[string]string        // batch|album folder|album -> decided album artist
 	scanning     map[int64]bool           // sources being scanned
+	// finishing counts batches marked done whose clearing up (batchDone) has not ended: counted
+	// before the batch looks done, so whoever sees it done can wait for what it leaves to go.
+	finishing atomic.Int64
 
 	// OnBatchDone runs when a batch has no pending items left, is canceled, or has its unsaved files
 	// discarded; unsaved counts the items whose source must be kept (KeepsSource). Client uploads
@@ -847,6 +850,9 @@ func (im *Importer) batchDone(ctx context.Context, batchID int64) {
 	clear(im.driveDirs) // the next inbox batch lists folders afresh
 	im.mu.Unlock()
 	im.forgetCovers(batchID)
+	if kind == "source" {
+		im.settleSource(ctx, batchID, false)
+	}
 	if kind == "inbox" {
 		if err := im.tidyInbox(ctx, batchID); err != nil {
 			im.log.Warn("tidy inbox", "batch", batchID, "err", err)
@@ -1014,7 +1020,7 @@ func (im *Importer) importLyrics(ctx context.Context, path string, trackID int64
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	for _, ext := range []string{".lrc", ".LRC", ".Lrc"} {
 		st, err := os.Stat(base + ext)
-		if err != nil || st.Size() > 256<<10 {
+		if err != nil || st.Size() > maxLrcFile {
 			continue
 		}
 		if b, err := os.ReadFile(base + ext); err == nil {

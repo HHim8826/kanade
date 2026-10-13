@@ -78,6 +78,13 @@ func roleFor(p string) string {
 	return RoleAudio
 }
 
+// Scanning says whether a source is being scanned now, asked for or on schedule.
+func (im *Importer) Scanning(id int64) bool {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	return im.scanning[id]
+}
+
 // ScanSource scans source id: see the top of this file. preview has new files wait for the user
 // after analysis, as other imports can.
 func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int64, preview bool) (res ScanResult, err error) {
@@ -186,23 +193,25 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 	}
 	res.New = len(queue)
 
-	// Gone: the songs imported from there are missing. Files that never made a song are forgotten.
-	var gone []string
+	// Gone: the songs imported from there are missing. Files that never made a song are forgotten,
+	// but for those the library let go of: they stay let go of should they come back.
+	var gone, forget []string
 	for _, list := range unseen {
 		for _, r := range list {
 			switch {
 			case r.state == "imported" && r.goneAt == 0:
 				gone = append(gone, r.key)
-			case r.state != "imported":
-				if _, err := im.db.ExecContext(ctx, `DELETE FROM source_files WHERE store_id = ? AND key = ?`, id, r.key); err != nil {
-					return res, err
-				}
+			case r.state != "imported" && r.state != "ignored":
+				forget = append(forget, r.key)
 			}
 		}
 	}
+	// So many gone at once is more likely a source not all there (a NAS partly mounted) than files
+	// deleted: none of what was not seen is taken for gone, forgotten files included (review #227).
 	if len(gone) > heldMin && len(gone)*2 > imported {
 		res.Held = len(gone)
 		im.log.Warn("source scan: too many files gone at once; none marked missing", "store", id, "gone", len(gone), "of", imported)
+		forget = nil
 	} else if len(gone) > 0 {
 		refs := make([]string, len(gone))
 		for i, k := range gone {
@@ -212,6 +221,11 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 			return res, err
 		}
 		if err := im.setGone(ctx, id, gone, db.Now()); err != nil {
+			return res, err
+		}
+	}
+	for _, key := range forget {
+		if _, err := im.db.ExecContext(ctx, `DELETE FROM source_files WHERE store_id = ? AND key = ?`, id, key); err != nil {
 			return res, err
 		}
 	}
@@ -418,6 +432,49 @@ func (im *Importer) noteSource(ctx context.Context, it *item, out outcome) {
 	if _, err := im.db.ExecContext(ctx, `UPDATE source_files SET state = ?, sha256 = CASE WHEN ?2 = '' THEN sha256 ELSE ?2 END
 		WHERE store_id = ? AND key = ?`, state, out.sha, id, key); err != nil {
 		im.log.Warn("record source file", "ref", it.ref, "err", err)
+	}
+}
+
+// settleSource records what became of a source batch's files that no import recorded (review #228):
+// those left out in review, and those skipped or failed when analyzed. A batch canceled leaves its
+// files unknown, for the next scan to find again; one imported remembers the files left out of it
+// as let go of (as songs deleted from the library: not imported again until they change). A file
+// queued again by a later scan is that one's.
+func (im *Importer) settleSource(ctx context.Context, batchID int64, canceled bool) {
+	rows, err := im.db.QueryContext(ctx, `SELECT ref, state FROM import_items WHERE batch_id = ? AND ref != ''`, batchID)
+	if err != nil {
+		im.log.Warn("settle a source's files", "batch", batchID, "err", err)
+		return
+	}
+	type file struct{ ref, state string }
+	var files []file
+	for rows.Next() {
+		var f file
+		if rows.Scan(&f.ref, &f.state) == nil {
+			files = append(files, f)
+		}
+	}
+	rows.Close()
+	became := map[string]string{StateExcluded: "ignored", StateSkipped: "skipped", StateFailed: "failed", StateDiscarded: "failed",
+		StatePublished: "imported", StateDuplicate: "imported"}
+	for _, f := range files {
+		_, store, key, ok := storage.Parse(f.ref)
+		state := became[f.state]
+		if !ok || (state == "" && !canceled) {
+			continue
+		}
+		mine := ` AND state = 'queued' AND NOT EXISTS (SELECT 1 FROM import_items i JOIN import_batches b ON b.id = i.batch_id
+			WHERE i.ref = ? AND i.batch_id != ? AND b.state NOT IN (?, ?))`
+		args := []any{store, key, f.ref, batchID, BatchDone, BatchCanceled}
+		var err error
+		if canceled {
+			_, err = im.db.ExecContext(ctx, `DELETE FROM source_files WHERE store_id = ? AND key = ?`+mine, args...)
+		} else {
+			_, err = im.db.ExecContext(ctx, `UPDATE source_files SET state = ? WHERE store_id = ? AND key = ?`+mine, append([]any{state}, args...)...)
+		}
+		if err != nil {
+			im.log.Warn("settle a source's file", "ref", f.ref, "err", err)
+		}
 	}
 }
 

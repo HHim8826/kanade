@@ -448,19 +448,24 @@ export function chooseFolder(st, onChange) {
 
 function FolderPicker({ st, close, onChange }) {
   const [trail, setTrail] = useState([{ id: '', name: 'OneDrive' }]); // the folders above, and this one
-  const [list, setList] = useState(null);
-  const [here, setHere] = useState(null);
+  // The folder shown, for the place in the trail it was asked for: an answer that comes after the
+  // trail moved on is dropped, so the folder chosen is always the one shown (review #216).
+  const [shown, setShown] = useState({ at: null, here: null, list: null });
   const [error, setError] = useState(null);
   const [busy, run] = useRunner();
   const at = trail[trail.length - 1];
+  const place = trail.map((f) => f.id).join('/');
   useEffect(() => {
-    setList(null);
+    let alive = true;
     setError(null);
     get(`/storage/${st.id}/folders?parent=${encodeURIComponent(at.id)}`).then((r) => {
-      setHere(r.here);
-      setList(r.folders);
-    }, setError);
-  }, [at.id]);
+      if (alive) setShown({ at: place, here: r.here, list: r.folders });
+    }, (e) => alive && setError(e));
+    return () => { alive = false; };
+  }, [place]);
+  const current = shown.at === place;
+  const here = current ? shown.here : null;
+  const list = current ? shown.list : null;
   const into = (f) => setTrail((t) => [...t, { id: f.id, name: f.name }]);
   const make = () => textDialog({
     title: '新增資料夾', label: '名稱', initial: 'Kanade', maxLength: 120, action: '新增',
@@ -470,6 +475,7 @@ function FolderPicker({ st, close, onChange }) {
     },
   });
   const choose = () => run(async () => {
+    if (!here) return;
     const now = await api('PATCH', `/storage/${st.id}`, { folder: here.id });
     close();
     onChange();

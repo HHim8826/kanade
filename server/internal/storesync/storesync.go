@@ -35,6 +35,13 @@ type Syncer struct {
 	running map[int64]bool // reconciles
 }
 
+// Running says whether a managed location's files are being checked now.
+func (s *Syncer) Running(id int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.running[id]
+}
+
 // Result is what checking that a managed location holds the library's files found.
 type Result struct {
 	At       int64  `json:"at"`

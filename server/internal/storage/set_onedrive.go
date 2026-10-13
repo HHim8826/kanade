@@ -44,6 +44,19 @@ func (s *Set) saveSecret(ctx context.Context, id int64, v any) error {
 	return err
 }
 
+// rotateRefresh keeps a OneDrive's new refresh token in place of the old one, leaving the rest of
+// the secret (the client secret) as it is now: only while the old one is the one kept, so a refresh
+// that comes back late never undoes a sign-in or a client secret given since (review #215).
+func (s *Set) rotateRefresh(ctx context.Context, id int64, old, new string) (bool, error) {
+	r, err := s.DB.ExecContext(ctx, `UPDATE stores SET secret = json_set(secret, '$.refresh_token', ?) WHERE id = ?
+		AND json_extract(secret, '$.refresh_token') = ?`, new, id, old)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.RowsAffected()
+	return n == 1, err
+}
+
 func (s *Set) setConfig(ctx context.Context, id int64, v any) error {
 	raw, _ := json.Marshal(v)
 	_, err := s.DB.ExecContext(ctx, `UPDATE stores SET config = ? WHERE id = ?`, string(raw), id)

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/HHim8826/kanade/server/internal/auth"
 	"github.com/HHim8826/kanade/server/internal/presence"
 )
 
@@ -23,8 +24,14 @@ import (
 // played and the list's own).
 const maxControl = 4 << 20
 
+// playerPing is how often a quiet event stream says it is alive, and finds out whether its login
+// still is.
+var playerPing = 25 * time.Second
+
 // playerEvents is player pid's event stream: hello (the server's time, to judge when a command
-// is late), players (the account's devices: at once and at each change), command and ack.
+// is late), players (the account's devices: at once and at each change), command and ack. It ends
+// with its login: logging out here ends it at once; a login ended otherwise (a password reset from
+// the command line, the login's time up) is found at the next ping (review #230).
 func (s *Server) playerEvents(w http.ResponseWriter, r *http.Request) {
 	tab, device := r.PathValue("pid"), r.URL.Query().Get("device")
 	if !playerID.MatchString(tab) || !playerID.MatchString(device) {
@@ -65,7 +72,8 @@ func (s *Server) playerEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	// A comment now and then keeps proxies (Cloudflare closes a quiet one after 100 s) and the
 	// browser sure the stream is alive.
-	ping := time.NewTicker(25 * time.Second)
+	token, _ := sessionToken(r)
+	ping := time.NewTicker(playerPing)
 	defer ping.Stop()
 	for {
 		select {
@@ -82,6 +90,9 @@ func (s *Server) playerEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-ping.C:
+			if _, _, err := s.auth.SessionOf(ctx, token); errors.Is(err, auth.ErrNoSession) {
+				return
+			}
 			if _, err := io.WriteString(w, ": ping\n\n"); err != nil || rc.Flush() != nil {
 				return
 			}

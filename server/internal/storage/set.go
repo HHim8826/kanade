@@ -208,7 +208,7 @@ func (s *Set) build(st *Store) (Backend, error) {
 		id := st.ID
 		return newOneDrive(st.Name, st.Mode, cfg, s.httpClient(),
 			func(ctx context.Context) (OneDriveSecret, error) { return s.oneDriveSecret(ctx, id) },
-			func(ctx context.Context, sec OneDriveSecret) error { return s.saveSecret(ctx, id, sec) }), nil
+			func(ctx context.Context, old, new string) (bool, error) { return s.rotateRefresh(ctx, id, old, new) }), nil
 	}
 	return nil, fmt.Errorf("store %d: unknown kind %q", st.ID, st.Kind)
 }

@@ -92,7 +92,7 @@ export function ImportReview({ id }) {
           toast(e.message, 'error');
         }
       }}>取消匯入</button>`}>
-    <p>不匯入這批檔案？${p && p.kind === 'upload' ? '已上傳到伺服器暫存區的檔案會刪除。' : '原始檔案不受影響。'}</p>
+    <p>不匯入這批檔案？${p && p.kind === 'upload' ? '已上傳到伺服器暫存區的檔案會刪除。' : '原始檔案不受影響。'}${p && p.kind === 'source' ? '下次掃描這個來源時，它們會再列出來。' : ''}</p>
   <//>`);
 
   if (error && !p) return html`<${ErrorBox} error=${error} onRetry=${load} />`;
@@ -128,7 +128,7 @@ export function ImportReview({ id }) {
     ${p.state !== 'analyzing' && !review && html`<div class="card pad">
       這批匯入${{ running: '正在進行', done: '已完成', canceled: '已取消' }[p.state] || p.state}。<a class="link" href=${href('tasks')}>到任務頁查看</a></div>`}
     ${p.state !== 'analyzing' && html`
-      <p class="hint">確認每組會成為哪張專輯；這裡的修改不會改寫音檔，匯入後也可以再整理。</p>
+      <p class="hint">確認每組會成為哪張專輯；這裡的修改不會改寫音檔，匯入後也可以再整理。${p.kind === 'source' ? '設為「不匯入」的檔案，之後掃描這個來源也不會再匯入，除非檔案有改動（和從曲庫刪除的歌一樣）。' : ''}</p>
       ${review && html`<div class="toolbar">
         <button class="btn tonal" disabled=${busy} onClick=${() => op({ op: 'folders' })}><${Icon} name="album" />每個子資料夾是一張專輯</button>
         <label class="select-field">文字編碼

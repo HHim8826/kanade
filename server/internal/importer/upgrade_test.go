@@ -45,6 +45,23 @@ func toVersion22(t *testing.T, d *sql.DB) {
 		return out
 	}
 	then := columns(ref)
+	indexes := func(q interface {
+		QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	}) map[string]bool {
+		out := map[string]bool{}
+		rows, err := q.QueryContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var name string
+			rows.Scan(&name)
+			out[name] = true
+		}
+		return out
+	}
+	thenIndexes := indexes(ref)
 	conn, err := d.Conn(ctx) // one connection, so foreign keys stay off while tables go
 	if err != nil {
 		t.Fatal(err)
@@ -76,6 +93,11 @@ func toVersion22(t *testing.T, d *sql.DB) {
 			if !then[table][col] {
 				exec(`ALTER TABLE "` + table + `" DROP COLUMN "` + col + `"`)
 			}
+		}
+	}
+	for name := range indexes(conn) {
+		if !thenIndexes[name] {
+			exec(`DROP INDEX "` + name + `"`)
 		}
 	}
 	exec(`UPDATE import_items SET plan = json_remove(plan, '$.derived_artist', '$.tagged.Derived', '$.anchor.Derived', '$.folders')

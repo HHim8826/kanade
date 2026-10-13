@@ -181,14 +181,13 @@ func (im *Importer) FolderGroups(ctx context.Context) ([]FolderGroup, error) {
 			if best == 0 {
 				continue
 			}
-			a, err := im.lib.Album(ctx, best)
+			now, _, err := im.lib.AlbumNow(ctx, best) // through merges, however many (review #224)
 			if err != nil {
 				return nil, err
 			}
-			for hops := 0; a != nil && a.MergedInto != 0 && hops < 10; hops++ {
-				if a, err = im.lib.Album(ctx, a.MergedInto); err != nil {
-					return nil, err
-				}
+			a, err := im.lib.Album(ctx, now)
+			if err != nil {
+				return nil, err
 			}
 			if a == nil {
 				continue

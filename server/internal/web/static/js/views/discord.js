@@ -3,7 +3,7 @@ import { api, get, post } from '../api.js';
 import { device, deviceName } from '../presence.js';
 import { keepInAddress, parseHash } from '../router.js';
 import { siteName } from '../site.js';
-import { ErrorBox, Icon, Spinner, html, toast } from '../ui.js';
+import { ErrorBox, Icon, Spinner, copyText, html, toast } from '../ui.js';
 import { confirmDialog } from './organize.js';
 
 // Discord's status (review #135): the server shows what this account plays as its owner's Discord
@@ -143,7 +143,7 @@ function AppForm({ info, onSaved }) {
     }
     setBusy(false);
   };
-  const copy = () => navigator.clipboard.writeText(info.redirect_uri).then(() => toast('已複製'), () => toast('無法複製，請手動選取', 'error'));
+  const copy = () => copyText(info.redirect_uri).then(() => toast('已複製'), () => toast('無法複製，請手動選取', 'error'));
   return html`<details class="app-setup" open=${!(info.client_id && info.has_secret)}>
     <summary>Discord 應用程式${info.client_id ? `：${info.client_id}` : '（還沒設定）'}</summary>
     <ol class="steps">

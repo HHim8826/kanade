@@ -17,7 +17,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/staging"
 )
 
-// waitState waits for the worker to move a batch to state.
+// waitState waits for the worker to move a batch to state; to done, cleared up too (review #231).
 func waitState(t *testing.T, im *Importer, batch int64, state string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
@@ -26,7 +26,7 @@ func waitState(t *testing.T, im *Importer, batch int64, state string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if b.State == state {
+		if b.State == state && (state != BatchDone || im.finishing.Load() == 0) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)

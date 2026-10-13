@@ -49,12 +49,15 @@ type extra struct {
 // maxExtras bounds the pictures fetched with a song.
 const maxExtras = 12
 
+// maxLrcFile is the largest .lrc kept as a song's lyrics (larger ones are not lyrics).
+const maxLrcFile = 256 << 10
+
 // besides collects the files of a cloud source that are fetched with its songs: pictures and .lrc.
 type besides map[string][]storage.Object // by folder
 
 func (b besides) add(o storage.Object) {
 	ext := strings.ToLower(path.Ext(o.Path))
-	if (imageExt[ext] && o.Size <= maxCoverFile) || ext == ".lrc" {
+	if (imageExt[ext] && o.Size <= maxCoverFile) || (ext == ".lrc" && o.Size <= maxLrcFile) {
 		dir := path.Dir(o.Path)
 		b[dir] = append(b[dir], o)
 	}
@@ -124,6 +127,7 @@ func (im *Importer) fetchRef(ctx context.Context, batchID, itemID int64, ref, re
 	if err := fetchObject(ctx, files, ref, o, dst); err != nil {
 		return "", err
 	}
+	release() // on disk now, where WorkCommitted counts it
 	if again, err := files.Stat(ctx, ref); err != nil {
 		os.Remove(dst)
 		return "", err
@@ -137,8 +141,20 @@ func (im *Importer) fetchRef(ctx context.Context, batchID, itemID int64, ref, re
 		if st, err := os.Stat(p); err == nil && st.Size() == x.Size {
 			continue // fetched with another song of the folder
 		}
+		if strings.EqualFold(path.Ext(x.Path), ".lrc") && x.Size > maxLrcFile {
+			continue // recorded before the limit
+		}
+		// Each picture and the lyrics hold their own staging space, until they are on disk where
+		// WorkCommitted counts them; without room they are left out, the song goes on (review #217).
+		release, err := im.hold(ctx, x.Size)
+		if err != nil {
+			im.log.Info("source: no staging space for a picture or lyrics; left out", "file", x.Path, "err", err)
+			continue
+		}
 		xo := storage.Object{Key: x.Key, Path: x.Path, Size: x.Size, Hash: x.Hash}
-		if err := fetchObject(ctx, files, storage.Ref(kind, store, x.Key), xo, p); err != nil && ctx.Err() == nil {
+		err = fetchObject(ctx, files, storage.Ref(kind, store, x.Key), xo, p)
+		release()
+		if err != nil && ctx.Err() == nil {
 			im.log.Warn("source: fetch a picture or lyrics", "file", x.Path, "err", err)
 		}
 	}

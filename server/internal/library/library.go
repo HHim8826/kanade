@@ -404,9 +404,11 @@ func upsertAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, key string, now
 		key).Scan(&id, &cover, &merged)
 	switch {
 	case err == nil:
-		for hops := 0; merged.Valid && hops < 10; hops++ {
-			id = merged.Int64
-			if err := tx.QueryRowContext(ctx, `SELECT coalesce(cover_id, 0), merged_into FROM albums WHERE id = ?`, id).Scan(&cover, &merged); err != nil {
+		if merged.Valid {
+			if id, err = albumEnd(ctx, tx, merged.Int64); err != nil {
+				return 0, err
+			}
+			if err := tx.QueryRowContext(ctx, `SELECT coalesce(cover_id, 0) FROM albums WHERE id = ?`, id).Scan(&cover); err != nil {
 				return 0, err
 			}
 		}
@@ -509,6 +511,25 @@ func (s *Store) AlbumNow(ctx context.Context, id int64) (int64, string, error) {
 		id = merged.Int64
 	}
 	return 0, "", fmt.Errorf("albums merged in a loop, through album %d", id)
+}
+
+// albumEnd follows an album through merges to the one it is now, in a transaction or not: as
+// AlbumNow, to the chain's end however long (review #201, #224); a loop is an error, not an album
+// picked halfway.
+func albumEnd(ctx context.Context, q querier, id int64) (int64, error) {
+	met := map[int64]bool{}
+	for !met[id] {
+		met[id] = true
+		var merged sql.NullInt64
+		if err := q.QueryRowContext(ctx, `SELECT merged_into FROM albums WHERE id = ?`, id).Scan(&merged); err != nil {
+			return 0, err
+		}
+		if !merged.Valid {
+			return id, nil
+		}
+		id = merged.Int64
+	}
+	return 0, fmt.Errorf("albums merged in a loop, through album %d", id)
 }
 
 // ReplaceAlbumArtist changes an album's artist from one an import worked out to another, unless it

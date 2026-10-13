@@ -697,6 +697,8 @@ func (im *Importer) groupAlbum(ctx context.Context, batchID int64, group string)
 
 // finishIfIdle closes a running batch that has nothing left to do (all files skipped, for example).
 func (im *Importer) finishIfIdle(ctx context.Context, batchID int64) {
+	im.finishing.Add(1)
+	defer im.finishing.Add(-1)
 	res, err := im.db.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = ? WHERE id = ? AND state = ?
 		AND NOT EXISTS (SELECT 1 FROM import_items WHERE batch_id = ? AND state IN ('pending', 'uploading'))`,
 		BatchDone, db.Now(), batchID, BatchRunning, batchID)

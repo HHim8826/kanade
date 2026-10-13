@@ -6,12 +6,16 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/storage"
 	"github.com/HHim8826/kanade/server/internal/storage/storagetest"
 )
@@ -103,6 +107,73 @@ func TestCloudSource(t *testing.T) {
 	fake.Remove("music/Cloud Album/Disc 1/01 One.mp3")
 	if res, err := im.ScanSource(ctx, set, st.ID, false); err != nil || res.Gone != 1 {
 		t.Fatalf("gone: %+v %v", res, err)
+	}
+}
+
+// A cloud source's pictures and lyrics hold staging space as the song does: one with no room left
+// is left out and the song goes on; an .lrc too large to be lyrics is not fetched (review #217).
+func TestCloudSourceExtrasHoldStaging(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	fake := storagetest.NewS3(t)
+	song := func(title, n string) []byte {
+		p := filepath.Join(t.TempDir(), "song.mp3")
+		taggedMP3(t, p, map[string]string{"TIT2": title, "TPE1": "Band", "TALB": "Big Cover", "TRCK": n})
+		b, _ := os.ReadFile(p)
+		return b
+	}
+	one, two := song("One", "1"), song("Two", "2")
+	big := append(append([]byte{}, jpeg...), make([]byte, 512<<10)...)
+	fake.Put("music/Big Cover/01 One.mp3", one)
+	fake.Put("music/Big Cover/01 One.lrc", []byte("[00:01.00]la la"))
+	fake.Put("music/Big Cover/folder.jpg", big)
+	fake.Put("music/Big Cover/02 Two.mp3", two)
+	fake.Put("music/Big Cover/02 Two.lrc", append([]byte("[00:01.00]"), make([]byte, 300<<10)...))
+	im.Budget = &staging.Budget{Limit: int64(max(len(one), len(two))) + 64<<10}
+	im.Budget.Use(staging.OnDisk(im.WorkCommitted))
+	var fetched atomic.Pointer[string]
+	fake.Fail = func(r *http.Request) int {
+		if name := path.Base(r.URL.Path); r.Method == http.MethodGet && (name == "folder.jpg" || name == "02%20Two.lrc" || name == "02 Two.lrc") {
+			fetched.Store(&name)
+		}
+		return 0
+	}
+	var peak atomic.Int64
+	im.Budget.Free = func(string) int64 { // free space as it stands, the peak of the work folder kept
+		if n := im.WorkCommitted(ctx); n > peak.Load() {
+			peak.Store(n)
+		}
+		return 1 << 40
+	}
+	cfg, _ := json.Marshal(storage.S3Config{Endpoint: fake.URL, Bucket: fake.Bucket, Prefix: "music"})
+	sec, _ := json.Marshal(storage.S3Secret{AccessKey: fake.AccessKey, SecretKey: fake.SecretKey})
+	st, err := set.Add(ctx, storage.NewStore{Kind: storage.KindS3, Name: "R2", Mode: storage.Source, Config: cfg, Secret: sec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := im.ScanSource(ctx, set, st.ID, false)
+	if err != nil || res.New != 2 {
+		t.Fatalf("scan %+v %v", res, err)
+	}
+	v := runUntilDone(t, im, res.Batch)
+	if s := states(v); s["Big Cover/01 One.mp3"] != StatePublished || s["Big Cover/02 Two.mp3"] != StatePublished {
+		t.Fatalf("states %v", s)
+	}
+	if got := fetched.Load(); got != nil {
+		t.Fatalf("fetched past the budget or the lyrics limit: %v", *got)
+	}
+	if limit, _ := im.Budget.Limits(); peak.Load() > limit {
+		t.Fatalf("the work folder held %d bytes, the budget %d", peak.Load(), limit)
+	}
+	albums, _ := lib.Albums(ctx, 10, 0, false)
+	if len(albums) != 1 || albums[0].CoverID != 0 {
+		t.Fatalf("albums %+v", albums)
+	}
+	var lyrics string
+	im.db.QueryRow(`SELECT group_concat(l.text) FROM lyrics l JOIN tracks t ON t.id = l.track_id`).Scan(&lyrics)
+	if lyrics != "[00:01.00]la la" {
+		t.Fatalf("lyrics %q", lyrics)
 	}
 }
 

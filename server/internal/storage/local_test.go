@@ -196,7 +196,13 @@ func TestLocalSource(t *testing.T) {
 	file(t, root, "Artist/Album/cover.jpg", "jpg")
 	file(t, root, "Artist/Album/._01.flac", "fork")
 	file(t, root, "@eaDir/01.flac/SYNOFILE_THUMB_M.jpg", "thumb")
-	file(t, root, ".hidden/x.flac", "x")
+	file(t, root, "Artist/#recycle/x.flac", "x")
+	file(t, root, "$RECYCLE.BIN/x.flac", "x")
+	file(t, root, ".Trash-1000/files/x.flac", "x")
+	// Music in folders whose names only look like the systems' (review #223).
+	file(t, root, "@onefive/1518/01.flac", "at")
+	file(t, root, "$uicideboy$/Long Term/01.flac", "dollar")
+	file(t, root, ".hack G.U/01.flac", "dot")
 	outside := t.TempDir()
 	file(t, outside, "secret.flac", "secret")
 	os.Symlink(filepath.Join(outside, "secret.flac"), filepath.Join(root, "link.flac"))
@@ -212,7 +218,7 @@ func TestLocalSource(t *testing.T) {
 	if err := b.Walk(ctx, func(o Object) error { keys = append(keys, o.Key); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(keys, " ") != "Artist/Album/01.flac Artist/Album/cover.jpg" {
+	if strings.Join(keys, " ") != "$uicideboy$/Long Term/01.flac .hack G.U/01.flac @onefive/1518/01.flac Artist/Album/01.flac Artist/Album/cover.jpg" {
 		t.Fatalf("walked %v", keys)
 	}
 	if got := read(t, s, Ref(KindLocal, 1, "Artist/Album/01.flac"), 0, -1); got != "one" {

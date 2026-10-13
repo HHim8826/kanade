@@ -35,6 +35,9 @@ type Graph struct {
 	sessions map[string]*upload
 	// Fail answers a request with a status of its own and a Retry-After of 0 (0: as usual).
 	Fail func(r *http.Request) int
+	// Hold is given a token request answered (its tokens given out) before the answer is sent: a
+	// test holds it back to have it come late.
+	Hold func(r *http.Request)
 	// Damage has a download of the item deliver other bytes than its own (its last one changed).
 	Damage func(id string) bool
 	// Requests counts requests by what they are ("token", "children", "download", "upload", ...).
@@ -265,8 +268,14 @@ func (g *Graph) token(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.Form.Get("scope"), "Files.ReadWrite") {
 		scope = "Files.ReadWrite"
 	}
-	jsonOut(w, http.StatusOK, map[string]any{"access_token": access, "refresh_token": g.refresh, "expires_in": 3600,
-		"scope": "https://graph.microsoft.com/" + scope, "token_type": "Bearer"})
+	answer := map[string]any{"access_token": access, "refresh_token": g.refresh, "expires_in": 3600,
+		"scope": "https://graph.microsoft.com/" + scope, "token_type": "Bearer"}
+	if g.Hold != nil {
+		g.mu.Unlock()
+		g.Hold(r)
+		g.mu.Lock()
+	}
+	jsonOut(w, http.StatusOK, answer)
 }
 
 // view is an item as Graph says it.

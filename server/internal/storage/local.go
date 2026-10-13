@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -311,13 +312,30 @@ func (l *Local) Stat(ctx context.Context, key string) (Object, error) {
 	return localObject(key, info), nil
 }
 
-// skipDir leaves out Kanade's own folders and those NAS systems and desktops keep their own things
-// in (thumbnails, recycle bins, metadata).
+// systemDirs are the folders NAS systems and desktops keep their own things in (thumbnails, recycle
+// bins, snapshots, metadata), lowercased. They are named one by one: music is in folders whose names
+// start with ".", "@", "#" or "$" too (.hack//G.U., @onefive, $uicideboy$), and Kanade keeps an
+// album where its artist and title say (review #223).
+var systemDirs = map[string]bool{
+	"@eadir": true, "@tmp": true, "@recycle": true, "@sharebin": true, "@recently-snapshot": true, // Synology, QNAP
+	"#recycle": true, "#snapshot": true, ".@__thumb": true, ".@upload_cache": true,
+	"$recycle.bin": true, "recycler": true, "system volume information": true, // Windows
+	".trashes": true, ".spotlight-v100": true, ".fseventsd": true, ".temporaryitems": true, // macOS
+	".documentrevisions-v100": true, ".appledouble": true,
+	".trash": true, "lost+found": true, ".snapshot": true, ".snapshots": true, // Linux, btrfs, NetApp
+	".stversions": true, // Syncthing's old versions
+}
+
+// skipDir leaves out Kanade's own folders (.kanade-trash, .kanade-tmp) and the systems' above.
 func skipDir(name string) bool {
-	if name == "lost+found" || name == "System Volume Information" {
-		return true
-	}
-	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "@") || strings.HasPrefix(name, "#") || strings.HasPrefix(name, "$")
+	n := strings.ToLower(name)
+	return systemDirs[n] || strings.HasPrefix(n, ".kanade-") || strings.HasPrefix(n, ".trash-")
+}
+
+// skipPath says whether a key (folders split by "/") is in a folder left out.
+func skipPath(key string) bool {
+	dirs := strings.Split(key, "/")
+	return slices.ContainsFunc(dirs[:len(dirs)-1], skipDir)
 }
 
 // skipFile leaves out the mark and macOS's ._ files (resource forks that copy along with music).

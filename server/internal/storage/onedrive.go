@@ -105,8 +105,10 @@ type OneDrive struct {
 	cfg        OneDriveConfig
 	client     *http.Client
 	load       func(ctx context.Context) (OneDriveSecret, error) // the secret as kept now
-	save       func(ctx context.Context, sec OneDriveSecret) error
-	now        func() time.Time
+	// rotate keeps the refresh token a refresh gave back in place of the one it used, and only that:
+	// false when the one kept is another by now (signed in again, a new client secret tried).
+	rotate func(ctx context.Context, old, new string) (bool, error)
+	now    func() time.Time
 
 	refresh sync.Mutex // one refresh at a time
 	mu      sync.Mutex
@@ -124,11 +126,11 @@ type odLink struct {
 }
 
 func newOneDrive(name, mode string, cfg OneDriveConfig, client *http.Client, load func(context.Context) (OneDriveSecret, error),
-	save func(context.Context, OneDriveSecret) error) *OneDrive {
+	rotate func(ctx context.Context, old, new string) (bool, error)) *OneDrive {
 	if cfg.Tenant == "" {
 		cfg.Tenant = "common"
 	}
-	return &OneDrive{name: name, mode: mode, cfg: cfg, client: client, load: load, save: save, now: time.Now,
+	return &OneDrive{name: name, mode: mode, cfg: cfg, client: client, load: load, rotate: rotate, now: time.Now,
 		links: map[string]odLink{}, dirs: map[string]string{}}
 }
 
@@ -179,7 +181,9 @@ func odExchange(ctx context.Context, client *http.Client, cfg OneDriveConfig, se
 }
 
 // token is an access token, refreshed when it is about to expire (and kept when the refresh
-// token given back is a new one).
+// token given back is a new one). A refresh that comes back after the sign-in it was made with was
+// replaced (signed in again, a new client secret) keeps nothing: the access token serves the
+// request that asked, and the next asks again with what is kept now (review #215).
 func (o *OneDrive) token(ctx context.Context, stale string) (string, error) {
 	o.mu.Lock()
 	if o.access != "" && o.access != stale && o.now().Before(o.expires.Add(-2*time.Minute)) {
@@ -210,10 +214,15 @@ func (o *OneDrive) token(ctx context.Context, stale string) (string, error) {
 		return "", err
 	}
 	if tok.Refresh != "" && tok.Refresh != sec.Refresh {
-		sec.Refresh = tok.Refresh
-		if err := o.save(ctx, sec); err != nil {
+		kept, err := o.rotate(ctx, sec.Refresh, tok.Refresh)
+		if err != nil {
 			return "", err
 		}
+		if !kept {
+			return tok.Access, nil
+		}
+	} else if now, err := o.load(ctx); err != nil || now.Refresh != sec.Refresh || now.ClientSecret != sec.ClientSecret {
+		return tok.Access, nil // the sign-in was replaced meanwhile
 	}
 	o.mu.Lock()
 	o.access, o.expires = tok.Access, o.now().Add(time.Duration(tok.Expires)*time.Second)

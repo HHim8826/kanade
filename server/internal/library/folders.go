@@ -83,9 +83,8 @@ func (e *editor) makeAlbum(a NewAlbum) error {
 	}
 	switch {
 	case err == nil:
-		for hops := 0; merged.Valid && hops < 10; hops++ {
-			albumID = merged.Int64
-			if err := tx.QueryRowContext(ctx, `SELECT merged_into FROM albums WHERE id = ?`, albumID).Scan(&merged); err != nil {
+		if merged.Valid {
+			if albumID, err = albumEnd(ctx, tx, merged.Int64); err != nil {
 				return err
 			}
 		}

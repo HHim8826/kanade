@@ -211,6 +211,9 @@ func TestS3Source(t *testing.T) {
 	fake.Put("music/Album/cover.jpg", []byte("jpg"))
 	fake.Put("music/Album/", nil) // a folder, as some tools make them
 	fake.Put("other/x.flac", []byte("x"))
+	fake.Put("music/@eaDir/01.flac/SYNOFILE_THUMB_M.jpg", []byte("thumb")) // a system's folder
+	fake.Put("music/Album/._01.flac", []byte("fork"))
+	fake.Put("music/@onefive/01.flac", []byte("at")) // music (review #223)
 	s, _ := newSet(t)
 	st, err := addBucket(t, s, fake, "music", Source, fake.SecretKey)
 	if err != nil {
@@ -222,7 +225,7 @@ func TestS3Source(t *testing.T) {
 	b, _, _ := s.Backend(ctx, st.ID)
 	var keys []string
 	b.Walk(ctx, func(o Object) error { keys = append(keys, o.Key+"="+o.Version); return nil })
-	if len(keys) != 2 || !strings.HasPrefix(keys[0], "Album/01.flac=") || !strings.HasPrefix(keys[1], "Album/cover.jpg=") {
+	if len(keys) != 3 || !strings.HasPrefix(keys[0], "@onefive/01.flac=") || !strings.HasPrefix(keys[1], "Album/01.flac=") || !strings.HasPrefix(keys[2], "Album/cover.jpg=") {
 		t.Fatalf("walked %v", keys)
 	}
 	if got := read(t, s, Ref(KindS3, st.ID, "Album/01.flac"), 0, -1); got != "one" {

@@ -3,6 +3,7 @@ import { ApiError, api, get, post } from '../api.js';
 import { go } from '../router.js';
 import { ErrorBox, FilePick, Icon, fmtBytes, html, toast, useLoad } from '../ui.js';
 import { confirmDialog } from './organize.js';
+import { uuid } from '../uuid.js';
 
 const AUDIO = /\.(flac|mp3|m4a|mp4|aac|ogg|oga|opus|wav|aiff?|ape|tak|wv|tta|dsf|dff|wma)$/i;
 const IMAGE = /\.(jpe?g|png)$/i;
@@ -43,13 +44,13 @@ function groupFor(key) {
   try {
     const map = JSON.parse(localStorage.getItem(GROUPS) || '{}');
     if (map[key]) return map[key].group;
-    const group = 'web-' + crypto.randomUUID();
+    const group = 'web-' + uuid();
     map[key] = { group, at: Date.now() };
     for (const [k, v] of Object.entries(map)) if (Date.now() - v.at > 7 * 86400000) delete map[k]; // the server forgets them too
     localStorage.setItem(GROUPS, JSON.stringify(map));
     return group;
   } catch {
-    return 'web-' + crypto.randomUUID();
+    return 'web-' + uuid();
   }
 }
 function forgetGroup(key) {

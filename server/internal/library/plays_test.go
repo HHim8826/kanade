@@ -532,3 +532,68 @@ func TestLongMergeChains(t *testing.T) {
 		t.Fatalf("albums in a loop listed: %v, %v", r, st)
 	}
 }
+
+// Imports and folders find the album its tags first made and follow it through merges to the end
+// as well (review #224): a new song of the first album, the album an import would join, and the
+// folders made into albums, by their album or by their tags; a loop is an error, no album picked.
+func TestImportsFollowLongMergeChains(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	var albums []int64
+	for i := range 12 {
+		name := fmt.Sprint("chain ", i)
+		res, err := s.Publish(ctx, assetWithDuration(t, s, name, 60_000), EntryInput{Title: name, Album: name, AlbumArtist: "X"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var album int64
+		s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&album)
+		albums = append(albums, album)
+	}
+	for i := range 11 {
+		if _, err := s.MergeAlbum(ctx, albums[i], albums[i+1]); err != nil {
+			t.Fatalf("merge %d: %v", i, err)
+		}
+	}
+	end := albums[11]
+	if a, err := s.AlbumByTags(ctx, "chain 0", "X"); err != nil || a == nil || a.ID != end {
+		t.Fatalf("the album an import would join: %+v %v, want %d", a, err, end)
+	}
+	albumOf := func(track int64) int64 {
+		t.Helper()
+		var id int64
+		if err := s.db.QueryRow(`SELECT album_id FROM album_entries WHERE track_id = ?`, track).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	res, err := s.Publish(ctx, assetWithDuration(t, s, "chain 0 bonus", 60_000), EntryInput{Title: "bonus", Album: "chain 0", AlbumArtist: "X", TrackNo: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := albumOf(res.TrackID); got != end {
+		t.Fatalf("a new song of the first album went to %d, want %d", got, end)
+	}
+	for i, na := range []NewAlbum{{AlbumID: albums[0]}, {Title: "chain 0", AlbumArtist: "X", Tagged: Tagged{Album: "chain 0", AlbumArtist: "X"}}} {
+		asset := assetWithDuration(t, s, fmt.Sprint("loose ", i), 60_000)
+		loose, err := s.Publish(ctx, asset, EntryInput{Title: fmt.Sprint("loose ", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		na.Entries = []NewEntry{{TrackID: loose.TrackID, AssetID: asset, Track: 10 + i}}
+		if _, err := s.MakeAlbums(ctx, []NewAlbum{na}); err != nil {
+			t.Fatal(err)
+		}
+		if got := albumOf(loose.TrackID); got != end {
+			t.Fatalf("a folder made an album (%d) in %d, want %d", i, got, end)
+		}
+	}
+	// A loop, which merging never makes: an error, no album picked halfway.
+	s.db.Exec(`UPDATE albums SET merged_into = ? WHERE id = ?`, albums[0], end)
+	if a, err := s.AlbumByTags(ctx, "chain 0", "X"); err == nil {
+		t.Fatalf("a loop: %+v", a)
+	}
+	if _, err := s.Publish(ctx, assetWithDuration(t, s, "chain 0 more", 60_000), EntryInput{Title: "more", Album: "chain 0", AlbumArtist: "X", TrackNo: 3}); err == nil {
+		t.Fatal("a song put in an album of a loop")
+	}
+}

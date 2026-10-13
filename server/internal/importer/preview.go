@@ -582,6 +582,9 @@ func (im *Importer) Cancel(ctx context.Context, batchID int64) error {
 	os.RemoveAll(im.workDir(batchID))
 	var kind, source string
 	im.db.QueryRowContext(ctx, `SELECT kind, source FROM import_batches WHERE id = ?`, batchID).Scan(&kind, &source)
+	if kind == "source" {
+		im.settleSource(ctx, batchID, true)
+	}
 	if im.OnBatchDone != nil {
 		im.OnBatchDone(ctx, kind, source, 0)
 	}
