@@ -212,6 +212,7 @@ func (s *Store) LoudnessMedian(ctx context.Context) (*float64, error) {
 type Unmeasured struct {
 	AssetID int64
 	Ref     string
+	SHA256  string
 	Format  string
 	Size    int64
 }
@@ -223,7 +224,7 @@ func (s *Store) Unmeasured(ctx context.Context, after int64, limit int, failed b
 	if failed {
 		cond = `(l.asset_id IS NULL OR l.lufs IS NULL)`
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.file_ref, a.format, a.size FROM assets a LEFT JOIN loudness l ON l.asset_id = a.id
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.file_ref, a.sha256, a.format, a.size FROM assets a LEFT JOIN loudness l ON l.asset_id = a.id
 		WHERE a.state = 'verified' AND a.file_ref IS NOT NULL AND a.id > ? AND `+cond+` ORDER BY a.id LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err
@@ -232,7 +233,7 @@ func (s *Store) Unmeasured(ctx context.Context, after int64, limit int, failed b
 	var out []Unmeasured
 	for rows.Next() {
 		var u Unmeasured
-		if err := rows.Scan(&u.AssetID, &u.Ref, &u.Format, &u.Size); err != nil {
+		if err := rows.Scan(&u.AssetID, &u.Ref, &u.SHA256, &u.Format, &u.Size); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -240,12 +241,13 @@ func (s *Store) Unmeasured(ctx context.Context, after int64, limit int, failed b
 	return out, rows.Err()
 }
 
-// AssetByDriveID is the verified file stored as a Drive file, 0 when none is.
-func (s *Store) AssetByDriveID(ctx context.Context, driveID string) (int64, error) {
+// AssetByRef is the verified file kept at ref and its SHA-256, 0 when none is.
+func (s *Store) AssetByRef(ctx context.Context, ref string) (int64, string, error) {
 	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM assets WHERE file_ref = ? AND state = 'verified'`, driveID).Scan(&id)
+	var sha string
+	err := s.db.QueryRowContext(ctx, `SELECT id, sha256 FROM assets WHERE file_ref = ? AND state = 'verified'`, ref).Scan(&id, &sha)
 	if err == sql.ErrNoRows {
-		return 0, nil
+		return 0, "", nil
 	}
-	return id, err
+	return id, sha, err
 }

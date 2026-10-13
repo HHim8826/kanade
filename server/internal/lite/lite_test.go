@@ -61,7 +61,7 @@ func (s *source) gate(id string) chan struct{} {
 	return g
 }
 
-func (s *source) Copy(ctx context.Context, w io.Writer, id string, size int64) error {
+func (s *source) Copy(ctx context.Context, w io.Writer, id, _ string, size int64) error {
 	s.copies.Add(1)
 	s.mu.Lock()
 	data, gate, fail := s.files[id], s.gates[id], s.fail[id]
@@ -84,7 +84,7 @@ func (s *source) Copy(ctx context.Context, w io.Writer, id string, size int64) e
 	return err
 }
 
-func (s *source) Hold(id string) (string, func(), bool) {
+func (s *source) Hold(id, _ string) (string, func(), bool) {
 	s.mu.Lock()
 	data := s.files[id]
 	s.mu.Unlock()

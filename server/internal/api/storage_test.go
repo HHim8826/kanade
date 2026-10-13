@@ -332,3 +332,70 @@ func TestStorageOneDrive(t *testing.T) {
 		t.Fatalf("a wrong client secret: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// Deleting a song answers once the database has it, whatever the storage location's trash does:
+// a bucket that does not answer holds up neither the request beyond trashWait nor imports, and the
+// file reaches the trash once it answers (review #225).
+func TestDeleteDoesNotWaitForASlowTrash(t *testing.T) {
+	defer func(w time.Duration) { trashWait = w }(trashWait)
+	trashWait = 200 * time.Millisecond
+	s, h, token := storageServer(t)
+	ctx := context.Background()
+	fake := storagetest.NewS3(t)
+	held := make(chan struct{})
+	fake.Fail = func(r *http.Request) int { // the copy to .kanade-trash waits
+		if r.Header.Get("X-Amz-Copy-Source") != "" {
+			select {
+			case <-held:
+			case <-r.Context().Done():
+			}
+		}
+		return 0
+	}
+	rec := do(t, h, "POST", "/api/v1/storage", token, map[string]any{"kind": "s3", "name": "R2", "mode": "managed",
+		"config": map[string]string{"endpoint": fake.URL, "bucket": fake.Bucket}, "secret": map[string]string{"access_key_id": fake.AccessKey, "secret_access_key": fake.SecretKey}})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	st := decode[storeInfo](t, rec.Body)
+	song := func(sha, key string) int64 {
+		fake.Put(key, []byte(sha))
+		a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: sha, Size: int64(len(sha)), Format: "flac", Codec: "flac"})
+		if err := s.lib.MarkVerified(ctx, a.ID, storage.Ref("s3", st.ID, key)); err != nil {
+			t.Fatal(err)
+		}
+		res, err := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "Song " + sha})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res.TrackID
+	}
+	gone := song("aaaa", "library/A/01.flac")
+	start := time.Now()
+	rec = do(t, h, "DELETE", fmt.Sprintf("/api/v1/tracks/%d", gone), token, nil)
+	if took := time.Since(start); rec.Code != 200 || took > 2*time.Second {
+		t.Fatalf("delete: %d %s after %v", rec.Code, rec.Body, took)
+	}
+	// Imported meanwhile: taken up at once.
+	done := make(chan int64)
+	go func() { done <- song("bbbb", "library/B/01.flac") }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("an import waited for another file's move to the trash")
+	}
+	close(held)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if n, _, _ := s.lib.TrashPending(ctx); n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the file never reached the trash")
+		}
+	}
+	for _, name := range fake.Names() {
+		if name == "library/A/01.flac" {
+			t.Fatalf("still in place: %v", fake.Names())
+		}
+	}
+}

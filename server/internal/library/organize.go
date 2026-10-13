@@ -1404,55 +1404,81 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) ([]string, error) {
 		return nil, err
 	}
 	defer tx.Rollback()
-	assets, err := idsTx(ctx, tx, `SELECT asset_id FROM track_assets WHERE track_id = ?`, id)
+	drive, err := deleteTracksTx(ctx, tx, []int64{id})
 	if err != nil {
 		return nil, err
-	}
-	for _, q := range []string{
-		`UPDATE import_items SET entry_id = NULL WHERE entry_id IN (SELECT id FROM album_entries WHERE track_id = ?1)`,
-		`UPDATE import_items SET track_id = NULL WHERE track_id = ?1`,
-		`DELETE FROM album_entries WHERE track_id = ?1`,
-		`DELETE FROM aliases WHERE target = 'track' AND target_id = ?1`,
-		`DELETE FROM search_index WHERE rowid = ?1 * 4 + 1`, // indexRow("track", id)
-		`DELETE FROM tracks WHERE id = ?1`,                  // cascades to links, plays, favorites, playlist items, lyrics
-	} {
-		if _, err := tx.ExecContext(ctx, q, id); err != nil {
-			return nil, err
-		}
-	}
-	var drive []string
-	for _, a := range assets {
-		var used int
-		if tx.QueryRowContext(ctx, `SELECT 1 FROM track_assets WHERE asset_id = ? LIMIT 1`, a).Scan(&used) == nil {
-			continue
-		}
-		var fileID sql.NullString
-		tx.QueryRowContext(ctx, `SELECT file_ref FROM assets WHERE id = ?`, a).Scan(&fileID)
-		for _, q := range []string{
-			`UPDATE import_items SET asset_id = NULL WHERE asset_id = ?`,
-			`DELETE FROM plays WHERE asset_id = ?`,
-			`DELETE FROM album_entries WHERE asset_id = ?`,
-			`DELETE FROM assets WHERE id = ?`,
-		} {
-			if _, err := tx.ExecContext(ctx, q, a); err != nil {
-				return nil, err
-			}
-		}
-		if fileID.Valid && fileID.String != "" {
-			drive = append(drive, fileID.String)
-			// Owed to the Drive trash until it is there, in the same transaction (review #26).
-			if _, err := tx.ExecContext(ctx, `INSERT INTO file_trash (file_id, created_at) VALUES (?, ?) ON CONFLICT (file_id)
-				DO UPDATE SET created_at = excluded.created_at, done_at = 0, tries = 0, next_at = 0, last_error = ''`,
-				fileID.String, db.Now()); err != nil {
-				return nil, err
-			}
-		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO edit_groups (source, summary, created_at) VALUES (?, ?, ?)`,
 		SourceUser, fmt.Sprintf("永久刪除歌曲「%s」", title), db.Now()); err != nil {
 		return nil, err
 	}
 	return drive, tx.Commit()
+}
+
+// deleteTracksTx is DeleteTrack in tx for the tracks ids at once (a source removed: review #229),
+// but for the edit log: one statement a table, not a table a track.
+func deleteTracksTx(ctx context.Context, tx *sql.Tx, ids []int64) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	list, _ := json.Marshal(ids)
+	const these = `(SELECT value FROM json_each(?1))`
+	// The files no other track uses leave with them.
+	assets, err := idsTx(ctx, tx, `SELECT DISTINCT ta.asset_id FROM track_assets ta WHERE ta.track_id IN `+these+`
+		AND NOT EXISTS (SELECT 1 FROM track_assets o WHERE o.asset_id = ta.asset_id AND o.track_id NOT IN `+these+`)`, string(list))
+	if err != nil {
+		return nil, err
+	}
+	for _, q := range []string{
+		`UPDATE import_items SET entry_id = NULL WHERE entry_id IN (SELECT id FROM album_entries WHERE track_id IN ` + these + `)`,
+		`UPDATE import_items SET track_id = NULL WHERE track_id IN ` + these,
+		`DELETE FROM album_entries WHERE track_id IN ` + these,
+		`DELETE FROM aliases WHERE target = 'track' AND target_id IN ` + these,
+		// indexRow("track", id)
+		`DELETE FROM search_index WHERE rowid IN (SELECT value * 4 + 1 FROM json_each(?1))`,
+		// cascades to links, plays, favorites, playlist items, lyrics
+		`DELETE FROM tracks WHERE id IN ` + these,
+	} {
+		if _, err := tx.ExecContext(ctx, q, string(list)); err != nil {
+			return nil, err
+		}
+	}
+	if len(assets) == 0 {
+		return nil, nil
+	}
+	list, _ = json.Marshal(assets)
+	var drive []string
+	rows, err := tx.QueryContext(ctx, `SELECT file_ref FROM assets WHERE id IN `+these+` AND coalesce(file_ref, '') != ''`, string(list))
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		drive = append(drive, ref)
+	}
+	rows.Close()
+	for _, q := range []string{
+		`UPDATE import_items SET asset_id = NULL WHERE asset_id IN ` + these,
+		`DELETE FROM plays WHERE asset_id IN ` + these,
+		`DELETE FROM album_entries WHERE asset_id IN ` + these,
+		`DELETE FROM assets WHERE id IN ` + these,
+	} {
+		if _, err := tx.ExecContext(ctx, q, string(list)); err != nil {
+			return nil, err
+		}
+	}
+	// Owed to the Drive trash until they are there, in the same transaction (review #26).
+	files, _ := json.Marshal(drive)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO file_trash (file_id, created_at) SELECT value, ?2 FROM json_each(?1) WHERE true
+		ON CONFLICT (file_id) DO UPDATE SET created_at = excluded.created_at, done_at = 0, tries = 0, next_at = 0, last_error = ''`,
+		string(files), db.Now()); err != nil {
+		return nil, err
+	}
+	return drive, nil
 }
 
 // ApplyChanges applies a set of looked-up changes as one action, for example a MusicBrainz

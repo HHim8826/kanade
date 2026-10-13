@@ -304,7 +304,7 @@ func (s *Server) prefetchStream(w http.ResponseWriter, r *http.Request) {
 		if s.lite != nil {
 			s.lite.Unprefetch()
 		}
-		if err := s.cache.Prefetch(a.Ref, a.Size); err != nil {
+		if err := s.cache.Prefetch(a.Ref, a.SHA256, a.Size); err != nil {
 			s.log.Info("prefetch", "asset", id, "err", err)
 		}
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -238,16 +239,28 @@ func (s *Server) removeStore(w http.ResponseWriter, r *http.Request) {
 			s.storeError(w, r, fmt.Errorf("%w: %d songs and %d covers or sidecars", library.ErrStoreInUse, use.Songs, use.Others))
 			return
 		}
-	} else {
-		var err error
-		if songs, err = s.lib.ForgetStore(ctx, st.Kind, st.ID); err != nil {
-			s.internal(w, r, err)
+		if err := s.files.Remove(ctx, st.ID); err != nil {
+			s.storeError(w, r, err)
 			return
 		}
-	}
-	if err := s.files.Remove(ctx, st.ID); err != nil {
-		s.storeError(w, r, err)
-		return
+	} else {
+		// The songs from there leave with the store, and what of it is still being imported is
+		// called off, in one transaction (reviews #222, #229).
+		err := s.importer.RemoveSource(ctx, st.ID, storage.Ref(st.Kind, st.ID, ""), func(tx *sql.Tx) error {
+			var err error
+			if songs, err = s.lib.ForgetStore(ctx, tx, st.Kind, st.ID, st.Name); err != nil {
+				return err
+			}
+			return s.files.RemoveTx(ctx, tx, st.ID)
+		})
+		if errors.Is(err, importer.ErrScanning) {
+			writeError(w, http.StatusConflict, errors.New("this storage location is being scanned or checked"))
+			return
+		}
+		if err != nil {
+			s.storeError(w, r, err)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]int{"songs": songs})
 }

@@ -85,7 +85,9 @@ func (s *Store) CreateAsset(ctx context.Context, a Asset) (*Asset, error) {
 // A Drive file that left the library and is still owed to the trash is taken up again here, which
 // drops the debt; one that already went to the trash is refused with ErrInTrash (review #44).
 func (s *Store) MarkVerified(ctx context.Context, assetID int64, driveFileID string) error {
-	trashMu.Lock()
+	if err := lockTrash(ctx, driveFileID); err != nil {
+		return err
+	}
 	defer trashMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

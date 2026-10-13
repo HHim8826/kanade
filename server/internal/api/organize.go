@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
@@ -64,19 +66,40 @@ func (s *Server) editTrack(w http.ResponseWriter, r *http.Request) {
 // a source's are left alone, #99). Each is owed to the trash in the database until this works; a
 // failure is retried in the background (review #26).
 // It goes through the library's trash lock, which also checks that no re-import took the file up
-// again meanwhile (review #44).
+// again meanwhile (review #44). The request waits for the moves trashWait at most, then answers
+// with what is done: the rest go on in the background (review #225), owed until they are done.
 func (s *Server) trashFiles(r *http.Request, ids []string) (trashed, failed int) {
-	for _, id := range ids {
-		switch n, err := s.lib.TrashFile(r.Context(), id, s.files.Trash); n {
-		case library.Trashed:
-			trashed++
-		case library.TrashFailedTry:
-			s.log.Warn("trash drive file; will retry", "file", id, "err", err)
-			failed++
+	results := make(chan int, len(ids))
+	ctx := context.WithoutCancel(r.Context())
+	go func() {
+		for _, id := range ids {
+			n, err := s.lib.TrashFile(ctx, id, s.files.Trash)
+			if n == library.TrashFailedTry {
+				s.log.Warn("trash drive file; will retry", "file", id, "err", err)
+			}
+			results <- n
+		}
+	}()
+	timeout := time.NewTimer(trashWait)
+	defer timeout.Stop()
+	for range ids {
+		select {
+		case n := <-results:
+			switch n {
+			case library.Trashed:
+				trashed++
+			case library.TrashFailedTry:
+				failed++
+			}
+		case <-timeout.C:
+			return trashed, failed
 		}
 	}
 	return trashed, failed
 }
+
+// trashWait is how long a deletion waits for its files to reach the trash before it answers.
+var trashWait = 5 * time.Second
 
 func (s *Server) deleteTrack(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)

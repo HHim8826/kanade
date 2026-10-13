@@ -3,9 +3,12 @@ package importer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,7 +17,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/storage"
 	"github.com/HHim8826/kanade/server/internal/storage/storagetest"
@@ -174,6 +179,134 @@ func TestCloudSourceExtrasHoldStaging(t *testing.T) {
 	im.db.QueryRow(`SELECT group_concat(l.text) FROM lyrics l JOIN tracks t ON t.id = l.track_id`).Scan(&lyrics)
 	if lyrics != "[00:01.00]la la" {
 		t.Fatalf("lyrics %q", lyrics)
+	}
+}
+
+// Removing a source leaves nothing of it to import (review #222): a scan of it running refuses it;
+// a batch of it in review is cancelled; the file being fetched is stopped and the files not imported
+// yet are left out; the songs imported already leave with it, written once in the edit log (review
+// #229); and no song is left pointing at it.
+func TestRemoveSourceCallsOffImports(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	fake := storagetest.NewS3(t)
+	tmp := t.TempDir()
+	for i, title := range []string{"One", "Two", "Three"} {
+		p := filepath.Join(tmp, title+".mp3")
+		taggedMP3(t, p, map[string]string{"TIT2": title, "TPE1": "Band", "TALB": "Gone Album", "TRCK": fmt.Sprint(i + 1)})
+		b, _ := os.ReadFile(p)
+		fake.Put(fmt.Sprintf("music/Gone Album/%02d %s.mp3", i+1, title), b)
+	}
+	fetching, held := make(chan struct{}, 1), make(chan struct{})
+	var fetched atomic.Int64
+	fake.Fail = func(r *http.Request) int { // the second song fetched (whole, not read for its tags) waits
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, ".mp3") && r.Header.Get("Range") == "" && fetched.Add(1) == 2 {
+			fetching <- struct{}{}
+			select {
+			case <-held:
+			case <-r.Context().Done():
+			}
+		}
+		return 0
+	}
+	defer close(held)
+	add := func() *storage.Store {
+		cfg, _ := json.Marshal(storage.S3Config{Endpoint: fake.URL, Bucket: fake.Bucket, Prefix: "music"})
+		sec, _ := json.Marshal(storage.S3Secret{AccessKey: fake.AccessKey, SecretKey: fake.SecretKey})
+		st, err := set.Add(ctx, storage.NewStore{Kind: storage.KindS3, Name: "R2", Mode: storage.Source, Config: cfg, Secret: sec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	songs := -1
+	remove := func(st *storage.Store) error {
+		return im.RemoveSource(ctx, st.ID, storage.Ref(st.Kind, st.ID, ""), func(tx *sql.Tx) error {
+			var err error
+			if songs, err = lib.ForgetStore(ctx, tx, st.Kind, st.ID, st.Name); err != nil {
+				return err
+			}
+			return set.RemoveTx(ctx, tx, st.ID)
+		})
+	}
+	left := func() (tracks, refs int) {
+		im.db.QueryRow(`SELECT count(*) FROM tracks`).Scan(&tracks)
+		im.db.QueryRow(`SELECT (SELECT count(*) FROM assets WHERE file_ref LIKE 's3:%')
+			+ (SELECT count(*) FROM covers WHERE file_ref LIKE 's3:%')`).Scan(&refs)
+		return
+	}
+
+	// A scan running: refused.
+	st := add()
+	im.mu.Lock()
+	im.scanning[st.ID] = true
+	im.mu.Unlock()
+	if err := remove(st); !errors.Is(err, ErrScanning) {
+		t.Fatalf("while scanned: %v", err)
+	}
+	im.mu.Lock()
+	delete(im.scanning, st.ID)
+	im.mu.Unlock()
+
+	// In review: the batch is cancelled.
+	startWorker(t, im)
+	res, err := im.ScanSource(ctx, set, st.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, im, res.Batch, BatchReview)
+	if err := remove(st); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := im.Batch(ctx, res.Batch)
+	if b.State != BatchCanceled || states(b)["Gone Album/01 One.mp3"] != StateExcluded {
+		t.Fatalf("in review: %s %v", b.State, states(b))
+	}
+
+	// Being imported: one song is in, another being fetched.
+	st = add()
+	if res, err = im.ScanSource(ctx, set, st.ID, false); err != nil || res.New != 3 {
+		t.Fatalf("scan %+v %v", res, err)
+	}
+	select {
+	case <-fetching:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second song was not fetched")
+	}
+	var groups int
+	im.db.QueryRow(`SELECT count(*) FROM edit_groups`).Scan(&groups)
+	if err := remove(st); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, im, res.Batch, BatchDone)
+	b, _ = im.Batch(ctx, res.Batch)
+	count := map[string]int{}
+	for _, state := range states(b) {
+		count[state]++
+	}
+	if count[StatePublished] != 1 || count[StateExcluded] != 2 || songs != 1 || fetched.Load() != 2 {
+		t.Fatalf("being imported: %v, %d songs let go of, %d fetched", states(b), songs, fetched.Load())
+	}
+	if tracks, refs := left(); tracks != 0 || refs != 0 {
+		t.Fatalf("%d songs and %d files left pointing at the source", tracks, refs)
+	}
+	var summaries []string
+	rows, _ := im.db.Query(`SELECT summary FROM edit_groups ORDER BY id LIMIT -1 OFFSET ?`, groups)
+	for rows.Next() {
+		var s string
+		rows.Scan(&s)
+		summaries = append(summaries, s)
+	}
+	rows.Close()
+	if fmt.Sprint(summaries) != "[移除儲存位置「R2」（1 首）]" {
+		t.Fatalf("edit log %v", summaries)
+	}
+	// A file of it placed after all the same is refused.
+	var asset int64
+	im.db.QueryRow(`SELECT id FROM assets LIMIT 1`).Scan(&asset)
+	if err := lib.PlaceAsset(ctx, asset, storage.Ref(st.Kind, st.ID, "Gone Album/03 Three.mp3")); !errors.Is(err, library.ErrStoreGone) {
+		t.Fatalf("placed in a store gone: %v", err)
 	}
 }
 

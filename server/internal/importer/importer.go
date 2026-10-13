@@ -89,6 +89,8 @@ type Importer struct {
 	settle       atomic.Int64             // SetInboxSettle's wait (ns); 0: the default; -1: none
 	albumArtists map[string]string        // batch|album folder|album -> decided album artist
 	scanning     map[int64]bool           // sources being scanned
+	removing     map[int64]bool           // sources being removed: their files are not imported
+	stopItem     map[int64]func()         // source -> stops the file of it being imported
 	// finishing counts batches marked done whose clearing up (batchDone) has not ended: counted
 	// before the batch looks done, so whoever sees it done can wait for what it leaves to go.
 	finishing atomic.Int64
@@ -152,7 +154,8 @@ func (im *Importer) destination(ctx context.Context, assetID int64) (storage.Des
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
 	return &Importer{db: d, lib: lib, drive: drive, staging: stagingDir, log: log,
 		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[coverKey]int64{}, albumArtists: map[string]string{},
-		driveDirs: map[string][]gdrive.File{}, scanning: map[int64]bool{}}
+		driveDirs: map[string][]gdrive.File{}, scanning: map[int64]bool{},
+		removing: map[int64]bool{}, stopItem: map[int64]func(){}}
 }
 
 var audioExt = map[string]bool{
@@ -669,9 +672,18 @@ type outcome struct {
 }
 
 func (im *Importer) handle(ctx context.Context, it *item) {
-	out, err := im.process(ctx, it)
+	ictx, done, removed := im.itemContext(ctx, it)
+	defer done()
+	var out outcome
+	var err error
+	if !removed {
+		out, err = im.process(ictx, it)
+	}
 	if ctx.Err() != nil {
 		return // shutting down: the item stays resumable
+	}
+	if removed || ictx.Err() != nil || errors.Is(err, library.ErrStoreGone) { // its source was removed (RemoveSource)
+		out, err = outcome{state: StateExcluded, msg: library.ErrStoreGone.Error()}, nil
 	}
 	if err != nil {
 		out.state, out.msg = StateFailed, err.Error()

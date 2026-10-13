@@ -320,6 +320,62 @@ func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
 	}
 }
 
+// A move to the trash that takes its time (a storage location not answering) holds up nothing but
+// what concerns that file: other files are taken up and placed meanwhile; another move of the same
+// file waits for it and finds it done (review #225).
+func TestSlowTrashHoldsUpOnlyItsFile(t *testing.T) {
+	ctx := context.Background()
+	s, _, lib, _ := setup(t)
+	s.DB.Exec(`INSERT INTO file_trash (file_id, created_at) VALUES ('drive-slow', 0)`)
+	inTrash, release := make(chan struct{}), make(chan struct{})
+	first := make(chan int)
+	go func() {
+		n, _ := lib.TrashFile(ctx, "drive-slow", func(context.Context, string) error { close(inTrash); <-release; return nil })
+		first <- n
+	}()
+	<-inTrash
+	again := make(chan int)
+	go func() {
+		n, _ := lib.TrashFile(ctx, "drive-slow", func(context.Context, string) error { t.Error("moved twice"); return nil })
+		again <- n
+	}()
+	quick := func(what string, f func() error) {
+		t.Helper()
+		done := make(chan error, 1)
+		go func() { done <- f() }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s waited for another file's move to the trash", what)
+		}
+	}
+	other, _ := lib.CreateAsset(ctx, library.Asset{SHA256: "b1", Size: 1, Format: "flac", Codec: "flac"})
+	quick("taking up another file", func() error { return lib.MarkVerified(ctx, other.ID, "drive-other") })
+	s.DB.Exec(`INSERT INTO stores (id, kind, name, mode, config, secret, created_at) VALUES (7, 'local', 'NAS', 'source', '{}', '{}', 0)`)
+	placed, _ := lib.CreateAsset(ctx, library.Asset{SHA256: "b2", Size: 1, Format: "flac", Codec: "flac"})
+	quick("placing a source's file", func() error { return lib.PlaceAsset(ctx, placed.ID, "local:7:Album/01.flac") })
+	quick("another file's move", func() error {
+		s.DB.Exec(`INSERT INTO file_trash (file_id, created_at) VALUES ('drive-quick', 0)`)
+		_, err := lib.TrashFile(ctx, "drive-quick", func(context.Context, string) error { return nil })
+		return err
+	})
+	select {
+	case n := <-again:
+		t.Fatalf("the same file's second move went ahead: %d", n)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if n := <-first; n != library.Trashed {
+		t.Fatalf("outcome %d", n)
+	}
+	if n := <-again; n != library.TrashSkipped {
+		t.Fatalf("the second move: %d", n)
+	}
+}
+
 // Configure changes how often Run looks at once, and with the inbox import off the change feed is
 // still followed (review #77).
 func TestConfigureIntervalAndInbox(t *testing.T) {

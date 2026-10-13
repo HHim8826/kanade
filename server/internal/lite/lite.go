@@ -60,10 +60,10 @@ type Song struct {
 
 // Source reads originals: the stream cache.
 type Source interface {
-	// Copy writes the whole of Drive file id to w as it arrives.
-	Copy(ctx context.Context, w io.Writer, id string, size int64) error
-	// Hold gives the path of a wholly cached copy of a Drive file, kept until release.
-	Hold(id string) (path string, release func(), ok bool)
+	// Copy writes the whole of file id, of content version (its SHA-256), to w as it arrives.
+	Copy(ctx context.Context, w io.Writer, id, version string, size int64) error
+	// Hold gives the path of a wholly cached copy of a file of content version, kept until release.
+	Hold(id, version string) (path string, release func(), ok bool)
 }
 
 // Encoder makes a lite file: FFmpeg (ffmpeg.Tool.Opus).
@@ -347,10 +347,10 @@ func (s *Store) make(ctx context.Context, o Song) error {
 func (s *Store) encode(ctx context.Context, o Song, dst string) error {
 	downmix := o.Channels > 2
 	if o.Format == "m4a" {
-		if err := s.src.Copy(ctx, io.Discard, o.DriveID, o.Size); err != nil {
+		if err := s.src.Copy(ctx, io.Discard, o.DriveID, o.SHA256, o.Size); err != nil {
 			return s.sourceErr(ctx, err)
 		}
-		path, release, ok := s.src.Hold(o.DriveID)
+		path, release, ok := s.src.Hold(o.DriveID, o.SHA256)
 		if !ok {
 			return errors.New("the original is not cached whole (no room)")
 		}
@@ -369,7 +369,7 @@ func (s *Store) encode(ctx context.Context, o Song, dst string) error {
 	copied := make(chan struct{})
 	go func() {
 		defer close(copied)
-		srcErr = s.src.Copy(copyCtx, pw, o.DriveID, o.Size)
+		srcErr = s.src.Copy(copyCtx, pw, o.DriveID, o.SHA256, o.Size)
 		pw.Close() // the end: FFmpeg reads to it
 	}()
 	err = s.enc.Opus(ctx, "pipe:0", pr, dst, kbps, downmix)

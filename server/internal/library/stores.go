@@ -2,8 +2,10 @@ package library
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/HHim8826/kanade/server/internal/db"
@@ -27,13 +29,25 @@ func likeRefs(col string) string { return col + ` >= ?1 AND ` + col + ` < ?2` }
 // missing, and no longer there. An asset the library already has elsewhere stays there (the file
 // is a copy of it).
 func (s *Store) PlaceAsset(ctx context.Context, assetID int64, ref string) error {
-	trashMu.Lock()
+	if err := lockTrash(ctx, ref); err != nil {
+		return err
+	}
 	defer trashMu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	// The store is there still, in the same transaction as its removal would be (review #222).
+	if store, ok := refStore(ref); ok {
+		var there int
+		switch err := tx.QueryRowContext(ctx, `SELECT 1 FROM stores WHERE id = ?`, store).Scan(&there); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrStoreGone
+		case err != nil:
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, file_ref = NULL WHERE file_ref = ? AND id != ?`,
 		AssetMissing, ref, assetID); err != nil {
 		return err
@@ -146,29 +160,23 @@ func (s *Store) StoreUse(ctx context.Context, kind string, id int64) (StoreUse, 
 // ErrStoreInUse is a managed store that still holds library files: they would have nowhere to be.
 var ErrStoreInUse = errors.New("the library still keeps files in this storage location")
 
-// ForgetStore lets go of what the library has from a source being removed: songs whose every file
-// is there leave the library (as deleting them does: plays, favorites and playlist items with
-// them); a file of a song that has others there too is missing; covers there are dropped from
-// their albums and sidecars from theirs. The files themselves are not touched. It returns how
-// many songs left.
-func (s *Store) ForgetStore(ctx context.Context, kind string, id int64) (int, error) {
+// ForgetStore lets go of what the library has from a source being removed, in tx (with the store's
+// removal, review #222): songs whose every file is there leave the library (as deleting them does:
+// plays, favorites and playlist items with them); a file of a song that has others there too is
+// missing; covers there are dropped from their albums and sidecars from theirs. The files themselves
+// are not touched. The edit log says it once, by the store's name (review #229). It returns how many
+// songs left.
+func (s *Store) ForgetStore(ctx context.Context, tx *sql.Tx, kind string, id int64, name string) (int, error) {
 	from, to := refRange(kind, id)
-	tracks, err := s.ids(ctx, `SELECT DISTINCT ta.track_id FROM track_assets ta JOIN assets a ON a.id = ta.asset_id
+	tracks, err := idsTx(ctx, tx, `SELECT DISTINCT ta.track_id FROM track_assets ta JOIN assets a ON a.id = ta.asset_id
 		WHERE `+likeRefs("a.file_ref")+` AND NOT EXISTS (SELECT 1 FROM track_assets o JOIN assets b ON b.id = o.asset_id
 		WHERE o.track_id = ta.track_id AND NOT (`+likeRefs("coalesce(b.file_ref, '')")+`))`, from, to)
 	if err != nil {
 		return 0, err
 	}
-	for _, t := range tracks {
-		if _, err := s.DeleteTrack(ctx, t); err != nil {
-			return 0, err
-		}
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+	if _, err := deleteTracksTx(ctx, tx, tracks); err != nil { // their files' debts to the trash go below
 		return 0, err
 	}
-	defer tx.Rollback()
 	for _, q := range []string{
 		`UPDATE assets SET state = '` + AssetMissing + `', file_ref = NULL WHERE ` + likeRefs("file_ref"),
 		`UPDATE albums SET cover_id = NULL WHERE cover_id IN (SELECT id FROM covers WHERE ` + likeRefs("file_ref") + `)`,
@@ -180,5 +188,25 @@ func (s *Store) ForgetStore(ctx context.Context, kind string, id int64) (int, er
 			return 0, fmt.Errorf("%s: %w", strings.Fields(q)[0], err)
 		}
 	}
-	return len(tracks), tx.Commit()
+	if len(tracks) > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO edit_groups (source, summary, created_at) VALUES (?, ?, ?)`,
+			SourceUser, fmt.Sprintf("移除儲存位置「%s」（%d 首）", name, len(tracks)), db.Now()); err != nil {
+			return 0, err
+		}
+	}
+	return len(tracks), nil
+}
+
+// ErrStoreGone is a source's file that cannot be placed: its store was removed (review #222).
+var ErrStoreGone = errors.New("the storage location was removed")
+
+// refStore is the store of a reference "<kind>:<store>:<key>"; false for a Drive file ID.
+func refStore(ref string) (int64, bool) {
+	_, rest, ok := strings.Cut(ref, ":")
+	if !ok {
+		return 0, false
+	}
+	n, _, ok := strings.Cut(rest, ":")
+	id, err := strconv.ParseInt(n, 10, 64)
+	return id, ok && err == nil
 }

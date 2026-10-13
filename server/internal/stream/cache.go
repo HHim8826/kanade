@@ -136,25 +136,34 @@ type file struct {
 	lastUse  time.Time
 	readers  int  // requests and prefetches holding it; it is not dropped while held
 	stale    bool // its Drive file changed: dropped once the last reader leaves, never handed out again
+	// version is the content cached (the asset's SHA-256): a request for other content at the same
+	// place (a source's file imported again with other bytes) has the copy dropped and fetched anew.
+	version string
 }
 
 // errFull means the file does not fit in the budget beside the files in use.
 var errFull = errors.New("the stream cache is full")
 
-// acquire returns the cached file for id, adding it if room can be made, and holds it (readers)
-// until release. errFull: no room, even after dropping everything not in use.
-func (c *Cache) acquire(id string, size int64) (*file, error) {
+// acquire returns the cached file for id with content version, adding it if room can be made, and
+// holds it (readers) until release. A copy of other content there is forgotten first: the place
+// stays, the bytes there changed (review #214). errFull: no room, even after dropping everything not
+// in use.
+func (c *Cache) acquire(id, version string, size int64) (*file, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cf, ok := c.files[id]; ok {
 		cf.mu.Lock()
-		defer cf.mu.Unlock()
-		if cf.size != size {
-			return nil, fmt.Errorf("cached size %d differs from %d", cf.size, size)
+		if cf.version == version {
+			defer cf.mu.Unlock()
+			if cf.size != size {
+				return nil, fmt.Errorf("cached size %d differs from %d", cf.size, size)
+			}
+			cf.readers++
+			cf.lastUse = time.Now()
+			return cf, nil
 		}
-		cf.readers++
-		cf.lastUse = time.Now()
-		return cf, nil
+		cf.mu.Unlock()
+		c.forgetLocked(id)
 	}
 	if size > c.budget {
 		return nil, errFull
@@ -171,15 +180,15 @@ func (c *Cache) acquire(id string, size int64) (*file, error) {
 		return nil, err
 	}
 	blocks := int((size + blockSize - 1) / blockSize)
-	cf := &file{c: c, id: id, size: size, f: f, have: make([]bool, blocks), missing: blocks, lastUse: time.Now(), readers: 1}
+	cf := &file{c: c, id: id, version: version, size: size, f: f, have: make([]bool, blocks), missing: blocks, lastUse: time.Now(), readers: 1}
 	cf.cond = sync.NewCond(&cf.mu)
 	c.files[id] = cf
 	return cf, nil
 }
 
-// Hold returns the path of id's cached copy when the whole file is there, kept (not dropped or
-// evicted) until release is called.
-func (c *Cache) Hold(id string) (path string, release func(), ok bool) {
+// Hold returns the path of id's cached copy of content version when the whole file is there, kept
+// (not dropped or evicted) until release is called.
+func (c *Cache) Hold(id, version string) (path string, release func(), ok bool) {
 	if l, isLocal := c.src.(Local); isLocal {
 		if p, local, err := l.LocalPath(context.Background(), id); local {
 			return p, func() {}, err == nil
@@ -193,7 +202,7 @@ func (c *Cache) Hold(id string) (path string, release func(), ok bool) {
 	}
 	cf.mu.Lock()
 	defer cf.mu.Unlock()
-	if cf.missing > 0 || cf.stale {
+	if cf.missing > 0 || cf.stale || cf.version != version {
 		return "", nil, false
 	}
 	cf.readers++
@@ -338,6 +347,10 @@ func (c *Cache) Trim() int64 {
 func (c *Cache) Forget(id string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.forgetLocked(id)
+}
+
+func (c *Cache) forgetLocked(id string) {
 	cf, ok := c.files[id]
 	if !ok {
 		return
@@ -402,8 +415,9 @@ func (c *Cache) Unprefetch() {
 	c.settleLocked()
 }
 
-// Prefetch starts filling a file without a client request (plan: preload at most the next track).
-func (c *Cache) Prefetch(id string, size int64) error {
+// Prefetch starts filling a file (of content version) without a client request (plan: preload at
+// most the next track).
+func (c *Cache) Prefetch(id, version string, size int64) error {
 	if c.lean.Load() {
 		return nil
 	}
@@ -423,7 +437,7 @@ func (c *Cache) Prefetch(id string, size int64) error {
 	if busy {
 		return nil
 	}
-	cf, err := c.acquire(id, size)
+	cf, err := c.acquire(id, version, size)
 	if errors.Is(err, errFull) {
 		return nil // no room: the track will be passed through when played
 	}
@@ -564,10 +578,10 @@ func (cf *file) await(ctx context.Context, blk int64) error {
 	return nil
 }
 
-// sourceError is Drive failing again and again.
+// sourceError is where the file is (Drive, a storage location) failing again and again.
 type sourceError struct{ err error }
 
-func (e *sourceError) Error() string { return "drive keeps failing: " + e.err.Error() }
+func (e *sourceError) Error() string { return "reading the file keeps failing: " + e.err.Error() }
 func (e *sourceError) Unwrap() error { return e.err }
 
 // copyRange writes bytes [start, end] to w as they become available.
@@ -624,7 +638,7 @@ func parseRange(h string, size int64) (start, end int64, partial bool, err error
 }
 
 // Serve answers a GET or HEAD for a remote file of the given size.
-// etag identifies the content version (the asset's SHA-256).
+// etag identifies the content version (the asset's SHA-256), as the cached copy does.
 func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size int64, contentType, etag string) {
 	h := w.Header()
 	h.Set("Accept-Ranges", "bytes")
@@ -667,7 +681,7 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 		w.WriteHeader(status)
 		return
 	}
-	cf, err := c.acquire(id, size)
+	cf, err := c.acquire(id, etag, size)
 	if errors.Is(err, errFull) {
 		c.passThrough(w, r, id, start, end, status)
 		return
@@ -696,10 +710,10 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 	}
 }
 
-// Copy writes the whole of file id to w as it arrives, through the cache (left there for the next
+// Copy writes the whole of file id (content version) to w as it arrives, through the cache (left there for the next
 // time), or straight from Drive when the cache has no room: an original read to be re-encoded for
 // lite mode. Drive failing again and again ends it, as it does a request.
-func (c *Cache) Copy(ctx context.Context, w io.Writer, id string, size int64) error {
+func (c *Cache) Copy(ctx context.Context, w io.Writer, id, version string, size int64) error {
 	if f, ok, err := c.localFile(ctx, id, size); ok {
 		if err != nil {
 			return err
@@ -708,7 +722,7 @@ func (c *Cache) Copy(ctx context.Context, w io.Writer, id string, size int64) er
 		_, err := io.Copy(w, f)
 		return err
 	}
-	cf, err := c.acquire(id, size)
+	cf, err := c.acquire(id, version, size)
 	if errors.Is(err, errFull) {
 		c.Stats.SourceRequests.Add(1)
 		resp, err := c.src.OpenRange(ctx, id, 0, -1)

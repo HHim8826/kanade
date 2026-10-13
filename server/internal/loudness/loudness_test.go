@@ -108,7 +108,7 @@ func TestScan(t *testing.T) {
 	cached := add("e.ogg", "d5", testdata(t, "tone.ogg"))
 	delete(src.files, "d5") // only in the cache
 	oggPath := filepath.Join("..", "media", "testdata", "tone.ogg")
-	s.Hold = func(id string) (string, func(), bool) {
+	s.Hold = func(id, _ string) (string, func(), bool) {
 		if id == "d5" {
 			return oggPath, func() {}, true
 		}
@@ -155,7 +155,7 @@ func TestCachedAndImported(t *testing.T) {
 	go s.Run(ctx)
 	played := add("p.flac", "dp", testdata(t, "tone.flac"))
 	path := filepath.Join("..", "media", "testdata", "tone.flac")
-	s.Hold = func(id string) (string, func(), bool) { return path, func() {}, id == "dp" }
+	s.Hold = func(id, _ string) (string, func(), bool) { return path, func() {}, id == "dp" }
 	s.Cached("dp")
 	s.Cached("no-such-file")
 	deadline := time.Now().Add(20 * time.Second)

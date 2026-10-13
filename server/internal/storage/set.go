@@ -741,6 +741,14 @@ func (s *Set) Remove(ctx context.Context, id int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := s.RemoveTx(ctx, tx, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RemoveTx is Remove in tx, with what else goes with the store (a source's songs, review #222).
+func (s *Set) RemoveTx(ctx context.Context, tx *sql.Tx, id int64) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM settings WHERE key = ? AND value = ?`, settingDefault, strconv.FormatInt(id, 10)); err != nil {
 		return err
 	}
@@ -751,12 +759,7 @@ func (s *Set) Remove(ctx context.Context, id int64) error {
 	if n, _ := r.RowsAffected(); n == 0 {
 		return ErrNoStore
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	delete(s.built, id)
-	s.mu.Unlock()
+	s.rebuild(id) // made again from the database should the transaction not go through
 	return nil
 }
 

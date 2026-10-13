@@ -91,7 +91,7 @@ function StoreRow({ st, isDefault, onChange }) {
   const remove = () => confirmDialog({
     title: `移除「${st.name}」`, action: '移除', danger: st.mode === 'source' && st.use.songs > 0,
     children: st.mode === 'source'
-      ? html`<p>${st.use.songs > 0 ? `這個來源的 ${st.use.songs} 首歌會從曲庫移除（連同它們的播放記錄、收藏和歌單項目）。` : ''}${st.location} 裡的檔案不會動。</p>`
+      ? html`<p>${st.use.songs > 0 ? `這個來源的 ${st.use.songs} 首歌會從曲庫移除（連同它們的播放記錄、收藏和歌單項目）。` : ''}這個來源還在預覽或匯入中的檔案會一起取消，不會再匯入。${st.location} 裡的檔案不會動。</p>`
       : html`<p>只是不再使用這個位置；${st.location} 裡的檔案不會動。</p>`,
     onConfirm: async () => {
       const r = await api('DELETE', `/storage/${st.id}`);

@@ -38,9 +38,9 @@ type Service struct {
 	DB     *sql.DB      // keeps whether the library is scanned by itself
 	FF     *ffmpeg.Tool // nil: nothing is measured
 	Source Source
-	// Hold gives the path of a wholly cached copy of a Drive file, kept until release (the stream
-	// cache's Hold); nil when there is no cache.
-	Hold func(driveID string) (path string, release func(), ok bool)
+	// Hold gives the path of a wholly cached copy of a file with that SHA-256, kept until release
+	// (the stream cache's Hold); nil when there is no cache.
+	Hold func(ref, sha string) (path string, release func(), ok bool)
 	Temp string // where a file that must be read with seeking (MP4) is put while it is measured
 	// Budget is the staging budget a copy in Temp takes its room from (review #144); nil: none.
 	Budget *staging.Budget
@@ -187,25 +187,25 @@ func (s *Service) Cached(driveID string) {
 }
 
 func (s *Service) measureCached(ctx context.Context, driveID string) {
-	asset, err := s.Lib.AssetByDriveID(ctx, driveID)
+	asset, sha, err := s.Lib.AssetByRef(ctx, driveID)
 	if err != nil || asset == 0 {
 		return
 	}
 	if known, err := s.Lib.LoudnessKnown(ctx, asset); err != nil || known {
 		return
 	}
-	if err := s.fromCache(ctx, asset, driveID); err != nil && !errors.Is(err, errNotCached) {
+	if err := s.fromCache(ctx, asset, driveID, sha); err != nil && !errors.Is(err, errNotCached) {
 		s.Log.Warn("measure loudness", "asset", asset, "err", err)
 	}
 }
 
 var errNotCached = errors.New("not cached whole")
 
-func (s *Service) fromCache(ctx context.Context, asset int64, driveID string) error {
+func (s *Service) fromCache(ctx context.Context, asset int64, driveID, sha string) error {
 	if s.Hold == nil {
 		return errNotCached
 	}
-	path, release, ok := s.Hold(driveID)
+	path, release, ok := s.Hold(driveID, sha) // the copy of these bytes, not of others once there (review #214)
 	if !ok {
 		return errNotCached
 	}
@@ -365,7 +365,7 @@ func (s *Service) runScan(ctx context.Context, sc *scan, failed bool) {
 				continue
 			}
 			tried[u.AssetID] = true
-			err := s.fromCache(ctx, u.AssetID, u.Ref)
+			err := s.fromCache(ctx, u.AssetID, u.Ref, u.SHA256)
 			if errors.Is(err, errNotCached) {
 				err = s.fromDrive(ctx, u)
 			}

@@ -13,8 +13,10 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
@@ -433,6 +435,126 @@ func (im *Importer) noteSource(ctx context.Context, it *item, out outcome) {
 		WHERE store_id = ? AND key = ?`, state, out.sha, id, key); err != nil {
 		im.log.Warn("record source file", "ref", it.ref, "err", err)
 	}
+}
+
+// itemContext is the context a file is imported in: a source's file stops when its source is
+// removed (RemoveSource). removed: the source is being removed, the file is not imported.
+func (im *Importer) itemContext(ctx context.Context, it *item) (ictx context.Context, done func(), removed bool) {
+	_, store, _, ok := storage.Parse(it.ref)
+	if !ok {
+		return ctx, func() {}, false
+	}
+	im.mu.Lock()
+	defer im.mu.Unlock()
+	if im.removing[store] {
+		return ctx, func() {}, true
+	}
+	ictx, cancel := context.WithCancel(ctx)
+	im.stopItem[store] = cancel
+	return ictx, func() {
+		cancel()
+		im.mu.Lock()
+		delete(im.stopItem, store)
+		im.mu.Unlock()
+	}, false
+}
+
+// RemoveSource removes source id (its references starting with prefix) with remove, which lets go of
+// the library's songs from there and deletes the store in tx. Nothing of it is left to import after
+// (review #222): a scan of it running refuses it (ErrScanning) and none starts meanwhile; the file of
+// it being imported is stopped and recorded first; and in the same transaction its batches waiting
+// for review or being analyzed are cancelled, and its files not imported yet in others left out.
+func (im *Importer) RemoveSource(ctx context.Context, id int64, prefix string, remove func(tx *sql.Tx) error) error {
+	im.mu.Lock()
+	if im.scanning[id] {
+		im.mu.Unlock()
+		return ErrScanning
+	}
+	im.scanning[id], im.removing[id] = true, true
+	if stop := im.stopItem[id]; stop != nil {
+		stop()
+	}
+	im.mu.Unlock()
+	defer func() {
+		im.mu.Lock()
+		delete(im.scanning, id)
+		delete(im.removing, id)
+		im.mu.Unlock()
+	}()
+	for { // the file stopped is recorded before its source goes
+		im.mu.Lock()
+		_, busy := im.stopItem[id]
+		im.mu.Unlock()
+		if !busy {
+			break
+		}
+		if !sleepCtx(ctx, 20*time.Millisecond) {
+			return ctx.Err()
+		}
+	}
+	from, to := prefix, prefix[:len(prefix)-1]+";"
+	tx, err := im.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	ids := func(q string, args ...any) ([]int64, error) {
+		rows, err := tx.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []int64
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				return nil, err
+			}
+			out = append(out, id)
+		}
+		return out, rows.Err()
+	}
+	canceled, err := ids(`SELECT id FROM import_batches WHERE kind = 'source' AND json_extract(options, '$.store') = ? AND state IN (?, ?)`,
+		id, BatchReview, BatchAnalyzing)
+	if err != nil {
+		return err
+	}
+	running, err := ids(`SELECT DISTINCT batch_id FROM import_items WHERE ref >= ? AND ref < ? AND state IN ('pending', 'uploading')`, from, to)
+	if err != nil {
+		return err
+	}
+	now := db.Now()
+	for _, b := range canceled {
+		if _, err := tx.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = ? WHERE id = ?`, BatchCanceled, now, b); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE batch_id = ? AND state = 'pending'`,
+			StateExcluded, library.ErrStoreGone.Error(), now, b); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = ?, error = ?, updated_at = ? WHERE ref >= ? AND ref < ?
+		AND state IN ('pending', 'uploading')`, StateExcluded, library.ErrStoreGone.Error(), now, from, to); err != nil {
+		return err
+	}
+	if err := remove(tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, b := range canceled {
+		os.RemoveAll(im.workDir(b))
+		var source string
+		im.db.QueryRowContext(ctx, `SELECT source FROM import_batches WHERE id = ?`, b).Scan(&source)
+		if im.OnBatchDone != nil {
+			im.OnBatchDone(ctx, "source", source, 0)
+		}
+	}
+	for _, b := range running {
+		im.finishIfIdle(ctx, b) // what is left of it may be done now
+	}
+	return nil
 }
 
 // settleSource records what became of a source batch's files that no import recorded (review #228):

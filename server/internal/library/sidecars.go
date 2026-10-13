@@ -249,8 +249,30 @@ func (s *Store) Missing(ctx context.Context) ([]MissingItem, error) {
 // ---- the Drive trash owed (review #26) ----
 
 // trashMu orders moving files to the Drive trash against a re-import taking the same file up again
-// (review #44): one process, one lock.
-var trashMu sync.Mutex
+// (review #44): one process, one lock. It is held for the database only: a file being moved is in
+// moving meanwhile, and only what concerns that file waits for it (lockTrash), not every import while
+// a storage location takes its time to answer (review #225).
+var (
+	trashMu sync.Mutex
+	moving  = map[string]chan struct{}{} // closed once the move is over
+)
+
+// lockTrash takes trashMu once file is not being moved to the trash.
+func lockTrash(ctx context.Context, file string) error {
+	for {
+		trashMu.Lock()
+		over, busy := moving[file]
+		if !busy {
+			return nil
+		}
+		trashMu.Unlock()
+		select {
+		case <-over:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
 
 // ErrInTrash is a Drive file that went to the trash after it left the library; a re-import that
 // found it just before must upload the file again.
@@ -292,11 +314,39 @@ const (
 // TrashFile moves a file owed to the Drive trash there with trash (which reports a file Drive no
 // longer has as success). Under the trash lock it first checks the debt still stands and that
 // nothing in the library uses the file again (a re-import found it in Drive and took it up): then
-// the debt is dropped instead. A re-import taking the file waits for the lock, so it either cancels
-// the debt first or sees that the file went to the trash (review #44).
+// the debt is dropped instead. A re-import taking the file waits for its move, so it either cancels
+// the debt first or sees that the file went to the trash (review #44); the move itself is made
+// without the lock (review #225).
 func (s *Store) TrashFile(ctx context.Context, fileID string, trash func(context.Context, string) error) (int, error) {
+	if err := lockTrash(ctx, fileID); err != nil { // moved by another meanwhile: settled below
+		return TrashSkipped, err
+	}
+	outcome, err := s.owedTrash(ctx, fileID)
+	if outcome != Trashed {
+		trashMu.Unlock()
+		return outcome, err
+	}
+	over := make(chan struct{})
+	moving[fileID] = over
+	trashMu.Unlock()
+
+	err = trash(ctx, fileID)
 	trashMu.Lock()
 	defer trashMu.Unlock()
+	delete(moving, fileID)
+	close(over)
+	ctx = context.WithoutCancel(ctx) // what became of the move is recorded
+	if err != nil {
+		s.TrashFailed(ctx, fileID, err)
+		return TrashFailedTry, err
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE file_trash SET done_at = ?, last_error = '' WHERE file_id = ?`, db.Now(), fileID)
+	return Trashed, err
+}
+
+// owedTrash says, with trashMu held, whether fileID is to be moved to the trash now (Trashed), or why
+// not: nothing owed, or the library uses it again (the debt dropped).
+func (s *Store) owedTrash(ctx context.Context, fileID string) (int, error) {
 	var done int64
 	if err := s.db.QueryRowContext(ctx, `SELECT done_at FROM file_trash WHERE file_id = ?`, fileID).Scan(&done); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -312,12 +362,7 @@ func (s *Store) TrashFile(ctx context.Context, fileID string, trash func(context
 		_, err := s.db.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, fileID)
 		return TrashReused, err
 	}
-	if err := trash(ctx, fileID); err != nil {
-		s.TrashFailed(ctx, fileID, err)
-		return TrashFailedTry, err
-	}
-	_, err := s.db.ExecContext(ctx, `UPDATE file_trash SET done_at = ?, last_error = '' WHERE file_id = ?`, db.Now(), fileID)
-	return Trashed, err
+	return Trashed, nil
 }
 
 // TrashFailed records a failed try; the next waits longer (a minute, doubling, at most a day).

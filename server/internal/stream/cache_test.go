@@ -23,6 +23,7 @@ type fakeSource struct {
 	data  []byte
 	delay time.Duration
 	calls atomic.Int64
+	mu    sync.Mutex // for data replaced (put)
 }
 
 func (s *fakeSource) OpenRange(ctx context.Context, _ string, start, end int64) (*http.Response, error) {
@@ -32,10 +33,20 @@ func (s *fakeSource) OpenRange(ctx context.Context, _ string, start, end int64) 
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	s.mu.Lock()
+	data := s.data
+	s.mu.Unlock()
 	if end < 0 {
-		end = int64(len(s.data)) - 1
+		end = int64(len(data)) - 1
 	}
-	return &http.Response{StatusCode: 206, Body: io.NopCloser(bytes.NewReader(s.data[start : end+1]))}, nil
+	return &http.Response{StatusCode: 206, Body: io.NopCloser(bytes.NewReader(data[start : end+1]))}, nil
+}
+
+// put has other bytes at the same place.
+func (s *fakeSource) put(data []byte) {
+	s.mu.Lock()
+	s.data = data
+	s.mu.Unlock()
 }
 
 func newCache(t *testing.T, size int, budget int64, delay time.Duration) (*Cache, *fakeSource) {
@@ -88,6 +99,59 @@ func TestRangesReturnExactBytes(t *testing.T) {
 	}
 	if rec := get(c, "f", size, fmt.Sprintf("bytes=%d-", size)); rec.Code != http.StatusRequestedRangeNotSatisfiable {
 		t.Fatalf("past end: %d", rec.Code)
+	}
+}
+
+// A source's file imported again with other bytes stays at the same place: what is cached of the
+// old bytes is never served for the new ones (same size), nor taken for a size gone wrong (another
+// size); a request still reading the old copy finishes with it (review #214).
+func TestOtherContentAtTheSamePlace(t *testing.T) {
+	const size = 3*blockSize + 10
+	const id = "s3:1:Album/01.flac"
+	c, src := newCache(t, size, 64<<20, 0)
+	serve := func(version string, size int64) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		c.Serve(rec, httptest.NewRequest("GET", "/x", nil), id, size, "audio/flac", version)
+		return rec
+	}
+	old := bytes.Clone(src.data)
+	if rec := serve("sha-1", size); !bytes.Equal(rec.Body.Bytes(), old) {
+		t.Fatal("first play")
+	}
+	held, err := c.acquire(id, "sha-1", size) // a request still reading the old copy
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	same := bytes.Clone(old)
+	same[0], same[size-1] = same[0]^0xff, same[size-1]^0xff
+	src.put(same)
+	if rec := serve("sha-2", size); rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), same) {
+		t.Fatalf("same size: %d, the old bytes %v", rec.Code, bytes.Equal(rec.Body.Bytes(), old))
+	}
+	if _, _, ok := c.Hold(id, "sha-1"); ok {
+		t.Fatal("the old copy held out for the old bytes still")
+	}
+	if path, release, ok := c.Hold(id, "sha-2"); !ok {
+		t.Fatal("the new copy not held out")
+	} else if b, _ := os.ReadFile(path); !bytes.Equal(b, same) {
+		t.Fatal("the new copy has other bytes")
+	} else {
+		release()
+	}
+	var b bytes.Buffer
+	if err := held.copyRange(context.Background(), &b, 0, size-1); err != nil || !bytes.Equal(b.Bytes(), old) {
+		t.Fatalf("the reader of the old copy: %v", err)
+	}
+	c.release(held)
+
+	longer := append(bytes.Clone(same), 1, 2, 3)
+	src.put(longer)
+	if rec := serve("sha-3", size+3); rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), longer) {
+		t.Fatalf("another size: %d %s", rec.Code, rec.Body.String())
+	}
+	if used := c.Used(); used != size+3 {
+		t.Fatalf("cached %d bytes: the old copies kept", used)
 	}
 }
 
@@ -170,7 +234,7 @@ func TestBudgetIsHard(t *testing.T) {
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), src.data) || c.Used() > size {
 		t.Fatalf("recently used: %d, used %d", rec.Code, c.Used())
 	}
-	held, err := c.acquire("b", size) // b is being played
+	held, err := c.acquire("b", "abc", size) // b is being played
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +249,7 @@ func TestBudgetIsHard(t *testing.T) {
 		t.Fatal("c was cached over the budget")
 	}
 	c.release(held)
-	if err := c.Prefetch("d", size); err != nil || c.Used() > size {
+	if err := c.Prefetch("d", "abc", size); err != nil || c.Used() > size {
 		t.Fatalf("prefetch: %v, used %d", err, c.Used())
 	}
 	// Low disk: the same limits, and nothing idle is kept.
@@ -205,7 +269,7 @@ func TestForget(t *testing.T) {
 	if c.Used() != 0 {
 		t.Fatalf("used %d after forget", c.Used())
 	}
-	held, _ := c.acquire("a", size)
+	held, _ := c.acquire("a", "abc", size)
 	c.Forget("a")
 	if rec := get(c, "a", size, ""); !bytes.Equal(rec.Body.Bytes(), src.data) || c.Used() != 2*size {
 		t.Fatalf("fresh copy beside the old one: used %d", c.Used()) // both counted
@@ -253,7 +317,7 @@ func TestConcurrentUseKeepsBudget(t *testing.T) {
 				id := fmt.Sprint((g + i) % 5)
 				switch i % 6 {
 				case 0:
-					c.Prefetch(id, size)
+					c.Prefetch(id, "abc", size)
 				case 1:
 					c.Trim()
 				case 2:
@@ -283,7 +347,7 @@ func TestWholeFilesCanBeHeld(t *testing.T) {
 	whole := make(chan string, 4)
 	c.OnWhole = func(id string) { whole <- id }
 	get(c, "a", size, "bytes=0-99")
-	if _, _, ok := c.Hold("b"); ok {
+	if _, _, ok := c.Hold("b", "abc"); ok {
 		t.Fatal("held a file never cached")
 	}
 	select {
@@ -294,7 +358,7 @@ func TestWholeFilesCanBeHeld(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("not told the file is whole")
 	}
-	path, release, ok := c.Hold("a")
+	path, release, ok := c.Hold("a", "abc")
 	if !ok {
 		t.Fatal("cannot hold a whole file")
 	}
@@ -367,7 +431,7 @@ func TestSkippedSongsStopDownloading(t *testing.T) {
 		if rec := get(c, id, size, "bytes=0-1000"); rec.Code != 206 {
 			t.Fatalf("%s: %d", id, rec.Code)
 		}
-		c.Prefetch(fmt.Sprint("song", i+1), size)
+		c.Prefetch(fmt.Sprint("song", i+1), "abc", size)
 	}
 	c.mu.Lock()
 	running := map[string]int{}
@@ -390,7 +454,7 @@ func TestSkippedSongsStopDownloading(t *testing.T) {
 	// The one playing goes on to the end without a request holding it.
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, release, ok := c.Hold("song9"); ok {
+		if _, release, ok := c.Hold("song9", "abc"); ok {
 			release()
 			return
 		}
@@ -425,11 +489,11 @@ func TestPreloadNoLongerNextStops(t *testing.T) {
 		return false
 	}
 	get(c, "a", size, "bytes=0-1000")
-	c.Prefetch("b", size)
+	c.Prefetch("b", "abc", size)
 	if !running("b") {
 		t.Fatal("b is not preloaded")
 	}
-	c.Prefetch("c", size) // c moved before b
+	c.Prefetch("c", "abc", size) // c moved before b
 	if running("b") || !running("c") {
 		t.Fatalf("another next: b %v, c %v", running("b"), running("c"))
 	}
@@ -468,7 +532,7 @@ func TestPlayStopsTheOneBefore(t *testing.T) {
 		return false
 	}
 	get(c, "a", size, "bytes=0-1000")
-	c.Prefetch("n", size)
+	c.Prefetch("n", "abc", size)
 	if !running("a") || !running("n") {
 		t.Fatalf("a %v, n %v", running("a"), running("n"))
 	}
@@ -486,7 +550,7 @@ func TestPrefetchWaitsItsTurn(t *testing.T) {
 	get(c, "a", size, "bytes=0-10")
 	get(c, "a", size, fmt.Sprintf("bytes=%d-%d", 20*blockSize, 20*blockSize+10))
 	get(c, "a", size, fmt.Sprintf("bytes=%d-%d", 40*blockSize, 40*blockSize+10))
-	c.Prefetch("b", size)
+	c.Prefetch("b", "abc", size)
 	c.mu.Lock()
 	_, started := c.files["b"]
 	c.mu.Unlock()
