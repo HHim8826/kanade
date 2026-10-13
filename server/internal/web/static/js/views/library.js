@@ -180,8 +180,11 @@ export function Library({ tab = 'albums', filter = '' }) {
   const stores = where.stores;
   // A location removed since the address was made.
   const gone = tab === 'albums' && where.loaded && /^\d+$/.test(filter) && !stores.some((st) => String(st.id) === filter);
-  const placeFilters = tab === 'albums' && (stores.length || filter)
-    ? [['', '全部'], ['drive', 'Google Drive'], ...stores.map((st) => [String(st.id), st.name])] : [];
+  // Google Drive is a place while connected or holding songs (review #232); a menu, not a row of
+  // buttons: ten places, or a name of sixty characters, fit a phone as well.
+  const placeList = [...(where.drive.connected || where.drive.songs || filter === 'drive' ? [['drive', 'Google Drive']] : []),
+    ...stores.map((st) => [String(st.id), st.name])];
+  const placeFilters = tab === 'albums' && (placeList.length > 1 || filter) ? [['', '全部'], ...placeList] : [];
   const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? (tab === 'albums' ? '&place=' : '&filter=') + filter : ''}`;
   const data = useLoad(() => get(base), [base], rev);
   // Later pages, for this tab, filter and library version only (review #9).
@@ -221,8 +224,10 @@ export function Library({ tab = 'albums', filter = '' }) {
     </nav>
     ${tab === 'tracks' && html`<nav class="seg filter-seg" aria-label="篩選">${trackFilters.map(([k, label]) => html`<a key=${k}
       class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/tracks' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
-    ${placeFilters.length > 0 && html`<nav class="seg filter-seg" aria-label="來源">${placeFilters.map(([k, label]) => html`<a key=${k}
-      class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/albums' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
+    ${placeFilters.length > 0 && html`<div class="toolbar place-filter"><label class="select-field">位置
+      <select value=${filter} onChange=${(e) => go('library/albums' + (e.target.value ? '?filter=' + e.target.value : ''))}>
+        ${placeFilters.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
+        ${gone && html`<option value=${filter}>（已移除的位置）</option>`}</select></label></div>`}
     ${tab === 'tracks' && filter === 'no_album' && html`<${FolderCard} rev=${rev} />`}
     ${gone ? html`<${Empty} icon="album">這個儲存位置已經移除了。<//>`
       : data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}

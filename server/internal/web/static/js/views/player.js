@@ -89,7 +89,7 @@ export function PlayerBar() {
     <${Seek} s=${s} className="bar-seek" />
     <button class="now" onClick=${() => open(true)} aria-label="開啟正在播放">
       <${Cover} id=${item.coverId} size=${96} className="thumb" />
-      <span class="track-text"><span class="title">${item.title}</span><span class="sub">${item.artist || '未知歌手'}</span></span>
+      <span class="track-text"><span class="title">${item.title}</span><span class="sub">${s.liteWait && s.buffering ? '正在轉成省流格式…' : item.artist || '未知歌手'}</span></span>
     </button>
     <div class="controls">
       <span class="wide-only"><${ModeButton} s=${s} /></span>
@@ -188,7 +188,7 @@ function NowPlayingView() {
         </div>
         <div class="quality">${quality(s, item)}</div>
         <${Seek} s=${s} className="np-seek" />
-        <div class="times"><span><${Elapsed} s=${s} /></span><span>${s.buffering ? '緩衝中…' : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
+        <div class="times"><span><${Elapsed} s=${s} /></span><span>${s.buffering ? (s.liteWait ? '正在轉成省流格式…' : '緩衝中…') : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
         <div class="np-controls">
           <${ModeButton} s=${s} />
           <${IconButton} icon="prev" label="上一首" onClick=${prev} size=${32} />
@@ -222,6 +222,7 @@ function NowPlayingView() {
 function quality(s, item) {
   const orig = fmtQuality(item.asset);
   if (!s.liteLoaded || !shrinks(item.asset)) return orig;
+  if (s.liteGot === false && s.liteLater) return `${orig}（省流模式：這次播放原檔，省流版在背景轉換，下次播放就是省流）`;
   return s.liteGot ? `省流 Opus 128k（原檔 ${orig}）` : s.liteGot === false ? `${orig}（省流模式：這首播放原檔）` : `${orig}（省流確認中）`;
 }
 

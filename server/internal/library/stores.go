@@ -210,3 +210,77 @@ func refStore(ref string) (int64, bool) {
 	id, err := strconv.ParseInt(n, 10, 64)
 	return id, ok && err == nil
 }
+
+// A source's pictures are the library's covers where they are (#99); its scans follow them as they
+// do its songs (review #221). A cover's content never changes: other bytes at its place are another
+// cover, so what was made of the old one (its sizes, kept by its checksum; a browser's copy, kept by
+// its ID) is never taken for the new one.
+
+// SourceCover is a cover whose picture is in a source.
+type SourceCover struct {
+	ID     int64
+	SHA256 string
+	Ref    string
+}
+
+// CoversIn lists the covers whose pictures are in store id.
+func (s *Store) CoversIn(ctx context.Context, kind string, id int64) ([]SourceCover, error) {
+	from, to := refRange(kind, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, sha256, file_ref FROM covers WHERE `+likeRefs("file_ref"), from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SourceCover
+	for rows.Next() {
+		var c SourceCover
+		if err := rows.Scan(&c.ID, &c.SHA256, &c.Ref); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// MoveCover has cover id read from to: its picture moved there, or another copy of it is there.
+func (s *Store) MoveCover(ctx context.Context, id int64, to string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE covers SET file_ref = ? WHERE id = ?`, to, id)
+	return err
+}
+
+// LoseCover lets go of cover id, its picture gone or other bytes at its place, with no other copy:
+// its albums have none (as when its source is removed), and it goes.
+func (s *Store) LoseCover(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE albums SET cover_id = NULL, updated_at = ? WHERE cover_id = ?`, db.Now(), id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM covers WHERE id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// FolderCover gives the albums of songs below dir in a source ("" for all of it; the paths its scans
+// saw) whose cover is from the cover to: the folder's picture has other bytes now. It returns how many
+// changed.
+func (s *Store) FolderCover(ctx context.Context, kind string, store int64, dir string, from, to int64) (int, error) {
+	prefix, _ := refRange(kind, store)
+	q := `UPDATE albums SET cover_id = ?1, updated_at = ?2 WHERE cover_id = ?3 AND id IN (SELECT e.album_id FROM album_entries e
+		JOIN assets a ON a.id = e.asset_id JOIN source_files f ON f.store_id = ?4 AND a.file_ref = ?5 || f.key`
+	args := []any{to, db.Now(), from, store, prefix}
+	if dir != "" {
+		q += ` WHERE f.path >= ?6 AND f.path < ?7`
+		args = append(args, dir+"/", dir+"0") // '0' follows '/'
+	}
+	r, err := s.db.ExecContext(ctx, q+`)`, args...)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := r.RowsAffected()
+	return int(n), nil
+}

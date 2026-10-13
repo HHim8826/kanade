@@ -40,10 +40,11 @@ type fetchInfo struct {
 }
 
 type extra struct {
-	Key  string `json:"key"`
-	Path string `json:"path"`
-	Size int64  `json:"size"`
-	Hash string `json:"hash,omitempty"`
+	Key     string `json:"key"`
+	Path    string `json:"path"`
+	Size    int64  `json:"size"`
+	Hash    string `json:"hash,omitempty"`
+	Version string `json:"version,omitempty"` // a picture taken as a cover is recorded as the scan saw it (review #221)
 }
 
 // maxExtras bounds the pictures fetched with a song.
@@ -77,7 +78,7 @@ func (b besides) fetchFor(o storage.Object) string {
 			if !isLrc && len(fi.With) >= maxExtras {
 				continue
 			}
-			fi.With = append(fi.With, extra{Key: x.Key, Path: x.Path, Size: x.Size, Hash: x.Hash})
+			fi.With = append(fi.With, extra{Key: x.Key, Path: x.Path, Size: x.Size, Hash: x.Hash, Version: x.Version})
 		}
 	}
 	pick(dir, true)
@@ -242,30 +243,33 @@ func (im *Importer) fetchSourceLocal(ctx context.Context, batchID int64) error {
 }
 
 // sourceFile is what maps a file beside a source's song (a picture in its folder, or fetched with
-// it) to its reference in the source; nil for a song from elsewhere.
-func (im *Importer) sourceFile(it *item) func(string) string {
+// it) to its reference in the source, with the file as it was before it is read (as a scan sees
+// it); nil for a song from elsewhere.
+func (im *Importer) sourceFile(it *item) func(string) (string, storage.Object) {
 	kind, store, key, ok := storage.Parse(it.ref)
 	if !ok || it.sourcePath != "" {
 		return nil
 	}
 	if !it.temp { // in a folder: its root is the song's path without its key
 		root := strings.TrimSuffix(it.path, filepath.FromSlash(key))
-		return func(p string) string {
+		return func(p string) (string, storage.Object) {
 			rel, err := filepath.Rel(root, p)
-			if err != nil || !filepath.IsLocal(rel) {
-				return ""
+			info, serr := os.Stat(p)
+			if err != nil || !filepath.IsLocal(rel) || serr != nil {
+				return "", storage.Object{}
 			}
-			return storage.Ref(kind, store, filepath.ToSlash(rel))
+			k := filepath.ToSlash(rel)
+			return storage.Ref(kind, store, k), storage.Object{Key: k, Path: k, Size: info.Size(), Version: storage.LocalVersion(info)}
 		}
 	}
 	var fi fetchInfo
 	json.Unmarshal([]byte(it.fetch), &fi)
-	return func(p string) string {
+	return func(p string) (string, storage.Object) {
 		for _, x := range fi.With {
 			if im.workPath(it.batchID, x.Path) == p {
-				return storage.Ref(kind, store, x.Key)
+				return storage.Ref(kind, store, x.Key), storage.Object{Key: x.Key, Path: x.Path, Size: x.Size, Version: x.Version}
 			}
 		}
-		return ""
+		return "", storage.Object{}
 	}
 }

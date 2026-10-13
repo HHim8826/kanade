@@ -242,12 +242,12 @@ function StorageSettings({ conf, status }) {
   const saved = data ? data.resources.saved : null;
   const [v, set, changed] = useForm(saved || {});
   const [busy, setBusy] = useState(false);
-  if (!data) return html`<h2 class="section-title">儲存空間</h2><div class="card pad"><${ErrorBox} error=${conf.error} onRetry=${conf.reload} /></div>`;
+  if (!data) return html`<h2 class="section-title">快取與暫存</h2><div class="card pad"><${ErrorBox} error=${conf.error} onRetry=${conf.reload} /></div>`;
   const r = data.resources;
   const n = (k) => num(v[k]);
   const ok = n('cache_mib') >= 64 && n('staging_mib') >= 256 && n('reserve_gib') >= 1;
   const save = () => saveSection(conf, '/settings/resources',
-    { cache_mib: n('cache_mib'), staging_mib: n('staging_mib'), reserve_gib: n('reserve_gib') }, '已儲存儲存空間設定');
+    { cache_mib: n('cache_mib'), staging_mib: n('staging_mib'), reserve_gib: n('reserve_gib') }, '已儲存快取與暫存設定');
   const trim = async () => {
     setBusy(true);
     try {
@@ -262,7 +262,7 @@ function StorageSettings({ conf, status }) {
   const pinned = (k) => r.pinned.includes(k) && html`<span class="hint tight state-failed">目前由啟動參數 ${flagName[k]} 指定為 ${r.now[k]}；不帶這個參數重新啟動後才使用這裡的值。</span>`;
   const sv = data.server;
   const disk = status && status.disk;
-  return html`<h2 class="section-title">儲存空間</h2>
+  return html`<h2 class="section-title">快取與暫存</h2>
     <div class="card pad settings-form">
       <div class="form-grid">
         <div>
@@ -756,21 +756,35 @@ function PasteConnect({ close, onDone }) {
 // Settings shows once its first reads are done (each waits at most ten seconds), all at once and in
 // a fixed order: the Drive connection decides whether the sync and inbox sections are there, so no
 // section appears above one already shown. A read that failed shows its error in its section.
-export function Settings({ onLogout }) {
+export function Settings({ onLogout, section }) {
   const first = useLoad(async () => {
-    const [status, drive, passkeys, sessions, conf, named] = await Promise.all([read('/status'), read('/drive'), read('/passkeys'),
-      read('/sessions'), read('/settings'), read('/site')]);
+    const [status, drive, passkeys, sessions, conf, named, storage] = await Promise.all([read('/status'), read('/drive'), read('/passkeys'),
+      read('/sessions'), read('/settings'), read('/site'), read('/storage')]);
     const sync = drive.data && drive.data.status.connected ? await read('/drive/sync') : null;
-    return { status, drive, passkeys, sessions, conf, sync, named };
+    return { status, drive, passkeys, sessions, conf, sync, named, storage };
   }, []);
   if (!first.data) return html`<section><h1 class="page-title">設定</h1><div class="spinner late"></div></section>`;
-  return html`<${SettingsPage} first=${first.data} onLogout=${onLogout} />`;
+  return html`<${SettingsPage} first=${first.data} onLogout=${onLogout} section=${section} />`;
 }
 
-function SettingsPage({ first, onLogout }) {
+// The page's groups (review #233), and the bar at its top that goes to each: a phone gets to any
+// setting in a tap and a little scrolling. #/settings?s=<id> opens the page at one.
+const groups = [['storage', '音樂存放'], ['playback', '播放'], ['look', '外觀'], ['linked', '連結的帳號'], ['service', '服務與資源'], ['account', '帳號']];
+const goToGroup = (id, behavior = 'smooth') => document.getElementById('settings-' + id)?.scrollIntoView({ behavior, block: 'start' });
+
+function Group({ id, children }) {
+  const label = groups.find(([k]) => k === id)[1];
+  return html`<div class="settings-group" id=${'settings-' + id} role="region" aria-label=${label}>
+    <div class="group-label" aria-hidden="true">${label}</div>${children}</div>`;
+}
+
+function SettingsPage({ first, onLogout, section }) {
   const status = useSection('/status', first.status);
   const drive = useSection('/drive', first.drive);
   const conf = useSection('/settings', first.conf);
+  useEffect(() => {
+    if (section) goToGroup(section, 'auto');
+  }, [section]);
   const logout = async () => {
     resetPlayer(true, true); // stop and report the playback while the login still works (review #14)
     await post('/logout').catch(() => {});
@@ -780,35 +794,48 @@ function SettingsPage({ first, onLogout }) {
   const st = status.data;
   return html`<section>
     <h1 class="page-title">設定</h1>
-    <h2 class="section-title">儲存位置</h2>
-    <${StorageLocations} />
-    <h2 class="section-title">Google Drive</h2>
-    <${Drive} drive=${drive} />
-    ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
-    ${d && d.status.connected && html`<${Backups} />`}
-    <${PlaybackSettings} />
-    <${DevicesSettings} />
-    <h2 class="section-title">音效</h2>
-    <div class="card pad"><${EffectsPanel} /></div>
-    <${Appearance} />
-    <${DiscordSettings} />
-    <${BangumiAccount} />
-    <${StatsTimeZone} />
-    <${DownloadSettings} conf=${conf} />
-    <${SiteSettings} first=${first.named} />
-    <h2 class="section-title">服務</h2>
-    <div class="card pad">
-      <${ErrorBox} error=${status.error} onRetry=${status.reload} />
-      ${st && html`<div class="sub">Kanade 版本：${st.version || '未知'}（<a class="link" href="https://github.com/HHim8826/kanade/releases" target="_blank" rel="noopener">發佈紀錄</a>）</div>
-        <div class="sub">下載器（aria2）：${st.aria2_ready ? '運作中' : '未就緒'}</div>
-        <div class="sub">格式轉換與 CUE 分軌（FFmpeg）：${st.ffmpeg ? '可用' : '未安裝'}</div>
-        ${st.disk && html`<div class=${'sub' + (st.disk.low ? ' state-failed' : '')}>磁碟：剩 ${fmtBytes(st.disk.free_bytes)}（保留 ${fmtBytes(st.disk.reserve_bytes)}）${st.disk.low ? '，空間不足' : ''}</div>`}
-        <div class="sub">已運行 ${Math.floor(st.uptime_seconds / 3600)} 小時 ${Math.floor((st.uptime_seconds % 3600) / 60)} 分</div>`}
-    </div>
-    <${StorageSettings} conf=${conf} status=${st} />
-    <h2 class="section-title">帳號</h2>
-    <${Logins} first=${first.sessions} onLogout=${onLogout} />
-    <${Passkeys} first=${first.passkeys} />
-    <div class="actions"><button class="btn outlined" onClick=${logout}><${Icon} name="logout" />登出</button></div>
+    <nav class="settings-nav" aria-label="設定分類">${groups.map(([id, label]) => html`<button key=${id} type="button" onClick=${() => goToGroup(id)}>${label}</button>`)}</nav>
+    <${Group} id="storage">
+      <h2 class="section-title">儲存位置</h2>
+      <${StorageLocations} first=${first.storage} />
+      <h2 class="section-title">Google Drive</h2>
+      <${Drive} drive=${drive} />
+      ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
+      ${d && d.status.connected && html`<${Backups} />`}
+    <//>
+    <${Group} id="playback">
+      <${PlaybackSettings} />
+      <${DevicesSettings} />
+      <h2 class="section-title">音效</h2>
+      <div class="card pad"><${EffectsPanel} /></div>
+      <${StatsTimeZone} />
+    <//>
+    <${Group} id="look">
+      <${Appearance} />
+      <${SiteSettings} first=${first.named} />
+    <//>
+    <${Group} id="linked">
+      <${DiscordSettings} />
+      <${BangumiAccount} />
+    <//>
+    <${Group} id="service">
+      <${DownloadSettings} conf=${conf} />
+      <h2 class="section-title">服務</h2>
+      <div class="card pad">
+        <${ErrorBox} error=${status.error} onRetry=${status.reload} />
+        ${st && html`<div class="sub">Kanade 版本：${st.version || '未知'}（<a class="link" href="https://github.com/HHim8826/kanade/releases" target="_blank" rel="noopener">發佈紀錄</a>）</div>
+          <div class="sub">下載器（aria2）：${st.aria2_ready ? '運作中' : '未就緒'}</div>
+          <div class="sub">格式轉換與 CUE 分軌（FFmpeg）：${st.ffmpeg ? '可用' : '未安裝'}</div>
+          ${st.disk && html`<div class=${'sub' + (st.disk.low ? ' state-failed' : '')}>磁碟：剩 ${fmtBytes(st.disk.free_bytes)}（保留 ${fmtBytes(st.disk.reserve_bytes)}）${st.disk.low ? '，空間不足' : ''}</div>`}
+          <div class="sub">已運行 ${Math.floor(st.uptime_seconds / 3600)} 小時 ${Math.floor((st.uptime_seconds % 3600) / 60)} 分</div>`}
+      </div>
+      <${StorageSettings} conf=${conf} status=${st} />
+    <//>
+    <${Group} id="account">
+      <h2 class="section-title">登入</h2>
+      <${Logins} first=${first.sessions} onLogout=${onLogout} />
+      <${Passkeys} first=${first.passkeys} />
+      <div class="actions"><button class="btn outlined" onClick=${logout}><${Icon} name="logout" />登出</button></div>
+    <//>
   </section>`;
 }

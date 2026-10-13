@@ -406,7 +406,7 @@ function DataTools({ q, onCleared }) {
   const clear = () => showDialog((close) => html`<${ClearStats} close=${close} onDone=${onCleared} />`);
   return html`<section class="stats-section data-tools">
     <h2 class="section-title">資料</h2>
-    <p class="hint">日子依<a href=${href('settings')}>設定</a>裡「聆聽統計」的時區來分。聆聽時間只算真正播放的部分：暫停、緩衝和拖動進度都不算；同一次播放重送的回報不會重複計算。播放滿一半或 4 分鐘（較短者）算一次有效播放，30 秒以下的歌不算次數，但聆聽時間照算。</p>
+    <p class="hint">日子依<a href=${href('settings?s=playback')}>設定</a>裡「聆聽統計」的時區來分。聆聽時間只算真正播放的部分：暫停、緩衝和拖動進度都不算；同一次播放重送的回報不會重複計算。播放滿一半或 4 分鐘（較短者）算一次有效播放，30 秒以下的歌不算次數，但聆聽時間照算。</p>
     <div class="actions">
       <a class="btn tonal" href=${'/api/v1/stats/export?format=csv&' + q} download><${Icon} name="download" />匯出 CSV</a>
       <a class="btn tonal" href=${'/api/v1/stats/export?format=json&' + q} download><${Icon} name="download" />匯出 JSON</a>

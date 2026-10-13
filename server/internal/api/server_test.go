@@ -12,6 +12,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/HHim8826/kanade/server/internal/auth"
 	"github.com/HHim8826/kanade/server/internal/config"
@@ -34,7 +35,14 @@ func newTestServer(t *testing.T, opts ...func(*Deps)) (*Server, http.Handler) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { d.Close() })
+	t.Cleanup(func() {
+		// A download the test started (a prefetch) may still be reading the Drive login: its
+		// connection, closed after the database, would touch the files being removed.
+		for end := time.Now().Add(5 * time.Second); d.Stats().InUse > 0 && time.Now().Before(end); {
+			time.Sleep(5 * time.Millisecond)
+		}
+		d.Close()
+	})
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	drive := gdrive.New(d, cfg.PublicURL+"/oauth/google/callback")
 	lib := library.New(d)

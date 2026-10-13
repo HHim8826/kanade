@@ -63,6 +63,8 @@ export const player = createStore({
   blocked: false, // the browser would not start playing without a click on this page (review #138)
   liteLoaded: false, // the song loaded was asked for re-encoded (lite mode)
   liteGot: null, // and came so (true) or as it is (false): null until the server said (review #209)
+  liteLater: false, // came as it is this time, re-encoded for the next (long, or played from the middle: #226)
+  liteWait: false, // asked for re-encoded, no answer for a moment: being made (review #226)
   liteServer: null, // whether the server re-encodes for lite mode: null until asked
   ...loadPrefs(), // volume 0–1, muted, mode (and from it shuffle and repeat: off | all | one), and the preferences above
 });
@@ -324,7 +326,8 @@ function load(index, autoplay = true, again = false, lazy = false) {
   const q = liteQ();
   if (q) askLite();
   loadedURL = streamURL(item.assetId, q);
-  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay, liteLoaded: !!q, liteGot: null });
+  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay, liteLoaded: !!q, liteGot: null,
+    liteLater: false });
   clock.set({ time: (pendingSeek || 0) / 1000 });
   applyVolume(); // this song's balance
   learn(near());
@@ -350,6 +353,7 @@ function seekWhenReady(ms) {
 }
 
 on('loadedmetadata', () => {
+  liteAnswered();
   if (pendingSeek !== null) {
     audio.currentTime = pendingSeek / 1000;
     pendingSeek = null;
@@ -357,13 +361,29 @@ on('loadedmetadata', () => {
   askGot();
 });
 
+// A song asked for re-encoded waits for it to be made, a few seconds (lite mode, review #226): past a
+// moment without an answer, the player says so rather than show a song playing from 0:00.
+let liteWaitTimer = 0;
+on('loadstart', () => {
+  liteAnswered();
+  const s = player.get(), item = s.queue[s.index];
+  if (!s.liteLoaded || !item || !shrinks(item.asset)) return;
+  liteWaitTimer = setTimeout(() => {
+    if (audio.readyState < 1 && !audio.error) player.set({ liteWait: true });
+  }, 800);
+});
+function liteAnswered() {
+  clearTimeout(liteWaitTimer);
+  if (player.get().liteWait) player.set({ liteWait: false });
+}
+
 // askGot asks the server how the song loaded in lite mode came, once its stream answered.
 function askGot() {
   const s = player.get(), item = s.queue[s.index];
   if (!s.liteLoaded || s.liteGot !== null || !item || !shrinks(item.asset)) return;
   const loaded = loads;
   get(`/stream/${item.assetId}/lite`).then((r) => {
-    if (loads === loaded) player.set({ liteGot: !!r.lite });
+    if (loads === loaded) player.set({ liteGot: !!r.lite, liteLater: !!r.later });
   }, () => {});
 }
 on('timeupdate', () => {
@@ -1213,6 +1233,7 @@ on('ended', () => {
 let retried = { loaded: 0, at: 0 }; // the last try again: the song loaded, and where
 let probe = null; // { wanted }: the song that failed, being asked about
 on('error', async () => {
+  liteAnswered();
   if (!audio.getAttribute('src')) return; // emptied on purpose
   const item = current(), loaded = loads, sought = seeks, s = player.get();
   const p = probe = item ? { wanted: s.playing || s.buffering } : null;

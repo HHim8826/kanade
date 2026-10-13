@@ -30,9 +30,10 @@ var (
 // kept for the rest of the batch (review #150: a folder can be used again by a later one), unless
 // storing it failed: the next song tries again.
 //
-// inPlace, for a source's song (#99), is the reference in the source of a picture found beside it:
-// a source's pictures are the library's covers where they are, as its songs are.
-func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, info *media.Info, inPlace func(string) string) int64 {
+// inPlace, for a source's song (#99), is the reference in the source of a picture found beside it
+// (and the picture as a scan sees it): a source's pictures are the library's covers where they are,
+// as its songs are.
+func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, info *media.Info, inPlace func(string) (string, storage.Object)) int64 {
 	if info.Cover != nil {
 		if id, _ := im.storeCover(ctx, info.Cover.Data); id != 0 {
 			return id
@@ -44,6 +45,10 @@ func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, in
 	}
 	var id int64
 	if p := findCoverFile(dir); p != "" {
+		ref, seen := "", storage.Object{}
+		if inPlace != nil {
+			ref, seen = inPlace(p) // before it is read: changed meanwhile, the next scan reads it again
+		}
 		f, err := os.Open(p)
 		if err != nil {
 			return 0
@@ -54,12 +59,8 @@ func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, in
 			return 0
 		}
 		if len(data) <= maxCoverFile {
-			ref := ""
-			if inPlace != nil {
-				ref = inPlace(p)
-			}
 			if ref != "" {
-				id, err = im.placeCover(ctx, data, ref)
+				id, err = im.placeCover(ctx, data, ref, seen)
 			} else {
 				id, err = im.storeCover(ctx, data)
 			}
@@ -174,18 +175,61 @@ func (im *Importer) storeCover(ctx context.Context, data []byte) (int64, error) 
 	return id, err
 }
 
-// placeCover takes a picture in a source as a cover, where it is.
-func (im *Importer) placeCover(ctx context.Context, data []byte, ref string) (int64, error) {
+// placeCover takes a picture in a source as a cover, where it is, seen as it was before it was read;
+// the source's scans follow it from now (review #221). The library having the picture already, its
+// cover is read from here when it was from elsewhere in this source (both are followed alike; this
+// one was read just now), or from a place it cannot be read from (review #221).
+func (im *Importer) placeCover(ctx context.Context, data []byte, ref string, seen storage.Object) (int64, error) {
 	mime := http.DetectContentType(data)
 	if mime != "image/jpeg" && mime != "image/png" {
 		return 0, nil
 	}
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
-	if id, have, err := im.lib.CoverBySHA(ctx, sha); err != nil || (id != 0 && have != "") {
-		return id, err
+	id, have, err := im.lib.CoverBySHA(ctx, sha)
+	if err != nil {
+		return 0, err
 	}
-	return im.lib.AddCover(ctx, sha, mime, ref)
+	if id == 0 || have == "" || im.coverMoves(ctx, have, ref) {
+		if id, err = im.lib.AddCover(ctx, sha, mime, ref); err != nil {
+			return 0, err
+		}
+	}
+	if seen.Key != "" {
+		im.keepSourceCover(ctx, ref, seen, sha)
+	}
+	return id, nil
+}
+
+// coverMoves says whether a cover read from have is to be read from ref, a picture of a source with
+// the same bytes: have is in the same source, or cannot be read.
+func (im *Importer) coverMoves(ctx context.Context, have, ref string) bool {
+	_, from, _, ok := storage.Parse(have)
+	if !ok {
+		return false // in Google Drive: Kanade's own copy
+	}
+	if _, to, _, _ := storage.Parse(ref); from == to {
+		return true
+	}
+	files, ok := im.files()
+	if !ok {
+		return false
+	}
+	_, err := files.Stat(ctx, have)
+	return err != nil
+}
+
+// keepSourceCover records a source's picture taken as a cover (source_covers), for its scans to follow.
+func (im *Importer) keepSourceCover(ctx context.Context, ref string, o storage.Object, sha string) {
+	_, store, _, ok := storage.Parse(ref)
+	if !ok {
+		return
+	}
+	if _, err := im.db.ExecContext(ctx, `INSERT INTO source_covers (store_id, key, path, size, version, sha256) VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT (store_id, key) DO UPDATE SET path = excluded.path, size = excluded.size, version = excluded.version, sha256 = excluded.sha256`,
+		store, o.Key, o.Path, o.Size, o.Version, sha); err != nil {
+		im.log.Warn("record a source's cover", "ref", ref, "err", err)
+	}
 }
 
 func (im *Importer) uploadCover(ctx context.Context, data []byte, sha, mime, ext string) (int64, error) {

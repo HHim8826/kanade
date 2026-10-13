@@ -101,7 +101,7 @@ function CollectionDialog({ album, onSaved, close }) {
     ${error && html`<${ErrorBox} error=${{ message: unavailable(error) }} />`}
     ${!data && !error && html`<${Spinner} />`}
     ${data && !data.linked && html`<p>連結你的 Bangumi 帳號後，就能在這裡標記想聽、聽過，評分、加標籤和吐槽。</p>
-      <button class="btn tonal" onClick=${() => { close(); go('settings'); }}><${Icon} name="link" />到設定連結 Bangumi</button>`}
+      <button class="btn tonal" onClick=${() => { close(); go('settings?s=linked'); }}><${Icon} name="link" />到設定連結 Bangumi</button>`}
     ${data && data.linked && form && html`
       <div class="seg collection-type" role="radiogroup" aria-label="收藏狀態">${Object.entries(statusNames).map(([k, label]) => html`<label key=${k}
         class=${form.type === Number(k) ? 'on' : ''}><input type="radio" checked=${form.type === Number(k)} onChange=${() => setForm({ ...form, type: Number(k) })} />${label}</label>`)}</div>
@@ -275,7 +275,7 @@ export function CollectionsTab() {
   }, [rev]);
   if (error && error.body && error.body.reason === 'not_linked') {
     return html`<${Empty} icon="link">連結 Bangumi 帳號後，這裡會列出你的音樂收藏（想聽、聽過…），並標出曲庫有沒有。
-      <div class="actions center"><a class="btn tonal" href=${href('settings')}>到設定連結</a></div><//>`;
+      <div class="actions center"><a class="btn tonal" href=${href('settings?s=linked')}>到設定連結</a></div><//>`;
   }
   return html`<div class="list-tools">
       <nav class="seg" aria-label="收藏狀態">${Object.entries(statusNames).map(([k, label]) => html`<button key=${k}

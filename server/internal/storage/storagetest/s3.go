@@ -36,6 +36,11 @@ type S3 struct {
 	Fail func(r *http.Request) int
 	// Requests counts the requests by method and kind ("PUT part", "PUT", "GET list", ...).
 	Requests map[string]int
+	// NoRanges answers a ranged GET with the whole object, as a server not supporting ranges does.
+	NoRanges bool
+	// RangeStatus is the status a range is sent with (0: 206); rclone's serve s3 sends 200 with its
+	// Content-Range.
+	RangeStatus int
 }
 
 type S3Object struct {
@@ -202,7 +207,7 @@ func (s *S3) serve(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Accept-Ranges", "bytes")
 		data := o.Data
 		status := http.StatusOK
-		if rng := r.Header.Get("Range"); rng != "" && kind == "GET" {
+		if rng := r.Header.Get("Range"); rng != "" && kind == "GET" && !s.NoRanges {
 			var start, end int64 = 0, int64(len(data)) - 1
 			spec := strings.TrimPrefix(rng, "bytes=")
 			a, b, _ := strings.Cut(spec, "-")
@@ -217,6 +222,9 @@ func (s *S3) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
 			data, status = data[start:end+1], http.StatusPartialContent
+			if s.RangeStatus != 0 {
+				status = s.RangeStatus
+			}
 		}
 		w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 		w.WriteHeader(status)

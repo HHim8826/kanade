@@ -293,8 +293,11 @@ func (l *Local) Open(ctx context.Context, key string, start, end int64) (io.Read
 }
 
 func localObject(key string, info fs.FileInfo) Object {
-	return Object{Key: key, Path: key, Size: info.Size(), Version: strconv.FormatInt(info.ModTime().UnixNano(), 10)}
+	return Object{Key: key, Path: key, Size: info.Size(), Version: LocalVersion(info)}
 }
+
+// LocalVersion is a folder's file's Object.Version: its modification time.
+func LocalVersion(info fs.FileInfo) string { return strconv.FormatInt(info.ModTime().UnixNano(), 10) }
 
 func (l *Local) Stat(ctx context.Context, key string) (Object, error) {
 	f, err := l.File(key)

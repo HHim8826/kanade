@@ -170,7 +170,7 @@ func read(t *testing.T, f *os.File, err error) string {
 // got is song o's lite file from s, read.
 func got(t *testing.T, s *Store, ctx context.Context, o Song) string {
 	t.Helper()
-	f, err := s.Get(ctx, o)
+	f, err := s.Get(ctx, o, 0)
 	return read(t, f, err)
 }
 
@@ -208,7 +208,7 @@ func TestMadeOnceAndKept(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			f, err := s.Get(context.Background(), song)
+			f, err := s.Get(context.Background(), song, 0)
 			outs[i] = read(t, f, err)
 		}()
 	}
@@ -237,7 +237,7 @@ func TestSkippedSongStops(t *testing.T) {
 	src.gate("a")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	go func() { _, err := s.Get(ctx, a); done <- err }()
+	go func() { _, err := s.Get(ctx, a, 0); done <- err }()
 	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
 	cancel() // the request goes; a is still the song played, so it goes on
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -293,7 +293,7 @@ func TestPlayedWhilePrefetchedGoesOn(t *testing.T) {
 	s.Prefetch(a)
 	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
 	done := make(chan string)
-	go func() { f, err := s.Get(context.Background(), a); done <- read(t, f, err) }()
+	go func() { f, err := s.Get(context.Background(), a, 0); done <- read(t, f, err) }()
 	time.Sleep(20 * time.Millisecond)
 	s.Prefetch(b) // a is played now, and waited for
 	time.Sleep(20 * time.Millisecond)
@@ -309,7 +309,7 @@ func TestSourceFailure(t *testing.T) {
 	a := src.add("a", []byte("song a"))
 	drive := errors.New("drive keeps failing")
 	src.fail["a"] = drive
-	_, err := s.Get(context.Background(), a)
+	_, err := s.Get(context.Background(), a, 0)
 	var se *SourceError
 	if !errors.As(err, &se) || !errors.Is(err, drive) {
 		t.Fatalf("got %v", err)
@@ -327,10 +327,10 @@ func TestEncodeFailureSentAsIs(t *testing.T) {
 	src, enc := newSource(t), &encoder{}
 	s := store(t, 1<<20, enc, src)
 	a := src.add("a", []byte("bad song"))
-	if _, err := s.Get(context.Background(), a); err == nil || errors.Is(err, ErrFailed) {
+	if _, err := s.Get(context.Background(), a, 0); err == nil || errors.Is(err, ErrFailed) {
 		t.Fatalf("got %v", err)
 	}
-	if _, err := s.Get(context.Background(), a); !errors.Is(err, ErrFailed) || enc.runs.Load() != 1 {
+	if _, err := s.Get(context.Background(), a, 0); !errors.Is(err, ErrFailed) || enc.runs.Load() != 1 {
 		t.Fatalf("again: %v, made %d times", err, enc.runs.Load())
 	}
 	s.Prefetch(a)
@@ -341,7 +341,7 @@ func TestEncodeFailureSentAsIs(t *testing.T) {
 	s.mu.Lock()
 	s.bad[a.SHA256] = time.Now().Add(-time.Second) // a while later
 	s.mu.Unlock()
-	if _, err := s.Get(context.Background(), a); errors.Is(err, ErrFailed) || enc.runs.Load() != 2 {
+	if _, err := s.Get(context.Background(), a, 0); errors.Is(err, ErrFailed) || enc.runs.Load() != 2 {
 		t.Fatalf("later: %v, made %d times", err, enc.runs.Load())
 	}
 }
@@ -355,12 +355,12 @@ func TestEncoderStopsEarly(t *testing.T) {
 	src.gate("a") // the rest never comes
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := s.Get(ctx, a)
+	_, err := s.Get(ctx, a, 0)
 	var se *SourceError
 	if err == nil || ctx.Err() != nil || errors.As(err, &se) || errors.Is(err, ErrFailed) {
 		t.Fatalf("got %v (%v)", err, ctx.Err())
 	}
-	if _, err := s.Get(ctx, a); !errors.Is(err, ErrFailed) {
+	if _, err := s.Get(ctx, a, 0); !errors.Is(err, ErrFailed) {
 		t.Fatalf("again: %v", err)
 	}
 	eventually(t, "its turn is free", func() bool { return len(s.turns) == 0 })
@@ -375,7 +375,7 @@ func TestEncodeEndsWithRequest(t *testing.T) {
 	src.gate("a")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	go func() { _, err := s.Get(ctx, a); done <- err }()
+	go func() { _, err := s.Get(ctx, a, 0); done <- err }()
 	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {
@@ -398,7 +398,7 @@ func TestNotSmallerSentAsIs(t *testing.T) {
 	s := store(t, 1<<20, enc, src)
 	a := src.add("a", []byte("big song"))
 	for i := 0; i < 2; i++ {
-		if _, err := s.Get(context.Background(), a); !errors.Is(err, ErrNotSmaller) {
+		if _, err := s.Get(context.Background(), a, 0); !errors.Is(err, ErrNotSmaller) {
 			t.Fatalf("%d: %v", i, err)
 		}
 	}
@@ -426,7 +426,7 @@ func TestPlayedAsItIsStopsTheOneBefore(t *testing.T) {
 	gate := src.gate("n")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error)
-	go func() { _, err := s.Get(ctx, a); done <- err }()
+	go func() { _, err := s.Get(ctx, a, 0); done <- err }()
 	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
 	s.Prefetch(n) // the next song, preloaded
 	eventually(t, "n started", func() bool { return src.copies.Load() == 2 })
@@ -448,7 +448,7 @@ func TestPlayedAsItIsStopsTheOneBefore(t *testing.T) {
 	c := src.add("c", []byte("song c"))
 	gc := src.gate("c")
 	ctx2, cancel2 := context.WithCancel(context.Background())
-	go func() { s.Get(ctx2, c) }()
+	go func() { s.Get(ctx2, c, 0) }()
 	eventually(t, "c started", func() bool { return src.copies.Load() == 3 })
 	cancel2()
 	time.Sleep(20 * time.Millisecond)
@@ -492,7 +492,7 @@ func TestUnavailableWithoutEncoder(t *testing.T) {
 	if s.Available() {
 		t.Fatal("available without an encoder")
 	}
-	if _, err := s.Get(context.Background(), a); !errors.Is(err, ErrFailed) {
+	if _, err := s.Get(context.Background(), a, 0); !errors.Is(err, ErrFailed) {
 		t.Fatal(err)
 	}
 	s.Prefetch(a)
@@ -566,7 +566,7 @@ func TestFFmpegEdges(t *testing.T) {
 	if rate := len(data) * 8 / 20; rate > keepRate {
 		t.Fatalf("not a low bitrate: %d", rate)
 	}
-	if _, err := s.Get(ctx, low); !errors.Is(err, ErrNotSmaller) || s.Has(low.SHA256) {
+	if _, err := s.Get(ctx, low, 0); !errors.Is(err, ErrNotSmaller) || s.Has(low.SHA256) {
 		t.Fatalf("got %v; kept: %v", err, s.Has(low.SHA256))
 	}
 
@@ -574,12 +574,12 @@ func TestFFmpegEdges(t *testing.T) {
 	bad := src.raw("bad", junk)                              // 64 KiB of it, then nothing more
 	src.gate("bad")
 	start := time.Now()
-	_, err = s.Get(ctx, bad)
+	_, err = s.Get(ctx, bad, 0)
 	var se *SourceError
 	if err == nil || ctx.Err() != nil || errors.As(err, &se) || errors.Is(err, ErrFailed) {
 		t.Fatalf("got %v (%v)", err, ctx.Err())
 	}
-	if _, err := s.Get(ctx, bad); !errors.Is(err, ErrFailed) {
+	if _, err := s.Get(ctx, bad, 0); !errors.Is(err, ErrFailed) {
 		t.Fatalf("again: %v", err)
 	}
 	if len(s.turns) != 0 || time.Since(start) > 10*time.Second {
@@ -604,5 +604,77 @@ func makeTone(t *testing.T, ff *ffmpeg.Tool, dst, codec string) {
 		"-af", "pan=5.1|c0=c0|c1=c0|c2=c0|c3=c0|c4=c0|c5=c0", "-c:a", codec, "-metadata", "title=Tone", "-metadata", "album=Test", dst).CombinedOutput()
 	if err != nil {
 		t.Fatalf("%v: %s", err, out)
+	}
+}
+
+// A long song not made yet, and one played from the middle, is sent as it is the time it is played
+// (every request of that playing alike) and made meanwhile: the next time it is played re-encoded;
+// one played from the middle while a request of the same playing waits for it waits too (review
+// #226).
+func TestLongSongMadeForTheNextTime(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	ctx := context.Background()
+	long := src.add("long", []byte("an hour of drama"))
+	long.Duration = 60 * 60 * 1000
+	if _, err := s.Get(ctx, long, 0); !errors.Is(err, ErrLater) {
+		t.Fatalf("a long song: %v", err)
+	}
+	eventually(t, "made meanwhile", func() bool { _, err := os.Stat(s.path(long.SHA256)); return err == nil })
+	if _, err := s.Get(ctx, long, 1<<10); !errors.Is(err, ErrLater) || s.Has(long.SHA256) {
+		t.Fatalf("the same playing, sought, once made: %v, re-encoded said %v", err, s.Has(long.SHA256))
+	}
+	if g := got(t, s, ctx, src.add("short", []byte("a song"))); g != "opus:a song" {
+		t.Fatalf("a short song waited for: %q", g)
+	}
+	if g := got(t, s, ctx, long); g != "opus:an hour of drama" || !s.Has(long.SHA256) {
+		t.Fatalf("the next time: %q", g)
+	}
+
+	mid := src.add("mid", []byte("played from the middle"))
+	if _, err := s.Get(ctx, mid, 1<<10); !errors.Is(err, ErrLater) {
+		t.Fatalf("from the middle: %v", err)
+	}
+	waited := src.add("waited", []byte("waited for"))
+	release := src.gate("waited")
+	first := make(chan error, 1)
+	go func() { f, err := s.Get(ctx, waited, 0); f.Close(); first <- err }()
+	eventually(t, "the first request waits", func() bool {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		c := s.calls[waited.SHA256]
+		return c != nil && c.waiting == 1
+	})
+	second := make(chan error, 1)
+	go func() {
+		f, err := s.Get(ctx, waited, 1<<10)
+		if err == nil {
+			f.Close()
+		}
+		second <- err
+	}()
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("from the middle while the first waited: %v", err)
+	}
+}
+
+// A song whose making ran out of time is sent as it is for a while, as one that failed: the next
+// request is not to wait as long again (review #226).
+func TestTimeUpIsAFailure(t *testing.T) {
+	defer func(d time.Duration) { timeout = d }(timeout)
+	timeout = 50 * time.Millisecond
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	a := src.add("a", []byte("slow"))
+	src.gate("a") // never more than half of it
+	if _, err := s.Get(context.Background(), a, 0); err == nil || errors.Is(err, ErrFailed) {
+		t.Fatalf("its time up: %v", err)
+	}
+	if _, err := s.Get(context.Background(), a, 0); !errors.Is(err, ErrFailed) || enc.runs.Load() != 1 {
+		t.Fatalf("after its time was up: %v, made %d times", err, enc.runs.Load())
 	}
 }

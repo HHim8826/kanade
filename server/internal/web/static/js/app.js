@@ -54,7 +54,7 @@ function Page({ route, onLogout }) {
     case 'upload': return html`<${Upload} />`;
     case 'import': return html`<${ImportReview} id=${arg} />`;
     case 'feeds': return html`<${Feeds} tab=${route.query.get('tab') || 'items'} q=${route.query.get('q') || ''} />`;
-    case 'settings': return html`<${Settings} onLogout=${onLogout} />`;
+    case 'settings': return html`<${Settings} onLogout=${onLogout} section=${route.query.get('s')} />`;
     default: return html`<p>找不到頁面</p>`;
   }
 }

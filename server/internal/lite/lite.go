@@ -34,12 +34,18 @@ const (
 	// one would grow (review #212).
 	keepRate = 160_000
 	workers  = 2
-	timeout  = 15 * time.Minute
 	// A song that could not be made is sent as it is for this long, so the requests of one playing
 	// never get two different files (a range of each).
 	badFor = time.Hour
 	ext    = ".opus.ogg"
+	// A song this long, not made yet, is sent as it is the time it is played, and made meanwhile for
+	// the next: re-encoding it first would have the player wait (half a minute for an hour's drama
+	// on a small server; review #226). So is one played from the middle, which needs it whole.
+	longMS = 10 * 60 * 1000
 )
+
+// timeout is the longest a song is made for.
+var timeout = 15 * time.Minute
 
 // Shrinks reports whether lite mode re-encodes an original of this format and bitrate (bits a
 // second, on average): those well above the lite bitrate, and lossless ones of a bitrate not known.
@@ -56,6 +62,7 @@ type Song struct {
 	Size     int64
 	Format   string // flac, mp3, m4a, ogg, opus
 	Channels int
+	Duration int64 // ms; 0 when not known
 }
 
 // Source reads originals: the stream cache.
@@ -86,6 +93,10 @@ var ErrFailed = errors.New("this song could not be re-encoded")
 // it alike.
 var ErrNotSmaller = errors.New("this song re-encoded is not smaller")
 
+// ErrLater is a song sent as it is while it is played this time: long, or played from the middle,
+// it is made meanwhile and played re-encoded the next time (review #226).
+var ErrLater = errors.New("this song is re-encoded for the next time it is played")
+
 type Store struct {
 	dir    string
 	budget int64
@@ -99,6 +110,7 @@ type Store struct {
 	calls         map[string]*call
 	bad           map[string]time.Time // songs that could not be made -> until when they are sent as they are
 	plain         map[string]bool      // songs not smaller re-encoded: sent as they are until a restart
+	later         map[string]bool      // the song played, sent as it is while it is (ErrLater)
 	current, next string               // the song played last and the one preloaded last (checksums)
 	used          int64                // bytes in dir; -1 until counted
 }
@@ -117,7 +129,7 @@ func New(dir string, budget int64, enc Encoder, src Source, log *slog.Logger) (*
 		return nil, err
 	}
 	s := &Store{dir: dir, budget: budget, enc: enc, src: src, log: log, turns: make(chan struct{}, workers),
-		calls: map[string]*call{}, bad: map[string]time.Time{}, plain: map[string]bool{}, used: -1}
+		calls: map[string]*call{}, bad: map[string]time.Time{}, plain: map[string]bool{}, later: map[string]bool{}, used: -1}
 	for _, e := range s.list() {
 		if !strings.HasSuffix(e.path, ext) || e.size == 0 {
 			os.Remove(e.path)
@@ -132,16 +144,21 @@ func (s *Store) Available() bool { return s != nil && s.enc != nil }
 func (s *Store) path(sha string) string { return filepath.Join(s.dir, sha+ext) }
 
 // Get opens the lite file of song o, made first if it is not here. o is the song played: it is
-// still made when its request goes (a player asks again), until another song is played.
-// ErrFailed: it could not be made a short while ago; ErrNotSmaller: it is not worth it; a
-// *SourceError: the original did not arrive.
-func (s *Store) Get(ctx context.Context, o Song) (*os.File, error) {
+// still made when its request goes (a player asks again), until another song is played. from is
+// where the request starts (bytes).
+// ErrFailed: it could not be made a short while ago; ErrNotSmaller: it is not worth it; ErrLater:
+// it is made for the next time, sent as it is this time; a *SourceError: the original did not arrive.
+func (s *Store) Get(ctx context.Context, o Song, from int64) (*os.File, error) {
 	if !s.Available() {
 		return nil, ErrFailed
 	}
 	key := o.SHA256
 	s.mu.Lock()
 	s.playLocked(key)
+	if s.later[key] { // every request of one playing gets the same file
+		s.mu.Unlock()
+		return nil, ErrLater
+	}
 	if f, err := s.openLocked(key); err == nil {
 		s.mu.Unlock()
 		return f, nil
@@ -158,6 +175,11 @@ func (s *Store) Get(ctx context.Context, o Song) (*os.File, error) {
 		delete(s.bad, key)
 	}
 	c := s.startLocked(o)
+	if c.waiting == 0 && (o.Duration >= longMS || from > 0) { // no request of this playing waits for it
+		s.later[key] = true
+		s.mu.Unlock()
+		return nil, ErrLater
+	}
 	c.waiting++
 	s.mu.Unlock()
 	select {
@@ -191,19 +213,34 @@ func (s *Store) Played(sha string) {
 
 func (s *Store) playLocked(key string) {
 	if s.current != key {
+		delete(s.later, s.current) // played re-encoded the next time, made by then
 		s.current = key
 		s.settleLocked()
 	}
 }
 
+// Later reports whether song sha is sent as it is while it is played this time, made for the next
+// (ErrLater).
+func (s *Store) Later(sha string) bool {
+	if !s.Available() {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.later[sha]
+}
+
 // Has reports whether song sha's lite file is here: once a request for it was answered with the
-// song re-encoded, the song it plays (review #209).
+// song re-encoded, the song it plays (review #209); not while it is sent as it is (ErrLater).
 func (s *Store) Has(sha string) bool {
 	if !s.Available() {
 		return false
 	}
+	s.mu.Lock()
+	later := s.later[sha]
+	s.mu.Unlock()
 	_, err := os.Stat(s.path(sha))
-	return err == nil
+	return err == nil && !later
 }
 
 // openLocked opens a lite file that is here, marking it played now (the budget keeps the songs
@@ -274,7 +311,8 @@ func (s *Store) startLocked(o Song) *call {
 		case errors.Is(err, ErrNotSmaller):
 			s.plain[key] = true
 			s.log.Info("lite: not smaller re-encoded; sent as it is", "file", o.DriveID, "size", o.Size)
-		case err != nil && ctx.Err() == nil && !errors.As(err, &se):
+		case err != nil && !errors.Is(ctx.Err(), context.Canceled) && !errors.As(err, &se):
+			// Its time up too: the next request is not to wait as long again (review #226).
 			s.bad[key] = time.Now().Add(badFor)
 			s.log.Warn("lite: re-encoding failed; sent as it is", "file", o.DriveID, "err", err)
 		}

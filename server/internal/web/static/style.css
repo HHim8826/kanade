@@ -553,9 +553,16 @@ body.locked .content { overflow: hidden; }
 .form-grid .field input, .form-grid .field textarea { width: 100%; min-width: 0; }
 @media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } }
 .hint.tight { margin: 0; font-size: 12px; }
-.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--outline); border-radius: 20px; overflow: hidden; width: fit-content; }
+/* Each option draws the lines on its left and above it: wrapped onto two rows on a phone, the rows
+   fill the box and the lines meet its edges (review #232). */
+.seg { display: inline-flex; flex-wrap: wrap; border: 1px solid var(--outline); border-radius: 20px; overflow: hidden; width: fit-content; max-width: 100%; }
+.seg > label, .seg > a, .seg > button { flex: 1 0 auto; justify-content: center; box-shadow: -1px 0 0 var(--outline), 0 -1px 0 var(--outline); }
 .seg label { display: flex; align-items: center; padding: 8px 16px; cursor: pointer; color: var(--on-surface); font-size: 14px; }
-.seg label + label { border-left: 1px solid var(--outline); }
+@media (max-width: 560px) {
+  /* A dialog's choices of long names: a list down the dialog. */
+  .seg.stack { flex-direction: column; width: 100%; border-radius: var(--radius-m); }
+  .seg.stack > label { justify-content: flex-start; }
+}
 .seg label.on { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 600; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--primary); outline-offset: -2px; }
@@ -669,7 +676,9 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 /* Songs filter, folder albums, VGMdb paste (2026-10-03) */
 .filter-seg { margin: 4px 0 16px; }
 .seg a { display: flex; align-items: center; padding: 8px 16px; color: var(--on-surface); font-size: 14px; text-decoration: none; }
-.seg a + a { border-left: 1px solid var(--outline); }
+.place-filter { margin-top: 4px; }
+.place-filter .select-field { min-width: 0; max-width: 100%; white-space: nowrap; }
+.place-filter select { min-width: 0; max-width: min(100%, 360px); text-overflow: ellipsis; }
 .seg a.on { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 600; }
 .folder-card .btn { flex: none; }
 .folder-group { border: 1px solid var(--outline-variant); border-radius: var(--radius-m); padding: 4px 12px 0; }
@@ -698,7 +707,8 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .toggle-row { display: flex; align-items: center; gap: 16px; padding: 8px 0 16px; cursor: pointer; }
 .toggle-row:not(label) { cursor: auto; } /* a row with a button, not a switch */
 /* Storage locations (#99): a card each. */
-.store-head { display: flex; align-items: center; gap: 12px; }
+.store-head { display: flex; align-items: center; gap: 12px; width: 100%; }
+.store-row:not(.open) { padding-top: 12px; padding-bottom: 12px; }
 .store-head .grow { display: flex; flex-direction: column; min-width: 0; }
 .store-head .title { white-space: normal; overflow-wrap: anywhere; }
 .store-lines { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 0 36px; }
@@ -772,7 +782,6 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .list-tools input[type="search"] { min-width: 0; flex: 1 1 240px; font: inherit; color: var(--on-surface); padding: 0 12px; height: 40px;
   border-radius: var(--radius-s); border: 1px solid var(--outline); background: var(--surface); }
 .seg button { display: flex; align-items: center; padding: 8px 16px; border: 0; background: none; color: var(--on-surface); font: inherit; font-size: 14px; cursor: pointer; }
-.seg button + button { border-left: 1px solid var(--outline); }
 .seg button.on { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 600; }
 .album-categories { margin: 8px 0 0; gap: 6px; }
 .album-categories .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 13px; text-decoration: none; color: var(--on-surface); border: 0; cursor: pointer; }
@@ -991,7 +1000,6 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 }
 .seg.collection-type { display: grid; grid-template-columns: repeat(5, 1fr); width: 100%; }
 .seg.collection-type label { justify-content: center; padding: 8px 4px; }
-.seg.collection-type label + label { border-left: 1px solid var(--outline); }
 @media (max-width: 480px) { .stars button { font-size: 21px; padding: 1px; } .stars .star-clear { width: 24px; height: 24px; } }
 .collect-on-bind { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; margin: 12px 0 0; padding: 8px 12px; border-radius: var(--radius-s);
   background: var(--surface-container-high); }
@@ -1051,3 +1059,18 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .folder-list button:hover, .folder-list button:focus-visible { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
 .folder-list .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .folder-list .empty { padding: 12px; }
+
+/* Settings in groups, and the bar going to them (review #233) */
+.settings-nav { position: sticky; top: -16px; z-index: 3; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
+  margin: 0 -16px; padding: 12px 16px 8px; background: var(--surface); }
+.settings-nav::-webkit-scrollbar { display: none; }
+.settings-nav button { flex: none; padding: 6px 14px; border: 1px solid var(--outline-variant); border-radius: 16px; background: none;
+  color: var(--on-surface); font: inherit; font-size: 14px; cursor: pointer; }
+.settings-nav button:hover { background: var(--surface-container-high); }
+.settings-nav button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.settings-group { scroll-margin-top: 64px; }
+.settings-group + .settings-group { margin-top: 40px; }
+.group-label { margin: 16px 0 -12px; font-size: 13px; font-weight: 600; letter-spacing: .04em; color: var(--primary); }
+@media (min-width: 840px) {
+  .settings-nav { top: -24px; margin: 0 -32px; padding: 12px 32px 8px; }
+}

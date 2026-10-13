@@ -241,7 +241,8 @@ func (s *Server) streamLite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no such asset"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"lite": lite.Shrinks(a.Format, a.Bitrate) && s.lite.Has(a.SHA256)})
+	writeJSON(w, http.StatusOK, map[string]bool{"lite": lite.Shrinks(a.Format, a.Bitrate) && s.lite.Has(a.SHA256),
+		"later": lite.Shrinks(a.Format, a.Bitrate) && s.lite.Later(a.SHA256)})
 }
 
 // wantsLite reports whether a player in lite mode (?q=opus128) gets the song re-encoded: when the
@@ -251,15 +252,23 @@ func (s *Server) wantsLite(r *http.Request, a *library.Asset) bool {
 }
 
 func liteSong(a *library.Asset) lite.Song {
-	return lite.Song{DriveID: a.Ref, SHA256: a.SHA256, Size: a.Size, Format: a.Format, Channels: a.Channels}
+	return lite.Song{DriveID: a.Ref, SHA256: a.SHA256, Size: a.Size, Format: a.Format, Channels: a.Channels, Duration: a.DurationMS}
 }
 
 // serveLite answers with the song re-encoded for lite mode, made first if need be (the answer waits
 // for it). It reports false when the original is to be sent instead: the song could not be
 // re-encoded, now or a short while ago (lite.ErrFailed), or is not smaller re-encoded
-// (lite.ErrNotSmaller), so every request of one playing gets the same file.
+// (lite.ErrNotSmaller), so every request of one playing gets the same file; or, long or played from
+// the middle, it is made for the next time (lite.ErrLater, review #226).
 func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.Asset) bool {
-	f, err := s.lite.Get(r.Context(), liteSong(a))
+	var from int64 // where the request starts: from the end ("bytes=-500") is not the start either
+	if v, ok := strings.CutPrefix(r.Header.Get("Range"), "bytes="); ok {
+		first, _, _ := strings.Cut(v, "-")
+		if from, _ = strconv.ParseInt(strings.TrimSpace(first), 10, 64); strings.TrimSpace(first) == "" {
+			from = 1
+		}
+	}
+	f, err := s.lite.Get(r.Context(), liteSong(a), from)
 	var se *lite.SourceError
 	switch {
 	case err == nil:

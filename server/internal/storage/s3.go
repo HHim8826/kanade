@@ -350,7 +350,23 @@ func (s *S3) Open(ctx context.Context, key string, start, end int64) (io.ReadClo
 	if err != nil {
 		return nil, err
 	}
-	return resp.Body, nil
+	// A range sent says so by its status or its Content-Range: rclone's serve s3 sends one with 200.
+	if h.Get("Range") == "" || resp.StatusCode == http.StatusPartialContent || resp.Header.Get("Content-Range") != "" {
+		return resp.Body, nil
+	}
+	// The range not honoured, the whole object sent: what was asked for is cut from it (review #235),
+	// as on OneDrive.
+	if _, err := io.CopyN(io.Discard, resp.Body, start); err != nil {
+		resp.Body.Close()
+		return nil, offline("%s: %v", s.base.Host, unwrapNet(err))
+	}
+	if end < 0 {
+		return resp.Body, nil
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.LimitReader(resp.Body, end-start+1), resp.Body}, nil
 }
 
 func (s *S3) Stat(ctx context.Context, key string) (Object, error) {

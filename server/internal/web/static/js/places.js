@@ -4,13 +4,16 @@ import { createStore } from './store.js';
 // Where the library's files are (#95, #99, #100): Google Drive, and the storage locations besides
 // it. What deleting and missing files say depends on it: with Drive alone, the words Drive users
 // know.
-export const places = createStore({ loaded: false, stores: [], default: 'drive' });
+export const places = createStore({ loaded: false, stores: [], default: 'drive', drive: {} });
 
 export function loadPlaces() {
-  return get('/storage').then((v) => {
-    places.set({ loaded: true, stores: v.stores, default: v.default });
-    return v;
-  }, () => null);
+  return get('/storage').then((v) => keepPlaces(v), () => null);
+}
+
+// keepPlaces keeps an answer of GET /storage read elsewhere (the settings page's first reads).
+export function keepPlaces(v) {
+  places.set({ loaded: true, stores: v.stores, default: v.default, drive: v.drive || {} });
+  return v;
 }
 
 // driveOnly says whether the library is in Google Drive alone.

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -232,7 +233,7 @@ func TestStreamLiteFollowsPlay(t *testing.T) {
 
 	flac, mp3, low, big, bad := song("f1", "flac", 900_000, "fLaC song"), song("m1", "mp3", 128_000, "ID3 small mp3"),
 		song("l1", "flac", 108_521, "fLaC quiet"), song("g1", "flac", 0, "big flac"), song("b1", "flac", 900_000, "bad flac")
-	if got := told(flac); got != `{"lite":false}` {
+	if got := told(flac); got != `{"later":false,"lite":false}` {
 		t.Fatalf("not played yet: %s", got)
 	}
 	for _, c := range []struct {
@@ -240,9 +241,9 @@ func TestStreamLiteFollowsPlay(t *testing.T) {
 		typ, lite string
 		reEncoded bool
 		what      string
-	}{{flac, "audio/ogg", `{"lite":true}`, true, "re-encoded"}, {mp3, "audio/mpeg", `{"lite":false}`, false, "lossy and small"},
-		{low, "audio/flac", `{"lite":false}`, false, "lossless at a low bitrate"}, {big, "audio/flac", `{"lite":false}`, false, "not smaller"},
-		{bad, "audio/flac", `{"lite":false}`, false, "failed"}} {
+	}{{flac, "audio/ogg", `{"later":false,"lite":true}`, true, "re-encoded"}, {mp3, "audio/mpeg", `{"later":false,"lite":false}`, false, "lossy and small"},
+		{low, "audio/flac", `{"later":false,"lite":false}`, false, "lossless at a low bitrate"}, {big, "audio/flac", `{"later":false,"lite":false}`, false, "not smaller"},
+		{bad, "audio/flac", `{"later":false,"lite":false}`, false, "failed"}} {
 		for range 2 { // and again a while later: the same
 			if code, typ, _ := stream(ctx, c.id, lite.Quality); code != 200 || typ != c.typ {
 				t.Fatalf("%s: %d %s", c.what, code, typ)
@@ -300,7 +301,7 @@ func TestStreamLiteFollowsPlay(t *testing.T) {
 		t.Fatal("the song preloaded stopped")
 	}
 	close(enc.gate)
-	if code, typ, _ := stream(ctx, next, lite.Quality); code != 200 || typ != "audio/ogg" || told(next) != `{"lite":true}` {
+	if code, typ, _ := stream(ctx, next, lite.Quality); code != 200 || typ != "audio/ogg" || told(next) != `{"later":false,"lite":true}` {
 		t.Fatalf("the song preloaded: %d %s", code, typ)
 	}
 }
@@ -319,7 +320,7 @@ func TestStreamLiteUnavailable(t *testing.T) {
 	if rec := do(t, h, "GET", fmt.Sprintf("/api/v1/stream/%d?q=%s", a.ID, lite.Quality), token, nil); rec.Body.String() != "fLaC song" {
 		t.Fatalf("got %d %q", rec.Code, rec.Body)
 	}
-	if rec := do(t, h, "GET", fmt.Sprintf("/api/v1/stream/%d/lite", a.ID), token, nil); strings.TrimSpace(rec.Body.String()) != `{"lite":false}` {
+	if rec := do(t, h, "GET", fmt.Sprintf("/api/v1/stream/%d/lite", a.ID), token, nil); strings.TrimSpace(rec.Body.String()) != `{"later":false,"lite":false}` {
 		t.Fatalf("lite: %d %s", rec.Code, rec.Body)
 	}
 	if rec := do(t, h, "POST", fmt.Sprintf("/api/v1/stream/%d/prefetch?q=%s", a.ID, lite.Quality), token, nil); rec.Code != http.StatusNoContent {
@@ -336,5 +337,70 @@ func TestStreamLiteUnavailable(t *testing.T) {
 	}
 	if rec := do(t, h, "POST", "/api/v1/cache/trim", token, nil); rec.Code != 200 {
 		t.Fatalf("trim: %d", rec.Code)
+	}
+}
+
+// A long song not made yet starts at once, sent as it is (the player says so), and is made
+// meanwhile: re-encoded the next time it is played, not while the same playing seeks (review #226).
+func TestStreamLiteLongSong(t *testing.T) {
+	drive := &memDrive{files: map[string][]byte{}, down: map[string]bool{}}
+	var dir string
+	s, h := newTestServer(t, func(d *Deps) {
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		cache, err := stream.NewCache(drive, d.Config.Path(config.DirCache), 64<<20, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Cache = cache
+		dir = d.Config.Path(config.DirLite)
+		if d.Lite, err = lite.New(dir, LiteBudget, prefixer{}, cache, log); err != nil {
+			t.Fatal(err)
+		}
+	})
+	token := loginToken(t, s, h)
+	long, short := addSong(t, s, drive, "l1", "flac", 900_000, "fLaC drama"+pad), addSong(t, s, drive, "s1", "flac", 900_000, "fLaC song"+pad)
+	s.db.Exec(`UPDATE assets SET duration_ms = 1800000 WHERE sha256 = 'l1'`)
+	get := func(path, rng string) (*http.Response, string) {
+		req, _ := http.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		if rng != "" {
+			req.Header.Set("Range", rng)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body, _ := io.ReadAll(rec.Result().Body)
+		return rec.Result(), string(body)
+	}
+	stream := func(id int64, rng string) (*http.Response, string) {
+		return get(fmt.Sprintf("/api/v1/stream/%d?q=%s", id, lite.Quality), rng)
+	}
+	said := func(id int64) string {
+		_, body := get(fmt.Sprintf("/api/v1/stream/%d/lite", id), "")
+		return strings.TrimSpace(body)
+	}
+	if res, body := stream(long, "bytes=0-"); res.Header.Get("Content-Type") != "audio/flac" || body != "fLaC drama"+pad {
+		t.Fatalf("a long song: %q %v", body, res.Header)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "l1.opus.ogg")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not made meanwhile")
+		}
+	}
+	if res, body := stream(long, "bytes=5-"); res.StatusCode != 206 || body != "drama"+pad || said(long) != `{"later":true,"lite":false}` {
+		t.Fatalf("the same playing sought, once made: %d %q", res.StatusCode, body)
+	}
+	if res, body := stream(short, ""); body != "OggS lite of fLaC song" {
+		t.Fatalf("a short song: %q %v", body, res.Header)
+	}
+	if res, body := stream(long, "bytes=0-"); body != "OggS lite of fLaC drama" || said(long) != `{"later":false,"lite":true}` {
+		t.Fatalf("the next time: %q %v", body, res.Header)
+	}
+	// Played from the middle, not made: as it is, every request of the playing alike.
+	mid := addSong(t, s, drive, "m1", "flac", 900_000, "fLaC from the middle"+pad)
+	if res, body := stream(mid, "bytes=5-"); res.StatusCode != 206 || body != "from the middle"+pad || said(mid) != `{"later":true,"lite":false}` {
+		t.Fatalf("from the middle: %d %q", res.StatusCode, body)
 	}
 }

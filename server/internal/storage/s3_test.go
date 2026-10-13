@@ -231,6 +231,29 @@ func TestS3Source(t *testing.T) {
 	if got := read(t, s, Ref(KindS3, st.ID, "Album/01.flac"), 0, -1); got != "one" {
 		t.Fatalf("read %q", got)
 	}
+	// A server not honouring ranges sends the whole object: what was asked for is cut from it (review #235).
+	fake.Put("music/Album/02.flac", []byte("0123456789"))
+	fake.NoRanges = true
+	for _, c := range []struct {
+		start, end int64
+		want       string
+	}{{0, -1, "0123456789"}, {3, -1, "3456789"}, {3, 5, "345"}, {0, 3, "0123"}} {
+		if got := read(t, s, Ref(KindS3, st.ID, "Album/02.flac"), c.start, c.end); got != c.want {
+			t.Fatalf("whole object sent for %d-%d: read %q", c.start, c.end, got)
+		}
+	}
+	fake.NoRanges = false
+	// One sent with 200 and its Content-Range, as rclone's serve s3 does, is the range.
+	fake.RangeStatus = http.StatusOK
+	for _, c := range []struct {
+		start, end int64
+		want       string
+	}{{3, -1, "3456789"}, {3, 5, "345"}, {0, 3, "0123"}} {
+		if got := read(t, s, Ref(KindS3, st.ID, "Album/02.flac"), c.start, c.end); got != c.want {
+			t.Fatalf("a range sent with 200 for %d-%d: read %q", c.start, c.end, got)
+		}
+	}
+	fake.RangeStatus = 0
 	if _, err := b.(Writer).Put(ctx, PutFile{}); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("written: %v", err)
 	}

@@ -2,7 +2,7 @@
 // collections already somewhere (a NAS, a OneDrive) imported where they are.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
-import { loadPlaces } from '../places.js';
+import { keepPlaces, loadPlaces } from '../places.js';
 import { confirmDialog, Field, textDialog, useRunner } from './organize.js';
 import { Dialog, ErrorBox, Icon, copyText, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
 
@@ -35,7 +35,7 @@ function scanLine(st) {
   if (!s) return st.mode === 'source' ? html`<span class="sub">還沒掃描：按「掃描」把這裡的音樂匯入曲庫。</span>` : null;
   if (st.mode === 'source') {
     const parts = [s.new && `新加入 ${s.new} 個`, s.changed && `內容改變 ${s.changed} 個`, s.moved && `搬動 ${s.moved} 個`,
-      s.gone && `${s.gone} 首不見了（標成遺失）`, s.back && `${s.back} 首回來了`].filter(Boolean);
+      s.gone && `${s.gone} 首不見了（標成遺失）`, s.back && `${s.back} 首回來了`, s.covers && `封面更新 ${s.covers} 張`].filter(Boolean);
     return html`<span class="sub">上次掃描：${when(s.at)}，共 ${s.files} 個檔案${parts.length ? '；' + parts.join('、') : '，沒有變動'}${s.bytes ? `（匯入要讀 ${fmtBytes(s.bytes)}）` : ''}</span>
       ${s.held > 0 && html`<span class="sub state-failed">有 ${s.held} 首一次不見太多，看起來不是被刪除而是沒有完整掛載，所以沒有標成遺失。確認來源正常後再掃描一次。</span>`}
       ${s.error && html`<span class="sub state-failed">${s.error}</span>`}`;
@@ -61,8 +61,21 @@ function CategoryField({ value, onChange, disabled, field }) {
     : html`<div class="store-category"><label class="select-field">新匯入的專輯放進分類${pick}</label><span class="sub">${hint}</span></div>`;
 }
 
+// shortState is a location's state in a few words, for its row closed.
+function shortState(st) {
+  if (st.kind === 'onedrive' && !st.signed_in) return ['還沒連線', true];
+  if (st.kind === 'onedrive' && !odConfig(st).folder) return ['還沒選擇資料夾', true];
+  if (st.running) return [st.mode === 'source' ? '正在掃描…' : '正在檢查…', false];
+  if (!st.state) return ['還沒檢查', false];
+  if (st.state !== 'ok') return [st.state === 'offline' ? '目前無法使用' : '無法使用', true];
+  return ['可以使用', false];
+}
+
+// StoreRow is a location: closed, a line (its name, state and songs); open, all it says and can do
+// (review #233). One still to be set up (a OneDrive to connect, a source not scanned yet) is open.
 function StoreRow({ st, isDefault, onChange }) {
   const [busy, run] = useRunner();
+  const [open, setOpen] = useState(() => !odReady(st) || (st.mode === 'source' && !st.scan));
   const scan = (preview) => run(async () => {
     await post(`/storage/${st.id}/scan`, { preview });
     toast(st.mode === 'source' ? (preview ? '開始掃描，新的檔案會先停在「任務」的預覽' : '開始掃描，新的檔案會自動匯入') : '開始檢查');
@@ -106,14 +119,18 @@ function StoreRow({ st, isDefault, onChange }) {
   const hasFiles = st.use.songs + st.use.others > 0;
   const connect = () => connectOneDrive(st, onChange);
   const pickFolder = () => chooseFolder(st, onChange);
-  return html`<div class="card pad store-row">
-    <div class="store-head">
+  const [said, bad] = shortState(st);
+  const songs = st.use.songs > 0 || st.mode === 'managed' ? ` · ${st.use.songs} 首` : '';
+  return html`<div class=${'card pad store-row' + (open ? ' open' : '')}>
+    <button class="store-head plain" aria-expanded=${open} onClick=${() => setOpen(!open)}>
       <${Icon} name=${st.kind === 'local' ? 'folder' : 'cloud'} />
       <span class="grow"><span class="title">${st.name}</span>
-        <span class="sub break">${kinds[st.kind] || st.kind} · ${modes[st.mode]}${isDefault ? ' · 新匯入存在這裡' : ''} · ${st.location}</span>
-        ${od && st.signed_in && odConfig(st).account && html`<span class="sub break">帳號：${odConfig(st).account}</span>`}</span>
-    </div>
-    <div class="store-lines">
+        ${open ? html`<span class="sub break">${kinds[st.kind] || st.kind} · ${modes[st.mode]}${isDefault ? ' · 新匯入存在這裡' : ''} · ${st.location}</span>
+          ${od && st.signed_in && odConfig(st).account && html`<span class="sub break">帳號：${odConfig(st).account}</span>`}`
+        : html`<span class="sub"><span class=${bad ? 'state-failed' : ''}>${said}</span> · ${modes[st.mode]}${isDefault ? ' · 新匯入存在這裡' : ''}${songs}${st.use.missing ? html`<span class="state-failed">，${st.use.missing} 首遺失</span>` : ''}</span>`}</span>
+      <span class=${'chev' + (open ? ' open' : '')}><${Icon} name="expand" /></span>
+    </button>
+    ${open && html`<div class="store-lines">
       ${stateLine(st)}
       ${(st.use.songs > 0 || st.mode === 'managed') && html`<span class="sub">曲庫有 ${st.use.songs} 首歌在這裡${st.use.bytes ? `（${fmtBytes(st.use.bytes)}）` : ''}${st.use.missing ? html`，<span class="state-failed">${st.use.missing} 首遺失</span>` : ''}</span>`}
       ${scanLine(st)}
@@ -139,14 +156,16 @@ function StoreRow({ st, isDefault, onChange }) {
       <button class="btn text" onClick=${rename}>重新命名</button>
       <button class="btn text danger-text" disabled=${inUse || st.running} title=${inUse ? '曲庫還有檔案存在這裡；搬到別處的功能另外設計，目前要先刪除這些歌曲' : ''} onClick=${remove}>移除</button>
     </div>
-    ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面或附屬檔` : ''}存在這裡，所以不能移除。</p>`}
+    ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面或附屬檔` : ''}存在這裡，所以不能移除。</p>`}`}
   </div>`;
 }
 
 // StorageLocations is the settings section: where new imports go, the locations, and adding one.
-export function StorageLocations() {
-  const [v, setV] = useState(null);
-  const [error, setError] = useState(null);
+// first is the page's first read of it: the section is there with the rest of the page, not put
+// above it once it answers (review #218).
+export function StorageLocations({ first }) {
+  const [v, setV] = useState(first && first.data || null);
+  const [error, setError] = useState(first && first.error ? new Error('讀不到儲存位置') : null);
   const load = () => loadPlaces().then((r) => {
     if (r) {
       setV(r);
@@ -155,7 +174,10 @@ export function StorageLocations() {
       setError(new Error('讀不到儲存位置'));
     }
   });
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!first) load();
+    else if (first.data) keepPlaces(first.data);
+  }, []);
   const running = v && v.stores.some((s) => s.running);
   useEffect(() => {
     if (!running) return undefined;
@@ -201,7 +223,7 @@ function SecretField({ label, value, onInput, placeholder }) {
 
 function Seg({ label, value, options, onChange }) {
   return html`<div class="field">${label}
-    <div class="seg" role="radiogroup" aria-label=${label}>${options.map(([v, text]) => html`<label key=${v} class=${value === v ? 'on' : ''}>
+    <div class="seg stack" role="radiogroup" aria-label=${label}>${options.map(([v, text]) => html`<label key=${v} class=${value === v ? 'on' : ''}>
       <input type="radio" checked=${value === v} onChange=${() => onChange(v)} />${text}</label>`)}</div>
   </div>`;
 }

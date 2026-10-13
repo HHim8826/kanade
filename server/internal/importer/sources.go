@@ -38,13 +38,14 @@ type SourceStores interface {
 // ScanResult is what a scan of a source found and did.
 type ScanResult struct {
 	At      int64  `json:"at"`
-	Files   int    `json:"files"`   // music, CUE sheets, logs and archives there
-	New     int    `json:"new"`     // queued to be imported
-	Changed int    `json:"changed"` // other content than before: queued again, the old song missing until it is
-	Moved   int    `json:"moved"`   // followed to where they are now
-	Gone    int    `json:"gone"`    // songs newly missing
-	Back    int    `json:"back"`    // missing songs whose files are back
-	Bytes   int64  `json:"bytes"`   // the size of what is queued: what the import reads
+	Files   int    `json:"files"`            // music, CUE sheets, logs and archives there
+	New     int    `json:"new"`              // queued to be imported
+	Changed int    `json:"changed"`          // other content than before: queued again, the old song missing until it is
+	Moved   int    `json:"moved"`            // followed to where they are now
+	Gone    int    `json:"gone"`             // songs newly missing
+	Back    int    `json:"back"`             // missing songs whose files are back
+	Covers  int    `json:"covers,omitempty"` // pictures taken as covers that moved, have other bytes, or are gone: followed (review #221)
+	Bytes   int64  `json:"bytes"`            // the size of what is queued: what the import reads
 	Batch   int64  `json:"batch,omitempty"`
 	Held    int    `json:"held,omitempty"` // gone, but too many at once: not marked
 	Error   string `json:"error,omitempty"`
@@ -128,11 +129,17 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		root = r.Root()
 	}
 	walked := map[string]storage.Object{}
-	beside := besides{} // a cloud source's pictures and lyrics, fetched with its songs
+	beside := besides{}                     // a cloud source's pictures and lyrics, fetched with its songs
+	pictures := map[string]storage.Object{} // its pictures: those taken as covers are followed (review #221)
 	err = b.Walk(ctx, func(o storage.Object) error {
 		if importable(o.Path) {
 			walked[o.Key] = o
-		} else if root == "" {
+			return nil
+		}
+		if imageExt[strings.ToLower(path.Ext(o.Path))] && o.Size <= maxCoverFile {
+			pictures[o.Key] = o
+		}
+		if root == "" {
 			beside.add(o)
 		}
 		return nil
@@ -255,6 +262,9 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		}
 		res.Changed = len(changed)
 		queue = append(queue, changed...)
+	}
+	if res.Covers, err = im.followCovers(ctx, b, st, pictures, partial, res.Held > 0); err != nil {
+		return res, err
 	}
 	if len(queue) == 0 {
 		return res, nil

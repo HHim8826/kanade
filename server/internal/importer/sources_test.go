@@ -227,12 +227,21 @@ func TestSourceNotAllThere(t *testing.T) {
 		taggedMP3(t, filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)), map[string]string{"TIT2": fmt.Sprint("Song ", i), "TALB": "A", "TPE1": "B"})
 	}
 	os.WriteFile(filepath.Join(src, "A/99 broken.mp3"), []byte("not audio"), 0o644)
+	os.WriteFile(filepath.Join(src, "A/cover.jpg"), jpeg, 0o644)
 	st := addFolder(t, set, src, storage.Source)
 	res, err := im.ScanSource(ctx, set, st.ID, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runUntilDone(t, im, res.Batch)
+	cover := func() string {
+		var ref string
+		im.db.QueryRow(`SELECT coalesce(c.file_ref, '') FROM albums al LEFT JOIN covers c ON c.id = al.cover_id WHERE al.title = 'A'`).Scan(&ref)
+		return ref
+	}
+	if cover() != "local:1:A/cover.jpg" {
+		t.Fatalf("cover %q", cover())
+	}
 	// A song deleted from the library: its file is let go of.
 	var track int64
 	im.db.QueryRow(`SELECT t.id FROM tracks t WHERE t.title = 'Song 30'`).Scan(&track)
@@ -261,11 +270,11 @@ func TestSourceNotAllThere(t *testing.T) {
 	}
 	var missing int
 	im.db.QueryRow(`SELECT count(*) FROM assets WHERE state = 'missing'`).Scan(&missing)
-	if missing != 0 {
-		t.Fatalf("%d marked missing", missing)
+	if missing != 0 || cover() != "local:1:A/cover.jpg" || res.Covers != 0 {
+		t.Fatalf("%d marked missing, the cover %q (%d followed)", missing, cover(), res.Covers)
 	}
 	// All back: the song deleted stays deleted, the broken file is not read again (review #227).
-	for _, f := range []string{"A/30.mp3", "A/99 broken.mp3"} {
+	for _, f := range []string{"A/30.mp3", "A/99 broken.mp3", "A/cover.jpg"} {
 		if err := os.Rename(filepath.Join(hidden, f), filepath.Join(src, f)); err != nil {
 			t.Fatal(err)
 		}
@@ -273,8 +282,11 @@ func TestSourceNotAllThere(t *testing.T) {
 	for i := 6; i <= 29; i++ {
 		os.Rename(filepath.Join(hidden, fmt.Sprintf("A/%02d.mp3", i)), filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)))
 	}
-	if res, err = im.ScanSource(ctx, set, st.ID, false); err != nil || res.New != 0 || res.Changed != 0 || res.Held != 0 {
+	if res, err = im.ScanSource(ctx, set, st.ID, false); err != nil || res.New != 0 || res.Changed != 0 || res.Held != 0 || res.Covers != 0 {
 		t.Fatalf("all back: %+v %v", res, err)
+	}
+	if cover() != "local:1:A/cover.jpg" {
+		t.Fatalf("the cover after: %q", cover())
 	}
 }
 
