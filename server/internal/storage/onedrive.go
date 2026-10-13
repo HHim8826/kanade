@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -115,6 +116,7 @@ type OneDrive struct {
 	access  string
 	expires time.Time
 	links   map[string]odLink // download links by item
+	bare    atomic.Bool       // Graph gave a file of this drive without its link: /content is asked at once
 	dirs    map[string]string // folder IDs by path below the root, for writes
 	quota   Usage
 	quotaAt time.Time
@@ -430,12 +432,18 @@ func (o *OneDrive) link(ctx context.Context, key string, fresh bool) (string, er
 	if ok && !fresh && o.now().Sub(l.at) < odLinkTTL {
 		return l.url, nil
 	}
+	if o.bare.Load() {
+		return "", errNoLink // one request, not two: the item would come without it
+	}
 	var it odItem
 	if err := o.call(ctx, http.MethodGet, o.item(key)+"?$select=id,deleted,file,folder,@microsoft.graph.downloadUrl", nil, &it); err != nil {
 		return "", err
 	}
 	if it.Folder != nil {
 		return "", ErrNotFound
+	}
+	if it.Link == "" {
+		o.bare.Store(true)
 	}
 	if it.Deleted != nil || it.File == nil || it.Link == "" {
 		return "", errNoLink // not what Graph says of a file there: its /content says what it is

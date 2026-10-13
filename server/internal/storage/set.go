@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -548,6 +549,10 @@ func (s *Set) Add(ctx context.Context, n NewStore) (*Store, error) {
 		}
 		config, _ = json.Marshal(cfg)
 	case KindS3:
+		var err error
+		if n.Config, err = r2Bucket(n.Config); err != nil {
+			return nil, err
+		}
 		cfg, sec, err := s.checkBucket(ctx, n, 0)
 		if err != nil {
 			return nil, err
@@ -764,6 +769,39 @@ func (s *Set) RemoveTx(ctx context.Context, tx *sql.Tx, id int64) error {
 }
 
 var bucketName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
+
+// r2Bucket takes the bucket out of an R2 endpoint as a bucket's settings show it, ending with its
+// name (https://<account ID>.r2.cloudflarestorage.com/<bucket>), for a store being added: one made
+// with it kept its files in that bucket, below a folder named as the bucket field said, its name
+// shown for a bucket it was not. The bucket field empty or the same, the name is taken from the
+// endpoint; another is refused, saying where each goes. A path on other services is theirs (one
+// behind a proxy's path); stores made before keep theirs, as their files are where it says.
+func r2Bucket(config json.RawMessage) (json.RawMessage, error) {
+	var cfg S3Config
+	if err := json.Unmarshal(config, &cfg); err != nil {
+		return config, invalid("config: %v", err)
+	}
+	u, err := url.Parse(strings.TrimSpace(cfg.Endpoint))
+	if err != nil || !strings.HasSuffix(strings.ToLower(u.Hostname()), ".r2.cloudflarestorage.com") {
+		return config, nil
+	}
+	in := strings.Trim(u.Path, "/")
+	if in == "" {
+		return config, nil
+	}
+	u.Path, u.RawPath, u.RawQuery = "", "", ""
+	name, rest, _ := strings.Cut(in, "/")
+	bucket := strings.TrimSpace(cfg.Bucket)
+	if rest != "" || (bucket != "" && bucket != name) {
+		msg := fmt.Sprintf("the endpoint ends with a bucket's name, %q: the endpoint is %s, and %q goes in the bucket's name", "/"+in, u, name)
+		if rest != "" {
+			msg += fmt.Sprintf(" (%q in the folder's)", rest)
+		}
+		return config, invalid("%s", msg)
+	}
+	cfg.Endpoint, cfg.Bucket = u.String(), name
+	return json.Marshal(cfg)
+}
 
 // checkBucket reads a bucket store's settings and keys, refuses a bucket folder that overlaps
 // another store's (except store except), and tries them: a managed store's are tried by writing

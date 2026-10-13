@@ -210,9 +210,10 @@ func TestOneDriveNoLinks(t *testing.T) {
 	if got := read(t, s, ref, 0, -1); got != "fLaC-one-0123456789" || g.Requests["content"] != 1 {
 		t.Fatalf("the link it redirected to not kept: %q (%d asked)", got, g.Requests["content"])
 	}
+	items := g.Requests["item"]
 	g.ExpireLinks()
-	if got := read(t, s, ref, 9, -1); got != "0123456789" || g.Requests["content"] != 2 {
-		t.Fatalf("after the link expired: %q (%d asked)", got, g.Requests["content"])
+	if got := read(t, s, ref, 9, -1); got != "0123456789" || g.Requests["content"] != 2 || g.Requests["item"] != items {
+		t.Fatalf("after the link expired: %q (%d asked, items %d, were %d)", got, g.Requests["content"], g.Requests["item"], items)
 	}
 	g.ContentServes = true
 	g.ExpireLinks()

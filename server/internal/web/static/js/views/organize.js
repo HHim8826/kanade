@@ -84,11 +84,11 @@ function showConflicts(list, none) {
 
 // ---- small form pieces ----
 
-export function Field({ label, value, onInput, multiline, rows = 3, placeholder, autofocus, wide, maxLength }) {
+export function Field({ label, value, onInput, onBlur, multiline, rows = 3, placeholder, autofocus, wide, maxLength }) {
   return html`<label class=${'field' + (wide ? ' span' : '')}>${label}
     ${multiline
       ? html`<textarea rows=${rows} value=${value} placeholder=${placeholder} maxLength=${maxLength} onInput=${(e) => onInput(e.target.value)}></textarea>`
-      : html`<input value=${value} placeholder=${placeholder} autofocus=${autofocus} maxLength=${maxLength} onInput=${(e) => onInput(e.target.value)} />`}
+      : html`<input value=${value} placeholder=${placeholder} autofocus=${autofocus} maxLength=${maxLength} onInput=${(e) => onInput(e.target.value)} onBlur=${onBlur} />`}
   </label>`;
 }
 

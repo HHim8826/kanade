@@ -283,3 +283,47 @@ func TestS3NoAnswer(t *testing.T) {
 		t.Fatalf("after %v: %v", took, err)
 	}
 }
+
+// An R2 endpoint as a bucket's settings show it ends with the bucket's name: taken out when the
+// store is added (the bucket field empty or the same), refused when the field names another (a
+// store made with it kept its files in that bucket under a folder named as the field said); a path
+// on another service stays (one behind a proxy's path).
+func TestR2EndpointWithItsBucket(t *testing.T) {
+	const acct = "https://0123abcd.r2.cloudflarestorage.com"
+	for _, c := range []struct {
+		endpoint, bucket  string
+		wantEnd, wantName string
+		refused           bool
+	}{
+		{acct + "/music", "", acct, "music", false},
+		{acct + "/music/", "music", acct, "music", false},
+		{"https://0123abcd.eu.R2.cloudflarestorage.com/music", "", "https://0123abcd.eu.R2.cloudflarestorage.com", "music", false},
+		{acct, "music", acct, "music", false},
+		{acct + "/test", "music", "", "", true},
+		{acct + "/music/kanade", "music", "", "", true},
+		{"https://minio.example/s3", "music", "https://minio.example/s3", "music", false},
+	} {
+		raw, _ := json.Marshal(S3Config{Endpoint: c.endpoint, Bucket: c.bucket, Prefix: "kanade", Region: "auto"})
+		got, err := r2Bucket(raw)
+		if c.refused {
+			var bad *ErrInvalid
+			if !errors.As(err, &bad) || !strings.Contains(err.Error(), acct) {
+				t.Fatalf("%s with %q: %v", c.endpoint, c.bucket, err)
+			}
+			continue
+		}
+		var cfg S3Config
+		json.Unmarshal(got, &cfg)
+		if err != nil || cfg.Endpoint != c.wantEnd || cfg.Bucket != c.wantName || cfg.Prefix != "kanade" || cfg.Region != "auto" {
+			t.Fatalf("%s with %q: %+v %v", c.endpoint, c.bucket, cfg, err)
+		}
+	}
+	// Refused on adding, before any request.
+	s, _ := newSet(t)
+	cfg, _ := json.Marshal(S3Config{Endpoint: acct + "/test", Bucket: "music", Prefix: "kanade"})
+	sec, _ := json.Marshal(S3Secret{AccessKey: "k", SecretKey: "s"})
+	var bad *ErrInvalid
+	if _, err := s.Add(context.Background(), NewStore{Kind: KindS3, Name: "R2", Mode: Managed, Config: cfg, Secret: sec}); !errors.As(err, &bad) {
+		t.Fatalf("added: %v", err)
+	}
+}

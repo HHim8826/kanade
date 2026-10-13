@@ -240,14 +240,22 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
   const [busy, run] = useRunner();
   const suggested = dataDir ? dataDir.replace(/\/$/, '') + '/library' : '';
   const setB = (k) => (v) => setBucket((b) => ({ ...b, [k]: v }));
+  // An R2 endpoint pasted as a bucket's settings show it ends with the bucket's name: that goes in
+  // its own field when that is empty, on leaving the endpoint's or on adding (the server refuses one
+  // naming another bucket).
+  const r2Split = (b) => {
+    const m = !b.bucket.trim() && /^(https:\/\/[^/\s]+\.r2\.cloudflarestorage\.com)\/([^/\s]+)\/?$/i.exec(b.endpoint.trim());
+    return m ? { ...b, endpoint: m[1], bucket: m[2] } : b;
+  };
+  const bk = r2Split(bucket);
   const setA = (k) => (v) => setApp((a) => ({ ...a, [k]: v }));
   const ready = kind === 'local' ? !!root.trim()
     : kind === 'onedrive' ? !!(app.client_id.trim() && app.client_secret.trim())
-    : !!(bucket.endpoint.trim() && bucket.bucket.trim() && bucket.access_key_id.trim() && bucket.secret_access_key.trim());
+    : !!(bk.endpoint.trim() && bk.bucket.trim() && bk.access_key_id.trim() && bk.secret_access_key.trim());
   const fallbackName = () => (kind === 'local'
     ? root.trim().split('/').filter(Boolean).pop() || '資料夾'
     : kind === 'onedrive' ? 'OneDrive'
-    : [bucket.bucket.trim(), bucket.prefix.trim().replace(/^\/+|\/+$/g, '')].filter(Boolean).join('/'));
+    : [bk.bucket.trim(), bk.prefix.trim().replace(/^\/+|\/+$/g, '')].filter(Boolean).join('/'));
   const save = (e) => {
     e && e.preventDefault();
     if (!ready || busy) return;
@@ -260,7 +268,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
         body.config = { client_id: app.client_id.trim(), tenant: app.tenant.trim() || 'common', region: app.region };
         body.secret = { client_secret: app.client_secret.trim() };
       } else {
-        body.config = { endpoint: bucket.endpoint.trim(), bucket: bucket.bucket.trim(), prefix: bucket.prefix.trim(), region: bucket.region.trim() || 'auto' };
+        body.config = { endpoint: bk.endpoint.trim(), bucket: bk.bucket.trim(), prefix: bk.prefix.trim(), region: bk.region.trim() || 'auto' };
         body.secret = { access_key_id: bucket.access_key_id.trim(), secret_access_key: bucket.secret_access_key.trim() };
       }
       let st;
@@ -306,7 +314,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
           ? html`要先建好資料夾或掛載好 NAS（資料目錄裡的資料夾會自動建立${suggested ? html`，例如 <a class="link" href="#" onClick=${(e) => { e.preventDefault(); setRoot(suggested); }}>${suggested}</a>` : ''}）。Kanade 會在裡面放一個 .kanade-store 檔，用來確認 NAS 有掛載；沒掛載時不會把檔案寫到底下的本機磁碟。執行 Kanade 的帳號要能寫入這個資料夾。`
           : '執行 Kanade 的帳號要能讀取這個資料夾。NAS 沒掛載（資料夾是空的）或一次不見太多檔案時，不會把歌曲標成遺失。'}</p>`
       : html`
-        <${Field} label="S3 API 端點" value=${bucket.endpoint} onInput=${setB('endpoint')} placeholder="https://<帳戶 ID>.r2.cloudflarestorage.com" autofocus />
+        <${Field} label="S3 API 端點" value=${bucket.endpoint} onInput=${setB('endpoint')} onBlur=${() => setBucket(r2Split)} placeholder="https://<帳戶 ID>.r2.cloudflarestorage.com" autofocus />
         <div class="form-grid">
           <${Field} label="Bucket 名稱" value=${bucket.bucket} onInput=${setB('bucket')} placeholder="music" />
           <${Field} label=${mode === 'managed' ? 'Bucket 裡的資料夾' : 'Bucket 裡的資料夾（可不填）'} value=${bucket.prefix} onInput=${setB('prefix')} placeholder=${mode === 'managed' ? 'kanade' : '整個 bucket'} />
@@ -314,7 +322,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
           <${SecretField} label="Secret Access Key" value=${bucket.secret_access_key} onInput=${setB('secret_access_key')} />
           <${Field} label="區域" value=${bucket.region} onInput=${setB('region')} placeholder="auto" />
         </div>
-        <p class="hint tight">在 Cloudflare 的 R2 →「管理 API 權杖」建立權杖：${mode === 'managed' ? '權限選「物件讀取和寫入」' : '權限選「物件唯讀」即可'}，並限定這個 bucket。端點在 bucket 的「設定」裡（S3 API）。Bucket 保持私有：播放時由伺服器簽章讀取。金鑰只存在伺服器，不會再顯示。其他 S3 相容服務（MinIO、Backblaze B2 等）也可以，區域照服務填寫。</p>`}
+        <p class="hint tight">在 Cloudflare 的 R2 →「管理 API 權杖」建立權杖：${mode === 'managed' ? '權限選「物件讀取和寫入」' : '權限選「物件唯讀」即可'}，並限定這個 bucket。端點在 bucket 的「設定」裡（S3 API），只到 .r2.cloudflarestorage.com：那裡的網址最後一段是 bucket 名稱（整段貼上時會自動分開）。Bucket 保持私有：播放時由伺服器簽章讀取。金鑰只存在伺服器，不會再顯示。其他 S3 相容服務（MinIO、Backblaze B2 等）也可以，區域照服務填寫。</p>`}
       ${mode === 'source' && html`<${CategoryField} field value=${category} onChange=${setCategory} />`}
       <${Field} label="名稱（可不填）" value=${name} onInput=${setName} placeholder=${kind === 's3' ? '例如：R2 音樂庫' : kind === 'onedrive' ? '例如：OneDrive 音樂' : mode === 'managed' ? '例如：NAS 音樂庫' : '例如：NAS 上的收藏'} maxLength=${60} />
       <${ErrorBox} error=${error} />

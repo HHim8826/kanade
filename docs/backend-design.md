@@ -842,6 +842,7 @@ DIR/
 
 - OneDrive 的檔案被當成不存在：使用者另一台安裝連 OneDrive 個人版（新格式的 item ID `…!s<32 位十六進位>`）後，歌曲與封面都 503「OneDrive: the file is not in the storage location」，但檔案在、檢查連線正常。記錄裡的錯誤沒有接 Graph 的錯誤碼，所以不是 404：Graph 回了這個項目，`link()` 卻因為沒有 `@microsoft.graph.downloadUrl`（或 `file`、`deleted` 不如預期）把它當成不存在。Microsoft Q&A 上也有 2026 年 4 月起 `$select` 拿不到 downloadUrl 的回報。修正：只有 Graph 404 或是資料夾才算不存在；沒有下載連結時改向 `/items/{id}/content` 要（不跟隨轉址）：回 302 時把 `Location` 當成這個檔案的下載連結快取，直接送內容（200／206）時就讀它，404／410 才是不存在；權杖刷新與節流和其他 Graph 請求相同。假 Graph 加了 `NoLinks`、`ContentServes` 與 `/content`。
 - 驗證：Go 測試 `TestOneDriveNoLinks`：沒有連結時讀範圍與整檔、轉址得到的連結沿用（不再問 `/content`）、連結過期後重新取得、`/content` 直接送內容、刪除的檔案（有無連結）仍是不存在；舊程式在第一次讀取就失敗，訊息和回報相同。完整測試與 storage、api 的 `-race` 通過。實測（使用者的 OneDrive 個人版，v0.2.15）：修正前 7 首歌 503（約 4～5 秒）、封面 503；修正後都能讀，第一次 1.6～3.3 秒（多問項目與 `/content` 兩次），連結快取後 40～75 毫秒，拖到中段約 0.3 秒。
+- v0.2.16：OneDrive 一旦給過沒有下載連結的檔案，之後直接問 `/content`（每首少問一次項目）。R2 端點：bucket 設定頁顯示的 S3 API 網址最後一段是 bucket 名稱，照提示貼上時（使用者的 R2 端點是 `…/test`、bucket 欄填「music」）檔案實際放在 bucket「test」的 `music/kanade/` 下，名稱顯示的是另一個 bucket；改「對」端點後反而找不到。新增時 `r2Bucket` 把 R2 主機的路徑當成 bucket：bucket 欄空著或相同就拆開，不同就拒絕並說明各填哪裡；其他服務的路徑照舊（代理後的路徑）；已有的位置不變（更新金鑰也照舊）。網頁：離開端點欄或新增時拆開（逐字輸入時不拆），提示改成「只到 .r2.cloudflarestorage.com」。驗證：`TestR2EndpointWithItsBucket`（各種端點、拒絕時不送任何請求）、`TestOneDriveNoLinks` 加上連結過期後不再問項目；Chromium：逐字輸入不拆、離開時拆、只在端點裡有 bucket 也能按新增、另一個 bucket 名稱不動並顯示拒絕原因、沒有新增；t-99、t-100 與完整測試、storage 的 `-race` 通過。在使用者那台 v0.2.15 上「檢查檔案」：OneDrive 列出 10 個檔案、7 首都在，列資料夾正常（問題只在下載連結）。
 
 ## 使用方式（開發環境）
 
