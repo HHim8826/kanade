@@ -841,7 +841,7 @@ DIR/
 ### 之後的修正（2026-10-13，v0.2.15）
 
 - OneDrive 的檔案被當成不存在：使用者另一台安裝連 OneDrive 個人版（新格式的 item ID `…!s<32 位十六進位>`）後，歌曲與封面都 503「OneDrive: the file is not in the storage location」，但檔案在、檢查連線正常。記錄裡的錯誤沒有接 Graph 的錯誤碼，所以不是 404：Graph 回了這個項目，`link()` 卻因為沒有 `@microsoft.graph.downloadUrl`（或 `file`、`deleted` 不如預期）把它當成不存在。Microsoft Q&A 上也有 2026 年 4 月起 `$select` 拿不到 downloadUrl 的回報。修正：只有 Graph 404 或是資料夾才算不存在；沒有下載連結時改向 `/items/{id}/content` 要（不跟隨轉址）：回 302 時把 `Location` 當成這個檔案的下載連結快取，直接送內容（200／206）時就讀它，404／410 才是不存在；權杖刷新與節流和其他 Graph 請求相同。假 Graph 加了 `NoLinks`、`ContentServes` 與 `/content`。
-- 驗證：Go 測試 `TestOneDriveNoLinks`：沒有連結時讀範圍與整檔、轉址得到的連結沿用（不再問 `/content`）、連結過期後重新取得、`/content` 直接送內容、刪除的檔案（有無連結）仍是不存在；舊程式在第一次讀取就失敗，訊息和回報相同。完整測試與 storage、api 的 `-race` 通過。未對真實 OneDrive 測試。
+- 驗證：Go 測試 `TestOneDriveNoLinks`：沒有連結時讀範圍與整檔、轉址得到的連結沿用（不再問 `/content`）、連結過期後重新取得、`/content` 直接送內容、刪除的檔案（有無連結）仍是不存在；舊程式在第一次讀取就失敗，訊息和回報相同。完整測試與 storage、api 的 `-race` 通過。實測（使用者的 OneDrive 個人版，v0.2.15）：修正前 7 首歌 503（約 4～5 秒）、封面 503；修正後都能讀，第一次 1.6～3.3 秒（多問項目與 `/content` 兩次），連結快取後 40～75 毫秒，拖到中段約 0.3 秒。
 
 ## 使用方式（開發環境）
 
