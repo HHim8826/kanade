@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/config"
-	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/lite"
@@ -199,13 +198,13 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	// Whichever way it comes, this song is the one played: what the server was making or downloading
 	// for the one before, the other way, stops unless a request or the preload holds it (review #208).
 	if s.wantsLite(r, a) {
-		s.cache.Play(a.DriveFileID)
+		s.cache.Play(a.Ref)
 		if s.serveLite(w, r, a) {
 			return
 		}
 	}
 	s.lite.Played(a.SHA256)
-	s.cache.Serve(w, r, a.DriveFileID, a.Size, contentType(a.Format), a.SHA256)
+	s.cache.Serve(w, r, a.Ref, a.Size, contentType(a.Format), a.SHA256)
 }
 
 // streamLite tells a player in lite mode how song id came, asked once its stream answered (review
@@ -236,7 +235,7 @@ func (s *Server) wantsLite(r *http.Request, a *library.Asset) bool {
 }
 
 func liteSong(a *library.Asset) lite.Song {
-	return lite.Song{DriveID: a.DriveFileID, SHA256: a.SHA256, Size: a.Size, Format: a.Format, Channels: a.Channels}
+	return lite.Song{DriveID: a.Ref, SHA256: a.SHA256, Size: a.Size, Format: a.Format, Channels: a.Channels}
 }
 
 // serveLite answers with the song re-encoded for lite mode, made first if need be (the answer waits
@@ -251,7 +250,7 @@ func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.As
 	case r.Context().Err() != nil:
 		return true // the player went
 	case errors.As(err, &se):
-		s.log.Warn("stream", "file", a.DriveFileID, "lite", true, "err", se.Err)
+		s.log.Warn("stream", "file", a.Ref, "lite", true, "err", se.Err)
 		s.cache.Unavailable(w, se.Err) // why, as for the original
 		return true
 	default:
@@ -289,7 +288,7 @@ func (s *Server) prefetchStream(w http.ResponseWriter, r *http.Request) {
 		if s.lite != nil {
 			s.lite.Unprefetch()
 		}
-		if err := s.cache.Prefetch(a.DriveFileID, a.Size); err != nil {
+		if err := s.cache.Prefetch(a.Ref, a.Size); err != nil {
 			s.log.Info("prefetch", "asset", id, "err", err)
 		}
 	}
@@ -337,16 +336,12 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	if c == nil || c.DriveFileID == "" {
+	if c == nil || c.Ref == "" {
 		writeError(w, http.StatusNotFound, errors.New("no such cover"))
 		return
 	}
 	data, err := s.thumbs.Get(r.Context(), c.SHA256, size, func(ctx context.Context) (io.ReadCloser, error) {
-		resp, err := s.drive.Do(ctx, http.MethodGet, gdrive.MediaURL(c.DriveFileID), nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return resp.Body, nil
+		return s.files.Open(ctx, c.Ref, 0, -1)
 	})
 	switch {
 	case errors.Is(err, thumbs.ErrUndecodable):
@@ -535,16 +530,16 @@ func (s *Server) sidecar(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no such file"))
 		return
 	}
-	resp, err := s.drive.OpenRange(r.Context(), c.DriveFileID, 0, -1)
+	body, err := s.files.Open(r.Context(), c.Ref, 0, -1)
 	if err != nil {
 		upstreamError(w, err, 0)
 		return
 	}
-	defer resp.Body.Close()
+	defer body.Close()
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": c.Name}))
 	w.Header().Set("Cache-Control", "private, max-age=3600")
-	io.Copy(w, io.LimitReader(resp.Body, c.Size))
+	io.Copy(w, io.LimitReader(body, c.Size))
 }
 
 // discardImport lets go of a finished batch's files that are not in the library, so their

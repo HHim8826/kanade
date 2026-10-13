@@ -126,6 +126,9 @@ func (im *Importer) analyze(ctx context.Context, batchID int64) error {
 	if err := im.fetchInboxLocal(ctx, batchID); err != nil { // inbox sidecars and archives are needed here
 		return err
 	}
+	if err := im.fetchSourceLocal(ctx, batchID); err != nil { // and a cloud source's
+		return err
+	}
 	if err := im.expandZips(ctx, batchID, kind); err != nil {
 		return err
 	}
@@ -274,20 +277,20 @@ func (im *Importer) expandZips(ctx context.Context, batchID int64, kind string) 
 
 // probeAll reads the tags of every audio file not read yet.
 func (im *Importer) probeAll(ctx context.Context, batchID int64) error {
-	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, drive_id, drive_size FROM import_items
+	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, drive_id, drive_size, ref FROM import_items
 		WHERE batch_id = ? AND role = ? AND state = 'pending' AND info IS NULL`, batchID, RoleAudio)
 	if err != nil {
 		return err
 	}
 	type pending struct {
-		id          int64
-		path, drive string
-		size        int64
+		id               int64
+		path, drive, ref string
+		size             int64
 	}
 	var list []pending
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.id, &p.path, &p.drive, &p.size); err != nil {
+		if err := rows.Scan(&p.id, &p.path, &p.drive, &p.size, &p.ref); err != nil {
 			rows.Close()
 			return err
 		}
@@ -301,9 +304,12 @@ func (im *Importer) probeAll(ctx context.Context, batchID int64) error {
 		state, msg := "pending", ""
 		var info *media.Info
 		var err error
-		if p.path == "" && p.drive != "" {
+		switch {
+		case p.path == "" && p.drive != "":
 			info, err = im.probeDrive(ctx, p.drive, p.size) // read in place, in the Drive inbox
-		} else {
+		case p.path == "" && p.ref != "":
+			info, err = im.probeRef(ctx, p.ref, p.size) // and in a cloud source
+		default:
 			info, err = probePath(p.path)
 		}
 		switch {

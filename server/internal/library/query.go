@@ -327,7 +327,8 @@ type TrackDetail struct {
 	MBRecording string       `json:"mb_recording,omitempty"`
 	Aliases     []string     `json:"aliases"`
 	Entries     []TrackEntry `json:"entries"`           // every album the track is on
-	Missing     bool         `json:"missing,omitempty"` // its file is gone from Drive
+	Missing     bool         `json:"missing,omitempty"` // its file is gone from where it was
+	Ref         string       `json:"-"`                 // where its file is
 }
 
 // Track is one track with what its edit dialog shows; nil when there is no such track.
@@ -337,8 +338,9 @@ func (s *Store) Track(ctx context.Context, id int64) (*TrackDetail, error) {
 		return nil, err
 	}
 	d := &TrackDetail{TrackItem: items[0], Entries: []TrackEntry{}}
-	if err := s.db.QueryRowContext(ctx, `SELECT t.version, t.mb_recording, a.state = ? FROM tracks t, assets a WHERE t.id = ? AND a.id = ?`,
-		AssetMissing, id, d.Asset.ID).Scan(&d.Version, &d.MBRecording, &d.Missing); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT t.version, t.mb_recording, a.state = ?, coalesce(a.file_ref, '')
+		FROM tracks t, assets a WHERE t.id = ? AND a.id = ?`,
+		AssetMissing, id, d.Asset.ID).Scan(&d.Version, &d.MBRecording, &d.Missing, &d.Ref); err != nil {
 		return nil, err
 	}
 	if d.Aliases, err = aliasNames(ctx, s.db, "track", id); err != nil {
@@ -446,7 +448,7 @@ func (s *Store) StreamTarget(ctx context.Context, assetID int64) (*Asset, error)
 	if err != nil || a == nil {
 		return a, err
 	}
-	if a.State != AssetVerified || a.DriveFileID == "" {
+	if a.State != AssetVerified || a.Ref == "" {
 		return nil, errors.New("asset is not available yet")
 	}
 	return a, nil

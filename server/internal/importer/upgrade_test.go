@@ -57,6 +57,16 @@ func toVersion22(t *testing.T, d *sql.DB) {
 		}
 	}
 	exec(`PRAGMA foreign_keys = OFF`)
+	for _, q := range []string{ // renamed by migration 39: the old names first
+		`ALTER TABLE assets RENAME COLUMN file_ref TO drive_file_id`,
+		`ALTER TABLE covers RENAME COLUMN file_ref TO drive_file_id`,
+		`ALTER TABLE sidecars RENAME COLUMN file_ref TO drive_file_id`,
+		`ALTER TABLE file_trash RENAME TO drive_trash`,
+		`ALTER TABLE upload_sessions RENAME COLUMN session TO session_uri`,
+		`ALTER TABLE upload_sessions RENAME TO drive_uploads`,
+	} {
+		exec(q)
+	}
 	for table, cols := range columns(conn) {
 		if then[table] == nil {
 			exec(`DROP TABLE "` + table + `"`)

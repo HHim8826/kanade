@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 const maxSidecar = 16 << 20
@@ -63,24 +63,29 @@ func (im *Importer) processSidecar(ctx context.Context, it *item) (outcome, erro
 	if album == nil {
 		return out, errors.New("the album is gone")
 	}
-	dir := "sidecars/" + strings.TrimPrefix(drivePath(library.EntryInput{Album: album.Title, AlbumArtist: album.AlbumArtist}), "library/")
-	parent, err := im.drive.Folder(ctx, dir)
-	if err != nil {
-		return out, err
-	}
+	dir := "sidecars/" + strings.TrimPrefix(libraryDir(library.EntryInput{Album: album.Title, AlbumArtist: album.AlbumArtist}), "library/")
 	name := filepath.Base(it.path)
-	var file gdrive.File
-	if df, ok := im.df(); ok && it.driveID != "" { // from the Drive inbox: move it, do not upload a copy
+	var ref string
+	switch df, ok := im.df(); {
+	case it.ref != "": // in a source (#99): kept where it is
+		ref = it.ref
+	case ok && it.driveID != "": // from the Drive inbox: move it, do not upload a copy
+		parent, err := im.drive.Folder(ctx, dir)
+		if err != nil {
+			return out, err
+		}
 		if err := df.Move(ctx, it.driveID, parent, []string{it.driveParent}); err != nil {
 			return out, err
 		}
-		file.ID = it.driveID
-	} else if file, err = im.drive.Upload(ctx, gdrive.Upload{Path: it.path, Name: name, ParentID: parent, MIME: "text/plain",
-		Size: st.Size(), SHA256: out.sha, Sessions: &memSessions{}}); err != nil {
-		return out, err
+		ref = it.driveID
+	default:
+		if ref, err = im.put(ctx, 0, storage.PutFile{Path: it.path, Dir: dir, Name: name, MIME: "text/plain",
+			Size: st.Size(), SHA256: out.sha, Sessions: &memSessions{}}); err != nil {
+			return out, err
+		}
 	}
 	kind := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
-	if _, err := im.lib.AddSidecar(ctx, albumID, name, kind, out.sha, st.Size(), file.ID); err != nil {
+	if _, err := im.lib.AddSidecar(ctx, albumID, name, kind, out.sha, st.Size(), ref); err != nil {
 		return out, err
 	}
 	out.state = StatePublished

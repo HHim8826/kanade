@@ -2,7 +2,7 @@
 
 # Kanade（奏）
 
-A private, self-hosted music library: find releases through BitTorrent, choose the files, download, tidy, store them in your own Google Drive, and play them from a browser on a computer or a phone (an Android app comes later). The interface is in Traditional Chinese.
+A private, self-hosted music library: find releases through BitTorrent, choose the files, download, tidy, store them in your own Google Drive (or a folder or NAS on the server, a Cloudflare R2 bucket, a OneDrive), and play them from a browser on a computer or a phone (an Android app comes later). The interface is in Traditional Chinese.
 
 ![Home: continue listening, recently played, unfinished dramas](docs/images/home.webp)
 
@@ -10,7 +10,7 @@ A private, self-hosted music library: find releases through BitTorrent, choose t
 
 - **Get music**: magnet links, `.torrent` files and RSS feeds (with rules and automatic downloads) through aria2, and direct HTTP/HTTPS links to an audio file or a zip. You choose a torrent's files; a download larger than the server's staging space goes in batches, each imported and cleared before the next. Seeding stops by ratio or time.
 - **Import and tidy**: reads tags (and guesses their text encoding), splits disc images by CUE sheet and converts other lossless formats to FLAC (FFmpeg), keeps CUE and log files with the album, treats a folder as an album where the tags do not say. It can turn a whole download into one album with a section for each folder. It also offers MusicBrainz lookups, details read from a pasted VGMdb page, editing one album or many at once, categories, links to the works albums belong to (anime, games, books, as [Bangumi](https://bgm.tv) describes them, with each song's part: opening, ending, insert song…; albums chosen together link at once), an album's own Bangumi entry with your Bangumi collection of it (status, rating, tags, comment) managed from the album once you link your Bangumi account, and a history where every change can be undone.
-- **Store**: every file goes to your own Google Drive and is checked by SHA-256 after upload; files dropped into a Drive inbox folder are imported by themselves. The server keeps only a playback cache, so a small VPS is enough.
+- **Store**: every file goes to your own Google Drive and is checked by SHA-256 after upload; files dropped into a Drive inbox folder are imported by themselves. New imports can go instead to a folder on the server (a NAS mounted there), a Cloudflare R2 or other S3-compatible bucket, or a OneDrive; and a collection already in a folder, a bucket or a OneDrive can be imported where it is, read-only, with new files picked up by themselves. Each file is checked against what the storage says of it, but the SHA-256 is always Kanade's own. The server keeps only a playback cache, so a small VPS is enough.
 - **Play**: queue, shuffle, repeat, shuffling the whole library or carrying on with it, resuming dramas where they stopped, synced lyrics (from the files, LRC, or found on LRCLIB), bookmarks, a sleep timer, lock-screen controls, a low-data mode (songs streamed as Opus at 128 kbit/s, about a sixth of a FLAC), your devices (continue on your phone what your computer plays, with its queue and place, or use one device as the remote of another), and what you play shown as your Discord status ("Listening to Kanade"), set by the server once you link your Discord account, with nothing to install on your computer or phone.
 - **Collect**: favorites, playlists, smart playlists that pick by rules (category, artist, plays, last played…). They are on the 我的 (Me) page, with your bookmarks, play history, listening statistics and Bangumi collections; the library holds the music itself.
 - **My listening**: time actually heard per day as a year's heat map, rankings and trends for any period, export as CSV or JSON.
@@ -65,19 +65,27 @@ Without questions (for automation): `sudo env KANADE_YES=1 KANADE_PUBLIC_URL=htt
 
 **Bangumi.** Create an application at [bgm.tv/dev/app](https://bgm.tv/dev/app) with the callback `https://<your address>/oauth/bangumi/callback`, put its App ID and App Secret on the settings page, and link your Bangumi account. Kanade changes your Bangumi collection only when you save in an album's collection dialog, or bind an album's entry with 「綁定時加入我的 Bangumi 收藏」 ticked; playing and browsing change nothing there.
 
-Each service has its own callback address (`/oauth/google/…`, `/oauth/discord/…`, `/oauth/bangumi/…`); the settings page shows each one to copy.
+Each service has its own callback address (`/oauth/google/…`, `/oauth/discord/…`, `/oauth/bangumi/…`, `/oauth/onedrive/…`); the settings page shows each one to copy.
+
+**Storage locations.** Under 設定 → 儲存位置 (Settings → Storage locations), add a place either to keep new imports in (a managed location, chosen as where new imports go) or to import a collection from where it is (a read-only source: Kanade never writes, moves or deletes anything there, and deleting a song in Kanade leaves its file). Kanade talks to each service itself; there is nothing else to install.
+
+- *A folder or a NAS.* Give the path on the server. The `kanade` account must be able to write there (managed: `sudo chown -R kanade: /mnt/nas/kanade`, or the mount's `uid=` option for SMB/NFS) or read there (a source). The systemd unit only makes `/usr`, `/boot` and `/etc` read-only, so `/mnt`, `/srv` and `/media` are fine. A managed folder holds a `.kanade-store` file: while the NAS is not mounted, nothing is written to the disk beneath it, and a source that suddenly looks empty is taken for unmounted rather than emptied. To have Kanade wait for the mount at boot, `sudo systemctl edit kanade` and add `[Unit]` `RequiresMountsFor=/mnt/nas`.
+- *Cloudflare R2 (or another S3-compatible service).* In Cloudflare, R2 → Manage API tokens, create a token with Object Read & Write (managed) or Object Read only (a source), limited to the bucket; give Kanade its Access Key ID, Secret Access Key, the bucket's S3 API endpoint (`https://<account ID>.r2.cloudflarestorage.com`), the bucket and a folder in it. The bucket stays private: the server signs its reads, and plays with ranged reads. Large files are uploaded in parts that resume after an interruption; deleted files go to `.kanade-trash/` in the bucket for 30 days. The keys can be replaced later (更新金鑰); new ones are tried before they are kept.
+- *OneDrive.* As with Drive, Kanade uses an app you register yourself, so your sign-in never passes through anyone else's server. In [Microsoft Entra → App registrations](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade), make a new registration for personal and work accounts, with a Web redirect URI of `https://<your address>/oauth/onedrive/callback` (the settings page shows it; reached by an IP address, Kanade uses `http://localhost/oauth/onedrive/callback` and you paste the address the browser ends on); then add a client secret under Certificates & secrets and copy its value. Kanade asks for `Files.Read` (a source) or `Files.ReadWrite` (managed) when you sign in; no API permission needs adding and no administrator consent. Then choose the folder. China's OneDrive (21Vianet) and the US government cloud are supported too. A source's songs are fetched one by one when imported, checked against OneDrive's quickXorHash, and streamed from OneDrive when played. Client secrets expire after 24 months at most: replace them with 更新用戶端密碼.
+
+Moving files from one location to another is a feature of its own, still to come: a managed location cannot be removed while the library has files there.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
-| `server/` | The Go service (`kanade`): API, importer, Drive storage, aria2 downloads, streaming cache, listening statistics, embedded web client |
+| `server/` | The Go service (`kanade`): API, importer, storage (Drive, folders, S3/R2, OneDrive), aria2 downloads, streaming cache, listening statistics, embedded web client |
 | `server/internal/web/static/` | Browser client (Preact + htm, no build step), served at `/app/` |
 | `server/scripts/upload-folder.py` | Command-line uploader, and the reference for how clients upload |
 | `scripts/kanade.sh` | Install and manage script (`kanade-manager`) |
 | `.github/workflows/ci.yml` | CI for pushes to main and pull requests: gofmt, vet, tests with the race detector (with aria2 and FFmpeg), the web client check (`server/scripts/check-web.mjs`), shellcheck and actionlint |
 | `.github/workflows/release.yml` | Runs CI, then builds and publishes a release for each version tag |
-| `docs/` | Plan, decisions (D1–D11, these override the plan), backend design with the API and an implementation record, P0 validation results, library survey; `docs/images/` holds the screenshots above |
+| `docs/` | Plan, decisions (D1–D12, these override the plan), backend design with the API and an implementation record, P0 validation results, library survey; `docs/images/` holds the screenshots above |
 
 ## Build and run
 
@@ -115,4 +123,4 @@ A tag with a hyphen (`v0.2.0-rc1`) is published as a pre-release, which `latest`
 
 ## Design notes
 
-Start with `docs/decisions.md` and `docs/backend-design.md`. In short: Drive is accessed directly through its REST API (D1); every file is verified by SHA-256 after upload; playback downloads the whole track into a local cache in the background, because each Drive request costs about 0.6 s (D7); everything is sized for a 1.5 GB RAM VPS. Listening statistics count time actually heard, cut into 15-minute spans so any time zone's days add up.
+Start with `docs/decisions.md` and `docs/backend-design.md`. In short: Drive is accessed directly through its REST API (D1), and so are S3/R2 (signed by Kanade itself) and OneDrive (Microsoft Graph), without rclone; every file is verified by SHA-256 after upload; playback downloads the whole track into a local cache in the background, because each Drive request costs about 0.6 s (D7); everything is sized for a 1.5 GB RAM VPS. Listening statistics count time actually heard, cut into 15-minute spans so any time zone's days add up.

@@ -85,7 +85,7 @@ func setup(t *testing.T, ids ...string) (*Syncer, *fakeDrive, *library.Store, fu
 	}
 	state := func(id string) string {
 		var s string
-		d.QueryRow(`SELECT state FROM assets WHERE drive_file_id = ?`, "drive-"+id).Scan(&s)
+		d.QueryRow(`SELECT state FROM assets WHERE file_ref = ?`, "drive-"+id).Scan(&s)
 		return s
 	}
 	fd := &fakeDrive{}
@@ -233,12 +233,12 @@ func TestTrashIsRetried(t *testing.T) {
 	if n, last, _ := lib.TrashPending(ctx); n != 1 || last == "" || s.Status().TrashPending != 1 {
 		t.Fatalf("pending %d %q", n, last)
 	}
-	s.DB.Exec(`UPDATE drive_trash SET next_at = 0`)
+	s.DB.Exec(`UPDATE file_trash SET next_at = 0`)
 	if s.RetryTrash(ctx) != 0 {
 		t.Fatal("retried while drive is down")
 	}
 	fd.trashErr = nil
-	s.DB.Exec(`UPDATE drive_trash SET next_at = 0`)
+	s.DB.Exec(`UPDATE file_trash SET next_at = 0`)
 	if s.RetryTrash(ctx) != 1 || len(fd.trashed) != 1 || fd.trashed[0] != "drive-t1" {
 		t.Fatalf("not retried: %v", fd.trashed)
 	}
@@ -272,7 +272,7 @@ func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
 	if err := lib.MarkVerified(ctx, again.ID, "drive-a"); err != nil {
 		t.Fatal(err)
 	}
-	s.DB.Exec(`UPDATE drive_trash SET next_at = 0`)
+	s.DB.Exec(`UPDATE file_trash SET next_at = 0`)
 	if s.RetryTrash(ctx) != 0 || len(fd.trashed) != 0 {
 		t.Fatalf("trashed a file the library uses again: %v", fd.trashed)
 	}
@@ -280,7 +280,7 @@ func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
 		t.Fatalf("debt kept %d", n)
 	}
 	// The same file with no asset at all (the debt left by an older deletion) is dropped too.
-	s.DB.Exec(`INSERT INTO drive_trash (file_id, created_at) VALUES ('drive-a', 0)`)
+	s.DB.Exec(`INSERT INTO file_trash (file_id, created_at) VALUES ('drive-a', 0)`)
 	if n, _ := lib.TrashFile(ctx, "drive-a", func(context.Context, string) error { t.Fatal("trashed"); return nil }); n != library.TrashReused {
 		t.Fatalf("outcome %d", n)
 	}
@@ -289,7 +289,7 @@ func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
 	// waits for it and is refused.
 	s.DB.Exec(`DELETE FROM track_assets`)
 	s.DB.Exec(`DELETE FROM assets`)
-	s.DB.Exec(`INSERT INTO drive_trash (file_id, created_at) VALUES ('drive-a', 0)`)
+	s.DB.Exec(`INSERT INTO file_trash (file_id, created_at) VALUES ('drive-a', 0)`)
 	inTrash, release := make(chan struct{}), make(chan struct{})
 	result := make(chan int)
 	go func() {
@@ -313,7 +313,7 @@ func TestTrashDoesNotDeleteReusedFile(t *testing.T) {
 		t.Fatalf("took up a file in the trash: %v", err)
 	}
 	// Restored from the trash by the user long after, the file can be taken up and owed again.
-	s.DB.Exec(`UPDATE drive_trash SET done_at = 1`)
+	s.DB.Exec(`UPDATE file_trash SET done_at = 1`)
 	deleteSong("a4")
 	if n, _, _ := lib.TrashPending(ctx); n != 1 {
 		t.Fatalf("new debt lost: %d", n)

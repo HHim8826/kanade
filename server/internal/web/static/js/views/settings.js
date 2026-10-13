@@ -9,12 +9,13 @@ import { fromAgent } from '../presence.js';
 import { DiscordSettings } from './discord.js';
 import { DevicesSettings } from './remote.js';
 import { BangumiAccount } from './bangumi.js';
+import { StorageLocations } from './storage.js';
 import { href } from '../router.js';
 import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName } from '../site.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
 import { StatsTimeZone } from './stats.js';
-import { Dialog, ErrorBox, FilePick, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
+import { Dialog, ErrorBox, FilePick, copyText, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
 
@@ -266,7 +267,7 @@ function StorageSettings({ conf, status }) {
       <div class="form-grid">
         <div>
           <${NumberField} label="播放快取上限" unit="MB" min="64" value=${v.cache_mib} onInput=${(x) => set({ cache_mib: x })}
-            hint=${`目前用了 ${fmtBytes(r.usage.cache_bytes || 0)}。串流時從 Drive 讀到的部分暫存在這裡，重播較快。`} />${pinned('cache_mib')}
+            hint=${`目前用了 ${fmtBytes(r.usage.cache_bytes || 0)}。串流時從 Google Drive 或雲端儲存讀到的部分暫存在這裡，重播較快；伺服器上的資料夾直接讀取，不佔快取。`} />${pinned('cache_mib')}
         </div>
         <div>
           <${NumberField} label="暫存空間上限" unit="MB" min="256" value=${v.staging_mib} onInput=${(x) => set({ staging_mib: x })}
@@ -322,7 +323,7 @@ function PlaybackSettings() {
       ${choices('音樂：點一首歌時', [['start', '從頭播放'], ['resume', '從上次停下的地方']], s.resume.music, (k) => resume('music', k))}
       ${choices('廣播劇與談話：點一集時', [['resume', '從上次停下的地方'], ['start', '從頭播放']], s.resume.spoken, (k) => resume('spoken', k))}
       <p class="hint tight">首頁的「繼續播放／繼續收聽」一定從記錄的位置開始；單曲與列表循環再播一次時一定從頭開始。</p>
-      <${Toggle} label="預先載入下一首" sub="播放時先讓伺服器從 Drive 讀好下一首的開頭，切歌較快；網路流量有限時可以關閉。"
+      <${Toggle} label="預先載入下一首" sub="播放時先讓伺服器從 Google Drive 或雲端儲存讀好下一首的開頭，切歌較快；網路流量有限時可以關閉。"
         checked=${s.preload} onChange=${(on) => setPrefs({ preload: on })} />
       <${Toggle} label="省流模式" sub=${`歌曲轉成 Opus 128k 串流，每小時約 58 MB（FLAC 約 350 MB），一般聆聽很難聽出差別。從下一首開始生效；128k 這類較小的 MP3 照原檔播放。也可以在播放頁的「⋯」選單切換。${
           !canOpus ? '這個瀏覽器不能播放 Opus，開了也會播放原檔。' : s.liteServer === false ? '伺服器的 FFmpeg 不支援 Opus，開了也會播放原檔。' : ''}`}
@@ -594,21 +595,6 @@ function AddPasskey({ close, onAdded }) {
   <//>`;
 }
 
-// copyText: the clipboard API needs https; reached over plain http (an IP address), the old way.
-async function copyText(text) {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const t = document.createElement('textarea');
-    t.value = text;
-    document.body.append(t);
-    t.select();
-    const ok = document.execCommand('copy');
-    t.remove();
-    if (!ok) throw new Error('無法複製，請自己選取後複製。');
-  }
-}
-
 const outLink = (url, text) => html`<a class="link" href=${url} target="_blank" rel="noopener noreferrer">${text}</a>`;
 const cloud = (path, text) => outLink('https://console.cloud.google.com/' + path, text);
 const unverified = '出現「Google 尚未驗證這個應用程式」時，這是你自己建立的用戶端，按「進階」→「前往…」繼續';
@@ -794,6 +780,8 @@ function SettingsPage({ first, onLogout }) {
   const st = status.data;
   return html`<section>
     <h1 class="page-title">設定</h1>
+    <h2 class="section-title">儲存位置</h2>
+    <${StorageLocations} />
     <h2 class="section-title">Google Drive</h2>
     <${Drive} drive=${drive} />
     ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}

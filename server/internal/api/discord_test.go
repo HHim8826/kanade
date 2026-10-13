@@ -74,7 +74,7 @@ func TestPublicCover(t *testing.T) {
 	pub, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: "A", AlbumArtist: "y"})
 	var album int64
 	s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub.EntryID).Scan(&album)
-	res, _ := s.db.Exec(`INSERT INTO covers (sha256, drive_file_id, mime, created_at) VALUES ('cov', 'd-cov', 'image/jpeg', 0)`)
+	res, _ := s.db.Exec(`INSERT INTO covers (sha256, file_ref, mime, created_at) VALUES ('cov', 'd-cov', 'image/jpeg', 0)`)
 	cover, _ := res.LastInsertId()
 	s.db.Exec(`UPDATE albums SET cover_id = ? WHERE id = ?`, cover, album)
 

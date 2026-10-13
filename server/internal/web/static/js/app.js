@@ -7,6 +7,7 @@ import { checkPresence, stopPresence } from './presence.js';
 import { control, startRemote, stopRemote } from './remote.js';
 import './scrollbars.js';
 import './shortcuts.js';
+import { loadPlaces } from './places.js';
 import { site } from './site.js';
 import { useStore } from './store.js';
 import { href, useRoute } from './router.js';
@@ -78,6 +79,7 @@ function App() {
   useEffect(() => {
     if (auth !== 'in') return;
     loadFavorites();
+    loadPlaces(); // where the library's files are, for how deleting and missing files are worded (#99)
     restoreSession(); // the queue this browser had, paused where it was
     checkPresence(); // what plays here, told for the other devices and Discord (reviews #135, #138)
     startRemote(); // the other devices, and what they ask of this one (review #138)

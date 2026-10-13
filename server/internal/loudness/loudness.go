@@ -23,9 +23,9 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/ffmpeg"
-	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/staging"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 // Source opens a byte range of a Drive file; end < 0 means to the end (the stream cache's source).
@@ -365,7 +365,7 @@ func (s *Service) runScan(ctx context.Context, sc *scan, failed bool) {
 				continue
 			}
 			tried[u.AssetID] = true
-			err := s.fromCache(ctx, u.AssetID, u.DriveFileID)
+			err := s.fromCache(ctx, u.AssetID, u.Ref)
 			if errors.Is(err, errNotCached) {
 				err = s.fromDrive(ctx, u)
 			}
@@ -394,18 +394,18 @@ func (s *Service) runScan(ctx context.Context, sc *scan, failed bool) {
 				}
 				s.Log.Debug("measure loudness", "asset", u.AssetID, "err", err)
 				if transient {
-					sc.Error, sc.Reason = "some files could not be read from Drive; they are measured on another scan", "drive"
+					sc.Error, sc.Reason = "some files could not be read; they are measured on another scan", "drive"
 				}
 			} else {
 				sc.Done++
 			}
 			s.mu.Unlock()
-			// Drive not connected, or failing file after file: the rest would fail too.
-			if reason, lasting := gdrive.Explain(err); transient && (lasting || inARow >= maxDriveFailures) {
-				if !lasting {
+			// Drive not connected, a store offline, or failing file after file: the rest would fail too.
+			if reason, lasting := storage.Explain(err); transient && (lasting || inARow >= maxDriveFailures) {
+				if !lasting && reason != "offline" {
 					reason = "drive"
 				}
-				finish("Drive could not be read: "+err.Error(), reason)
+				finish("files could not be read: "+err.Error(), reason)
 				return
 			}
 		}
@@ -422,7 +422,7 @@ var seeking = map[string]bool{"m4a": true, "mp4": true, "alac": true}
 func (s *Service) fromDrive(ctx context.Context, u library.Unmeasured) error {
 	open := func() (io.ReadCloser, error) {
 		rctx, cancel := context.WithTimeout(ctx, 30*time.Minute)
-		resp, err := s.Source.OpenRange(rctx, u.DriveFileID, 0, -1)
+		resp, err := s.Source.OpenRange(rctx, u.Ref, 0, -1)
 		if err != nil {
 			cancel()
 			return nil, errTransient{err}

@@ -8,9 +8,12 @@ import (
 	"html"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/gdrive"
+	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 func (s *Server) driveInfo(w http.ResponseWriter, r *http.Request) {
@@ -156,5 +159,25 @@ func (s *Server) missing(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	type item struct {
+		library.MissingItem
+		Place *storage.Place `json:"place,omitempty"` // where its file was (#99)
+	}
+	out := make([]item, len(list))
+	places := map[string]*storage.Place{}
+	for i, m := range list {
+		at := ""
+		if storage.IsDrive(m.Ref) {
+			at = storage.DriveID
+		} else if kind, id, _, ok := storage.Parse(m.Ref); ok {
+			at = kind + ":" + strconv.FormatInt(id, 10)
+		}
+		p, ok := places[at]
+		if !ok {
+			p = s.files.Place(r.Context(), m.Ref)
+			places[at] = p
+		}
+		out[i] = item{m, p}
+	}
+	writeJSON(w, http.StatusOK, out)
 }

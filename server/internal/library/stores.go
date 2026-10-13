@@ -1,0 +1,184 @@
+package library
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/HHim8826/kanade/server/internal/db"
+)
+
+// Library files in storage locations besides Drive (#99): references "<kind>:<store>:<key>".
+
+// refRange is the range the references of store id are in: from "<kind>:<id>:" up to the same
+// ending in the character after the colon.
+func refRange(kind string, id int64) (from, to string) {
+	from = fmt.Sprintf("%s:%d:", kind, id)
+	return from, from[:len(from)-1] + ";"
+}
+
+// likeRefs is the condition for column col being a reference in the store whose range is ?1, ?2
+// (a range, so the index on the column serves it).
+func likeRefs(col string) string { return col + ` >= ?1 AND ` + col + ` < ?2` }
+
+// PlaceAsset makes an asset read from where a source has it (imported in place): the file at ref
+// was read and hashed as the asset. Another asset that was there has other bytes now: it is
+// missing, and no longer there. An asset the library already has elsewhere stays there (the file
+// is a copy of it).
+func (s *Store) PlaceAsset(ctx context.Context, assetID int64, ref string) error {
+	trashMu.Lock()
+	defer trashMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, file_ref = NULL WHERE file_ref = ? AND id != ?`,
+		AssetMissing, ref, assetID); err != nil {
+		return err
+	}
+	// A source's file the library let go of before is taken up again: nothing is owed for it.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, ref); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, file_ref = ?, verified_at = ? WHERE id = ? AND state != ?`,
+		AssetVerified, ref, db.Now(), assetID, AssetVerified); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// MarkRefsMissing marks the assets at refs missing (their files are gone, or other bytes are
+// there); they keep the references, so they come back if the files do (RestoreRefs). It returns
+// how many changed.
+func (s *Store) MarkRefsMissing(ctx context.Context, refs []string) (int, error) {
+	return s.setRefsState(ctx, refs, AssetVerified, AssetMissing)
+}
+
+// RestoreRefs marks missing assets at refs verified again: their files are back as they were.
+func (s *Store) RestoreRefs(ctx context.Context, refs []string) (int, error) {
+	return s.setRefsState(ctx, refs, AssetMissing, AssetVerified)
+}
+
+func (s *Store) setRefsState(ctx context.Context, refs []string, from, to string) (int, error) {
+	n := 0
+	for _, ref := range refs {
+		r, err := s.db.ExecContext(ctx, `UPDATE assets SET state = ? WHERE file_ref = ? AND state = ?`, to, ref, from)
+		if err != nil {
+			return n, err
+		}
+		k, _ := r.RowsAffected()
+		n += int(k)
+	}
+	return n, nil
+}
+
+// MoveRef follows a file that moved within a source, found by its content: what the library had
+// at from is at to now (and verified, as it was just read).
+func (s *Store) MoveRef(ctx context.Context, from, to string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`UPDATE assets SET file_ref = ?1, state = '` + AssetVerified + `' WHERE file_ref = ?2`,
+		`UPDATE covers SET file_ref = ?1 WHERE file_ref = ?2`,
+		`UPDATE sidecars SET file_ref = ?1 WHERE file_ref = ?2`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, to, from); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// RefUse is a library file kept in a store, for checking the store holds it.
+type RefUse struct {
+	Ref   string
+	Size  int64
+	State string // an asset's: verified | missing; "" for covers and sidecars
+}
+
+// StoreRefs lists the library's files in a store: songs, covers and sidecars.
+func (s *Store) StoreRefs(ctx context.Context, kind string, id int64) ([]RefUse, error) {
+	from, to := refRange(kind, id)
+	rows, err := s.db.QueryContext(ctx, `SELECT file_ref, size, state FROM assets WHERE `+likeRefs("file_ref")+`
+		UNION ALL SELECT file_ref, 0, '' FROM covers WHERE `+likeRefs("file_ref")+`
+		UNION ALL SELECT file_ref, size, '' FROM sidecars WHERE `+likeRefs("file_ref"), from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RefUse
+	for rows.Next() {
+		var u RefUse
+		if err := rows.Scan(&u.Ref, &u.Size, &u.State); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// StoreUse counts the songs a store holds and their size, and those of them missing.
+type StoreUse struct {
+	Songs   int   `json:"songs"`
+	Bytes   int64 `json:"bytes"`
+	Missing int   `json:"missing"`
+	Others  int   `json:"others"` // covers and sidecars
+}
+
+func (s *Store) StoreUse(ctx context.Context, kind string, id int64) (StoreUse, error) {
+	var u StoreUse
+	from, to := refRange(kind, id)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0), coalesce(sum(state = ?3), 0) FROM assets
+		WHERE `+likeRefs("file_ref"), from, to, AssetMissing).Scan(&u.Songs, &u.Bytes, &u.Missing)
+	if err != nil {
+		return u, err
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM covers WHERE `+likeRefs("file_ref")+`)
+		+ (SELECT count(*) FROM sidecars WHERE `+likeRefs("file_ref")+`)`, from, to).Scan(&u.Others)
+	return u, err
+}
+
+// ErrStoreInUse is a managed store that still holds library files: they would have nowhere to be.
+var ErrStoreInUse = errors.New("the library still keeps files in this storage location")
+
+// ForgetStore lets go of what the library has from a source being removed: songs whose every file
+// is there leave the library (as deleting them does: plays, favorites and playlist items with
+// them); a file of a song that has others there too is missing; covers there are dropped from
+// their albums and sidecars from theirs. The files themselves are not touched. It returns how
+// many songs left.
+func (s *Store) ForgetStore(ctx context.Context, kind string, id int64) (int, error) {
+	from, to := refRange(kind, id)
+	tracks, err := s.ids(ctx, `SELECT DISTINCT ta.track_id FROM track_assets ta JOIN assets a ON a.id = ta.asset_id
+		WHERE `+likeRefs("a.file_ref")+` AND NOT EXISTS (SELECT 1 FROM track_assets o JOIN assets b ON b.id = o.asset_id
+		WHERE o.track_id = ta.track_id AND NOT (`+likeRefs("coalesce(b.file_ref, '')")+`))`, from, to)
+	if err != nil {
+		return 0, err
+	}
+	for _, t := range tracks {
+		if _, err := s.DeleteTrack(ctx, t); err != nil {
+			return 0, err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	for _, q := range []string{
+		`UPDATE assets SET state = '` + AssetMissing + `', file_ref = NULL WHERE ` + likeRefs("file_ref"),
+		`UPDATE albums SET cover_id = NULL WHERE cover_id IN (SELECT id FROM covers WHERE ` + likeRefs("file_ref") + `)`,
+		`DELETE FROM covers WHERE ` + likeRefs("file_ref") + ` AND id NOT IN (SELECT cover_id FROM albums WHERE cover_id IS NOT NULL)`,
+		`DELETE FROM sidecars WHERE ` + likeRefs("file_ref"),
+		`DELETE FROM file_trash WHERE ` + likeRefs("file_id"),
+	} {
+		if _, err := tx.ExecContext(ctx, q, from, to); err != nil {
+			return 0, fmt.Errorf("%s: %w", strings.Fields(q)[0], err)
+		}
+	}
+	return len(tracks), tx.Commit()
+}

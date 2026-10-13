@@ -335,7 +335,7 @@ func TestZipAndSidecars(t *testing.T) {
 	if d.CoverID == 0 || len(d.Sidecars) != 1 || d.Sidecars[0].Name != "album.cue" {
 		t.Fatalf("album %+v", d)
 	}
-	if _, ok := fd.files[d.Sidecars[0].DriveFileID]; !ok {
+	if _, ok := fd.files[d.Sidecars[0].Ref]; !ok {
 		t.Fatal("cue sheet not uploaded")
 	}
 	if _, err := os.Stat(im.workDir(batch)); !os.IsNotExist(err) {

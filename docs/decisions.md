@@ -349,6 +349,17 @@ Media3 實際的請求模式與無縫播放（需 Android 實機）；VBR MP3、
 - AcoustID／Chromaprint 指紋辨識需要 application key 與另行打包的工具，仍待決定，不影響其他功能。
 - 準確率驗證（計畫書 §5）尚未進行；需要使用者提供或授權的已知正確樣本。
 
+## D12　其他儲存位置（資料夾、R2、OneDrive）比照 D1
+
+- 日期：2026-10-13
+- 狀態：已決定（#95、#99、#100）
+
+- 和 Drive 一樣不嵌入 rclone，也不加雲端 SDK：S3／R2 由 Kanade 自己做 SigV4 簽章（以 AWS 文件的範例值與實際的 S3 相容服務驗證），OneDrive 直接呼叫 Microsoft Graph。使用者不需要安裝任何其他東西。
+- OneDrive 參考 OpenList `4f70daa`（`drivers/onedrive`，2026-10-10）：refresh token 每次刷新都會輪換，要存回；以 `createUploadSession` 分段上傳；讀檔用 Graph 給的下載連結；支援國家雲（全球、中國世紀互聯、美國政府雲；它列的德國雲已在 2021 年關閉，不支援）。
+- 不採用 OpenList 預設的線上 API（`api.oplist.org` 代為登入與續期）：和 D1 的選項 A 一樣，refresh token 會經過第三方，拿到它就能存取整個 OneDrive。改由使用者在 Microsoft Entra 註冊自己的應用程式，登入流程（callback，或沒有 https 網域時貼上網址）和 Google Drive 相同。SharePoint 網站與由瀏覽器直接上傳到 OneDrive 不做。
+- 內容驗證：SHA-256 一律由 Kanade 自己計算。S3 的 ETag 只當版本，不當內容雜湊；OneDrive 的 quickXorHash 用來核對下載與上傳是否完整，也不當成 SHA-256。
+- 只讀來源絕不寫入、搬移或刪除原檔；跨位置搬移是另外的功能。
+
 ## 仍待決
 
 目前沒有阻擋 P0 的待決事項。

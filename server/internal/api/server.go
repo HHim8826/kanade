@@ -45,6 +45,8 @@ import (
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/site"
 	"github.com/HHim8826/kanade/server/internal/staging"
+	"github.com/HHim8826/kanade/server/internal/storage"
+	"github.com/HHim8826/kanade/server/internal/storesync"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
 	"github.com/HHim8826/kanade/server/internal/uploads"
@@ -60,6 +62,7 @@ type Deps struct {
 	DB        *sql.DB
 	Auth      *auth.Service
 	Drive     *gdrive.Client
+	Files     *storage.Set // every place the library's files are (#99); nil: Drive alone
 	Library   *library.Store
 	Importer  *importer.Importer
 	Cache     *stream.Cache
@@ -71,6 +74,7 @@ type Deps struct {
 	RSS       *rss.Service
 	Disk      *diskguard.Guard
 	Sync      *drivesync.Syncer
+	StoreSync *storesync.Syncer // storage locations' checks (#99); nil: only on request, no managed checks
 	Loudness  *loudness.Service
 	Thumbs    *thumbs.Store    // covers made for the web client; nil: one in the data directory
 	Lite      *lite.Store      // songs re-encoded for lite mode; nil: players get the originals
@@ -88,39 +92,43 @@ type Deps struct {
 }
 
 type Server struct {
-	cfg         config.Config
-	db          *sql.DB
-	auth        *auth.Service
-	drive       *gdrive.Client
-	lib         *library.Store
-	importer    *importer.Importer
-	cache       *stream.Cache
-	downloads   *downloader.Service
-	aria2       *downloader.Aria2
-	settings    *settings.Store
-	site        *site.Store
-	staging     *staging.Budget
-	pinned      map[string]bool
-	uploads     *uploads.Store
-	mb          *identify.MusicBrainz
-	lrclib      *lrclib.Client
-	rss         *rss.Service
-	disk        *diskguard.Guard
-	sync        *drivesync.Syncer
-	loudness    *loudness.Service
-	thumbs      *thumbs.Store
-	lite        *lite.Store
-	backup      *backup.Service
-	bgm         *bangumi.Client
-	bgmAccounts *bangumi.Accounts
-	presence    *presence.Hub
-	discord     *discord.Service
-	proxy       clientip.Policy
-	streamKey   []byte
-	log         *slog.Logger
-	version     string
-	started     time.Time
-	unproxied   sync.Once // the log said a proxy's headers are not believed
+	cfg          config.Config
+	db           *sql.DB
+	auth         *auth.Service
+	drive        *gdrive.Client
+	files        *storage.Set
+	lib          *library.Store
+	importer     *importer.Importer
+	cache        *stream.Cache
+	downloads    *downloader.Service
+	aria2        *downloader.Aria2
+	settings     *settings.Store
+	site         *site.Store
+	staging      *staging.Budget
+	pinned       map[string]bool
+	uploads      *uploads.Store
+	mb           *identify.MusicBrainz
+	lrclib       *lrclib.Client
+	rss          *rss.Service
+	disk         *diskguard.Guard
+	sync         *drivesync.Syncer
+	storeSync    *storesync.Syncer
+	storeMu      sync.Mutex
+	storeRunning map[int64]bool // stores being scanned or checked
+	loudness     *loudness.Service
+	thumbs       *thumbs.Store
+	lite         *lite.Store
+	backup       *backup.Service
+	bgm          *bangumi.Client
+	bgmAccounts  *bangumi.Accounts
+	presence     *presence.Hub
+	discord      *discord.Service
+	proxy        clientip.Policy
+	streamKey    []byte
+	log          *slog.Logger
+	version      string
+	started      time.Time
+	unproxied    sync.Once // the log said a proxy's headers are not believed
 
 	refreshing sync.Map // works whose description is being read again
 }
@@ -146,8 +154,14 @@ func New(d Deps) *Server {
 	if d.Discord == nil {
 		d.Discord = discord.New(d.DB, d.Presence, d.Config.PublicURL, d.Log)
 	}
-	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, lite: d.Lite, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, lib: d.Library, importer: d.Importer,
-		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
+	if d.Files == nil {
+		d.Files = &storage.Set{DB: d.DB, Log: d.Log, DataDir: d.Config.DataDir}
+		if d.Drive != nil {
+			d.Files.Drive = d.Drive
+		}
+	}
+	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, lite: d.Lite, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, files: d.Files, lib: d.Library, importer: d.Importer,
+		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, storeSync: d.StoreSync, storeRunning: map[int64]bool{}, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, site: d.Site, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 	d.Discord.CoverURL = srv.publicCoverURL
 	d.Discord.Name = srv.site.Name
@@ -168,6 +182,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /oauth/google/callback", s.oauthCallback)
 	mux.HandleFunc("GET /oauth/discord/callback", s.discordCallback)
 	mux.HandleFunc("GET /oauth/bangumi/callback", s.bgmCallback)
+	mux.HandleFunc("GET "+storage.OneDriveCallbackPath, s.oneDriveCallback)
 	mux.HandleFunc("GET /pub/covers/{id}/{file}", s.publicCover)
 	mux.Handle("GET /app/", web.Handler(s.site))
 	mux.Handle("GET /app", http.RedirectHandler("/app/", http.StatusMovedPermanently))
@@ -197,6 +212,16 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("DELETE /api/v1/site/icon", s.authed(s.clearSiteIcon))
 	mux.Handle("POST /api/v1/cache/trim", s.authed(s.trimCache))
 	mux.Handle("GET /api/v1/status", s.authed(s.status))
+	mux.Handle("GET /api/v1/storage", s.authed(s.storageInfo))
+	mux.Handle("POST /api/v1/storage", s.authed(s.addStore))
+	mux.Handle("PUT /api/v1/storage/default", s.authed(s.setDefaultStore))
+	mux.Handle("PATCH /api/v1/storage/{id}", s.authed(s.changeStore))
+	mux.Handle("DELETE /api/v1/storage/{id}", s.authed(s.removeStore))
+	mux.Handle("POST /api/v1/storage/{id}/check", s.authed(s.checkStore))
+	mux.Handle("POST /api/v1/storage/{id}/scan", s.authed(s.scanStore))
+	mux.Handle("POST /api/v1/storage/{id}/connect", s.authed(s.connectStore))
+	mux.Handle("GET /api/v1/storage/{id}/folders", s.authed(s.storeFolders))
+	mux.Handle("POST /api/v1/storage/{id}/folders", s.authed(s.makeStoreFolder))
 	mux.Handle("GET /api/v1/drive", s.authed(s.driveInfo))
 	mux.Handle("POST /api/v1/drive/client", s.authed(s.driveSetClient))
 	mux.Handle("POST /api/v1/drive/auth", s.authed(s.driveAuth))

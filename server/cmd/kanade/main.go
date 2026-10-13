@@ -46,6 +46,8 @@ import (
 	"github.com/HHim8826/kanade/server/internal/settings"
 	"github.com/HHim8826/kanade/server/internal/site"
 	"github.com/HHim8826/kanade/server/internal/staging"
+	"github.com/HHim8826/kanade/server/internal/storage"
+	"github.com/HHim8826/kanade/server/internal/storesync"
 	"github.com/HHim8826/kanade/server/internal/stream"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
 	"github.com/HHim8826/kanade/server/internal/uploads"
@@ -194,23 +196,26 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	if !pinned["reserve_gib"] {
 		*reserveGiB = res.ReserveGiB
 	}
+	// Every place the library's files are: Google Drive, and folders, buckets and OneDrives (#99).
+	files := &storage.Set{DB: d, Drive: drive, Log: log, DataDir: cfg.DataDir}
 	imp := importer.New(d, lib, drive, cfg.Path(config.DirStaging), log)
+	imp.Stores = files
 	if imp.FFmpeg = ffmpeg.Find(cfg.DataDir); imp.FFmpeg != nil {
 		log.Info("ffmpeg ready", "path", imp.FFmpeg.Path())
 	} else {
 		log.Warn("no ffmpeg: APE, TAK, WavPack, TTA, ALAC, WAV and AIFF files and CUE images will wait (set KANADE_FFMPEG)")
 	}
-	cache, err := stream.NewCache(drive, cfg.Path(config.DirCache), *cacheMiB<<20, log)
+	cache, err := stream.NewCache(files, cfg.Path(config.DirCache), *cacheMiB<<20, log)
 	if err != nil {
 		return err
 	}
 	// Songs' loudness for the volume balance (review #136): measured as they are imported, once
 	// playing has cached them whole, and the rest by a scan of the library when asked, or by itself
 	// (a minute after starting, then every six hours) once the balance was turned on (review #155).
-	loud := &loudness.Service{Lib: lib, DB: d, FF: imp.FFmpeg, Source: drive, Hold: cache.Hold, Temp: cfg.Path(config.DirStaging, "loudness"),
+	loud := &loudness.Service{Lib: lib, DB: d, FF: imp.FFmpeg, Source: files, Hold: cache.Hold, Temp: cfg.Path(config.DirStaging, "loudness"),
 		Every: 6 * time.Hour, Log: log}
 	cache.OnWhole = loud.Cached
-	cache.Explain = gdrive.Explain
+	cache.Explain = storage.Explain
 	imp.Measure = loud.File
 	// Songs re-encoded for players in lite mode (Ogg Opus), from originals read through the cache.
 	var opus lite.Encoder
@@ -260,6 +265,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	// folder, with the free-space reserve; checks and reservations are atomic across them (review #4).
 	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}
 	loud.Budget = budget
+	files.Reserve = func() int64 { _, reserve := budget.Limits(); return reserve }
 	// A copy of the database in Drive every day, the 14 latest kept (review #161).
 	backups := &backup.Service{DB: d, Drive: drive, Dir: cfg.Path(config.DirStaging, "backup"), Budget: budget, Keep: 14,
 		Every: 24 * time.Hour, Log: log}
@@ -282,7 +288,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	covers := thumbs.New(cfg.Path(config.DirThumbs), api.ThumbsBudget, log)
 	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace,
 		Cache: trimmed{cache, covers, lites}, DL: downloads, UL: ups, Log: log}
-	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget}
+	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget, Trash: files.Trash}
+	files.Forget = imp.ForgetSource // a source's song deleted: its file is left out of scans
+	stores := &storesync.Syncer{Set: files, Lib: lib, Imp: imp, Log: log, Forget: cache.Forget}
 
 	// The settings page's settings (reviews #74, #75, #77): applied now, and again when saved.
 	store.OnResources = func(r settings.Resources) {
@@ -321,11 +329,12 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	go players.Run(ctx)
 	status := discord.New(d, players, cfg.PublicURL, log)
 	go status.Run(ctx)
-	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Library: lib, Importer: imp,
+	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Files: files, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
-		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer,
+		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer, StoreSync: stores,
 		Settings: store, Site: named, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Lite: lites, Backup: backups, Presence: players, Discord: status})
 	go imp.Run(ctx)
+	go stores.Run(ctx)
 	ariaDone := make(chan struct{})
 	go func() { aria.Run(ctx); close(ariaDone) }()
 	go downloads.Run(ctx)

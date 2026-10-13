@@ -697,6 +697,14 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .card.settings-form { border-top: 0; padding-top: 16px; margin-top: 0; }
 .toggle-row { display: flex; align-items: center; gap: 16px; padding: 8px 0 16px; cursor: pointer; }
 .toggle-row:not(label) { cursor: auto; } /* a row with a button, not a switch */
+/* Storage locations (#99): a card each. */
+.store-head { display: flex; align-items: center; gap: 12px; }
+.store-head .grow { display: flex; flex-direction: column; min-width: 0; }
+.store-head .title { white-space: normal; overflow-wrap: anywhere; }
+.store-lines { display: flex; flex-direction: column; gap: 4px; margin: 8px 0 0 36px; }
+.store-row .toggle-row { margin-top: 8px; padding-bottom: 0; }
+.store-row .actions { margin-bottom: 0; }
+@media (max-width: 560px) { .store-lines { margin-left: 0; } }
 .toggle-row .grow { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .toggle-row input[type=checkbox] { appearance: none; flex: none; width: 44px; height: 24px; border-radius: 12px; margin: 0;
   background: var(--surface-container-highest, var(--surface-container)); border: 2px solid var(--outline); position: relative; cursor: pointer; transition: background .15s; }
@@ -1030,3 +1038,14 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .blocked-note { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); display: inline-flex; align-items: center; gap: 6px;
   max-width: calc(100% - 32px); padding: 8px 14px; border: 0; border-radius: 20px; background: var(--primary); color: var(--on-primary, #fff);
   font: inherit; font-size: 14px; cursor: pointer; box-shadow: 0 2px 8px rgb(0 0 0 / .25); }
+/* Choosing a OneDrive folder (#95). */
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; margin-bottom: 8px; font-size: 14px; color: var(--on-surface-variant); }
+.crumbs button { border: 0; background: none; font: inherit; color: var(--primary); padding: 4px 2px; cursor: pointer; overflow-wrap: anywhere; text-align: left; }
+.crumbs .here { color: var(--on-surface); font-weight: 500; overflow-wrap: anywhere; }
+.folder-list { list-style: none; margin: 8px 0; padding: 4px 0; border: 1px solid var(--outline-variant); border-radius: var(--radius-m);
+  max-height: min(50vh, 400px); overflow-y: auto; }
+.folder-list button { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 44px; padding: 0 12px; border: 0;
+  background: none; color: var(--on-surface); font: inherit; text-align: left; cursor: pointer; }
+.folder-list button:hover, .folder-list button:focus-visible { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
+.folder-list .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.folder-list .empty { padding: 12px; }

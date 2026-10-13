@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.mod
 import { get } from '../api.js';
 import { addToPlaylist, toggleFav, useFav } from '../actions.js';
 import { clock, enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, playQueue, player, shuffled, toggle } from '../player.js';
+import { driveOnly, places } from '../places.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { useStore } from '../store.js';
 import { control } from '../remote.js';
@@ -93,6 +94,7 @@ export function Home() {
   const live = useStore(control, (c) => !c.target) ? local : null;
   const busy = d && (Object.keys(d.tasks.downloads).length > 0 || d.tasks.importing > 0);
   const att = d && d.attention;
+  useStore(places, (v) => v.stores.length); // how a missing file is worded
   const empty = d && !d.recently_added.length;
   // The track in the top card is not repeated in the drama list below it. The card waits for the
   // page's data like everything else, though the player is back at once after a reload.
@@ -135,7 +137,7 @@ export function Home() {
         <span class="grow">
           ${att.without_album > 0 && html`<span class="pill">沒有專輯的歌曲 ${att.without_album}</span>`}
           ${att.unknown_artist > 0 && html`<span class="pill">沒有歌手 ${att.unknown_artist}</span>`}
-          ${att.missing > 0 && html`<span class="pill warn">Drive 中遺失 ${att.missing}</span>`}
+          ${att.missing > 0 && html`<span class="pill warn">${driveOnly() ? 'Drive 中遺失' : '檔案遺失'} ${att.missing}</span>`}
         </span>
         <span class="sub">${att.missing > 0 ? '查看 ›' : '整理 ›'}</span>
       </a>`}

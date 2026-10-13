@@ -210,10 +210,10 @@ func (s *Store) LoudnessMedian(ctx context.Context) (*float64, error) {
 
 // Unmeasured is a file still to be measured.
 type Unmeasured struct {
-	AssetID     int64
-	DriveFileID string
-	Format      string
-	Size        int64
+	AssetID int64
+	Ref     string
+	Format  string
+	Size    int64
 }
 
 // Unmeasured lists files never measured (and, with failed, those that could not be), at most limit,
@@ -223,8 +223,8 @@ func (s *Store) Unmeasured(ctx context.Context, after int64, limit int, failed b
 	if failed {
 		cond = `(l.asset_id IS NULL OR l.lufs IS NULL)`
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.drive_file_id, a.format, a.size FROM assets a LEFT JOIN loudness l ON l.asset_id = a.id
-		WHERE a.state = 'verified' AND a.drive_file_id IS NOT NULL AND a.id > ? AND `+cond+` ORDER BY a.id LIMIT ?`, after, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT a.id, a.file_ref, a.format, a.size FROM assets a LEFT JOIN loudness l ON l.asset_id = a.id
+		WHERE a.state = 'verified' AND a.file_ref IS NOT NULL AND a.id > ? AND `+cond+` ORDER BY a.id LIMIT ?`, after, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -232,7 +232,7 @@ func (s *Store) Unmeasured(ctx context.Context, after int64, limit int, failed b
 	var out []Unmeasured
 	for rows.Next() {
 		var u Unmeasured
-		if err := rows.Scan(&u.AssetID, &u.DriveFileID, &u.Format, &u.Size); err != nil {
+		if err := rows.Scan(&u.AssetID, &u.Ref, &u.Format, &u.Size); err != nil {
 			return nil, err
 		}
 		out = append(out, u)
@@ -243,7 +243,7 @@ func (s *Store) Unmeasured(ctx context.Context, after int64, limit int, failed b
 // AssetByDriveID is the verified file stored as a Drive file, 0 when none is.
 func (s *Store) AssetByDriveID(ctx context.Context, driveID string) (int64, error) {
 	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM assets WHERE drive_file_id = ? AND state = 'verified'`, driveID).Scan(&id)
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM assets WHERE file_ref = ? AND state = 'verified'`, driveID).Scan(&id)
 	if err == sql.ErrNoRows {
 		return 0, nil
 	}

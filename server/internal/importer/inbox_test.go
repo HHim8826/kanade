@@ -153,7 +153,7 @@ func TestInboxImportsInPlace(t *testing.T) {
 	if l, _ := lib.Lyrics(ctx, d.Entries[1].TrackID); l == nil || !l.Synced {
 		t.Fatalf("lyrics %+v", l)
 	}
-	if a, _ := lib.AssetByHash(ctx, sha(one), int64(len(one))); a == nil || a.DriveFileID != f1 || a.State != library.AssetVerified {
+	if a, _ := lib.AssetByHash(ctx, sha(one), int64(len(one))); a == nil || a.Ref != f1 || a.State != library.AssetVerified {
 		t.Fatalf("asset %+v", a)
 	}
 	_ = f2
@@ -255,7 +255,7 @@ func TestInboxUsesCurrentContent(t *testing.T) {
 		t.Fatalf("published under the old checksum: %+v", a)
 	}
 	a, _ := lib.AssetByHash(ctx, sha(cur), int64(len(cur)))
-	if a == nil || a.State != library.AssetVerified || a.DriveFileID != id {
+	if a == nil || a.State != library.AssetVerified || a.Ref != id {
 		t.Fatalf("asset %+v", a)
 	}
 	if tracks, _ := lib.Tracks(ctx, 10, 0, ""); len(tracks) != 1 || tracks[0].Title != "New" {

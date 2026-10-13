@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,10 +8,10 @@ import (
 	"slices"
 	"strconv"
 
-	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/identify"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 // Organizing the library: edits, merge and split, restore, aliases, the edit log and undo (P2-2).
@@ -36,7 +35,10 @@ func (s *Server) track(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, library.ErrNotFound)
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	writeJSON(w, http.StatusOK, struct {
+		*library.TrackDetail
+		Place *storage.Place `json:"place,omitempty"` // where its file is (#99)
+	}{t, s.files.Place(r.Context(), t.Ref)})
 }
 
 func (s *Server) editTrack(w http.ResponseWriter, r *http.Request) {
@@ -58,19 +60,14 @@ func (s *Server) editTrack(w http.ResponseWriter, r *http.Request) {
 	writeGroup(w, g)
 }
 
-// trashFiles moves files that left the library to the Drive trash. Each is owed to the trash in the
-// database until this works; a failure is retried in the background (review #26).
+// trashFiles moves files that left the library to their place's trash (Drive's, a managed store's;
+// a source's are left alone, #99). Each is owed to the trash in the database until this works; a
+// failure is retried in the background (review #26).
 // It goes through the library's trash lock, which also checks that no re-import took the file up
 // again meanwhile (review #44).
 func (s *Server) trashFiles(r *http.Request, ids []string) (trashed, failed int) {
-	trash := func(ctx context.Context, id string) error {
-		if err := s.drive.Trash(ctx, id); err != nil && !gdrive.IsNotFound(err) { // not found: already deleted in Drive
-			return err
-		}
-		return nil
-	}
 	for _, id := range ids {
-		switch n, err := s.lib.TrashFile(r.Context(), id, trash); n {
+		switch n, err := s.lib.TrashFile(r.Context(), id, s.files.Trash); n {
 		case library.Trashed:
 			trashed++
 		case library.TrashFailedTry:

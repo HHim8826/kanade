@@ -63,14 +63,21 @@ type audioItem struct {
 	info                 media.Info
 	driveID, driveParent string // in the Drive inbox, not fetched yet when path is ""
 	driveSize            int64
+	ref, fetch           string // in a cloud source, not fetched yet when path is ""
 }
 
-// local fetches an inbox file when it has to be local (FFmpeg works on files).
+// local fetches an inbox or cloud source's file when it has to be local (FFmpeg works on files).
 func (im *Importer) local(ctx context.Context, batchID int64, a *audioItem) error {
-	if a.path != "" || a.driveID == "" {
+	if a.path != "" || (a.driveID == "" && a.ref == "") {
 		return nil
 	}
-	p, err := im.fetchDrive(ctx, batchID, a.id, a.driveID, a.rel, a.driveSize)
+	var p string
+	var err error
+	if a.driveID != "" {
+		p, err = im.fetchDrive(ctx, batchID, a.id, a.driveID, a.rel, a.driveSize)
+	} else {
+		p, err = im.fetchRef(ctx, batchID, a.id, a.ref, a.rel, a.driveSize, a.fetch)
+	}
 	if err != nil {
 		return err
 	}
@@ -80,7 +87,7 @@ func (im *Importer) local(ctx context.Context, batchID int64, a *audioItem) erro
 
 // pendingAudio lists the batch's audio still to import, with what was read of it.
 func (im *Importer) pendingAudio(ctx context.Context, batchID int64) ([]audioItem, error) {
-	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, rel_path, coalesce(info, ''), drive_id, drive_parent, drive_size
+	rows, err := im.db.QueryContext(ctx, `SELECT id, local_path, rel_path, coalesce(info, ''), drive_id, drive_parent, drive_size, ref, fetch
 		FROM import_items WHERE batch_id = ? AND role = ? AND state = 'pending' AND source_kind = ''`, batchID, RoleAudio)
 	if err != nil {
 		return nil, err
@@ -90,7 +97,7 @@ func (im *Importer) pendingAudio(ctx context.Context, batchID int64) ([]audioIte
 	for rows.Next() {
 		var a audioItem
 		var raw string
-		if err := rows.Scan(&a.id, &a.path, &a.rel, &raw, &a.driveID, &a.driveParent, &a.driveSize); err != nil {
+		if err := rows.Scan(&a.id, &a.path, &a.rel, &raw, &a.driveID, &a.driveParent, &a.driveSize, &a.ref, &a.fetch); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(raw), &a.info)
@@ -486,8 +493,9 @@ func (im *Importer) convert(ctx context.Context, batchID int64, a audioItem) err
 		return fail("the FLAC does not decode to the same audio; the original is kept")
 	}
 	// The FLAC is read again by analysis; the original stays where it is.
+	// A source's file converted is kept where imports go, not read from the source (ref).
 	_, err = im.db.ExecContext(ctx, `UPDATE import_items SET local_path = ?, temp = 1, source_path = ?, source_kind = ?,
-		source_sha256 = ?, source_size = ?, info = NULL, updated_at = ? WHERE id = ?`,
+		source_sha256 = ?, source_size = ?, info = NULL, ref = '', updated_at = ? WHERE id = ?`,
 		dst, a.path, SourceConverted, sha, size, db.Now(), a.id)
 	return err
 }

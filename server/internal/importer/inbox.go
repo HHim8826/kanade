@@ -447,10 +447,10 @@ func (im *Importer) processDrive(ctx context.Context, it *item) (outcome, error)
 		in = it.plan.input()
 		in.AlbumID = im.groupAlbum(ctx, it.batchID, it.plan.Group)
 	}
-	copyInLibrary := asset.State == library.AssetVerified && asset.DriveFileID != it.driveID
-	moved := asset.State == library.AssetVerified && asset.DriveFileID == it.driveID // by an attempt that stopped after it
+	copyInLibrary := asset.State == library.AssetVerified && asset.Ref != it.driveID
+	moved := asset.State == library.AssetVerified && asset.Ref == it.driveID // by an attempt that stopped after it
 	if !copyInLibrary && !moved {
-		folder, err := im.drive.Folder(ctx, drivePath(in))
+		folder, err := im.drive.Folder(ctx, libraryDir(in))
 		if err != nil {
 			return out, err
 		}

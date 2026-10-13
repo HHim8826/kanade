@@ -33,27 +33,27 @@ const (
 )
 
 type Asset struct {
-	ID          int64  `json:"id"`
-	SHA256      string `json:"sha256"`
-	Size        int64  `json:"size"`
-	Format      string `json:"format"`
-	Codec       string `json:"codec"`
-	SampleRate  int    `json:"sample_rate"`
-	BitDepth    int    `json:"bit_depth"`
-	Channels    int    `json:"channels"`
-	DurationMS  int64  `json:"duration_ms"`
-	Bitrate     int    `json:"bitrate"`
-	AudioMD5    string `json:"-"`
-	DriveFileID string `json:"-"`
-	State       string `json:"state"`
+	ID         int64  `json:"id"`
+	SHA256     string `json:"sha256"`
+	Size       int64  `json:"size"`
+	Format     string `json:"format"`
+	Codec      string `json:"codec"`
+	SampleRate int    `json:"sample_rate"`
+	BitDepth   int    `json:"bit_depth"`
+	Channels   int    `json:"channels"`
+	DurationMS int64  `json:"duration_ms"`
+	Bitrate    int    `json:"bitrate"`
+	AudioMD5   string `json:"-"`
+	Ref        string `json:"-"`
+	State      string `json:"state"`
 }
 
-const assetCols = `id, sha256, size, format, codec, sample_rate, bit_depth, channels, duration_ms, bitrate, audio_md5, coalesce(drive_file_id, ''), state`
+const assetCols = `id, sha256, size, format, codec, sample_rate, bit_depth, channels, duration_ms, bitrate, audio_md5, coalesce(file_ref, ''), state`
 
 func scanAsset(row interface{ Scan(...any) error }) (*Asset, error) {
 	var a Asset
 	err := row.Scan(&a.ID, &a.SHA256, &a.Size, &a.Format, &a.Codec, &a.SampleRate, &a.BitDepth, &a.Channels,
-		&a.DurationMS, &a.Bitrate, &a.AudioMD5, &a.DriveFileID, &a.State)
+		&a.DurationMS, &a.Bitrate, &a.AudioMD5, &a.Ref, &a.State)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -93,18 +93,18 @@ func (s *Store) MarkVerified(ctx context.Context, assetID int64, driveFileID str
 	}
 	defer tx.Rollback()
 	var done int64
-	switch err := tx.QueryRowContext(ctx, `SELECT done_at FROM drive_trash WHERE file_id = ?`, driveFileID).Scan(&done); {
+	switch err := tx.QueryRowContext(ctx, `SELECT done_at FROM file_trash WHERE file_id = ?`, driveFileID).Scan(&done); {
 	case errors.Is(err, sql.ErrNoRows):
 	case err != nil:
 		return err
 	case done > db.Now()-trashMemory.Milliseconds():
 		return ErrInTrash
 	default: // owed (or long since trashed and restored): nothing owed any more
-		if _, err := tx.ExecContext(ctx, `DELETE FROM drive_trash WHERE file_id = ?`, driveFileID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, driveFileID); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, drive_file_id = ?, verified_at = ? WHERE id = ?`,
+	if _, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, file_ref = ?, verified_at = ? WHERE id = ?`,
 		AssetVerified, driveFileID, db.Now(), assetID); err != nil {
 		return err
 	}
@@ -453,7 +453,7 @@ func createAlbum(ctx context.Context, tx *sql.Tx, in EntryInput, key string, now
 func (s *Store) CoverBySHA(ctx context.Context, sha string) (int64, string, error) {
 	var id int64
 	var driveID sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT id, drive_file_id FROM covers WHERE sha256 = ?`, sha).Scan(&id, &driveID)
+	err := s.db.QueryRowContext(ctx, `SELECT id, file_ref FROM covers WHERE sha256 = ?`, sha).Scan(&id, &driveID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, "", nil
 	}
@@ -461,8 +461,8 @@ func (s *Store) CoverBySHA(ctx context.Context, sha string) (int64, string, erro
 }
 
 func (s *Store) AddCover(ctx context.Context, sha, mime, driveFileID string) (int64, error) {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO covers (sha256, mime, drive_file_id, created_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (sha256) DO UPDATE SET drive_file_id = excluded.drive_file_id`, sha, mime, driveFileID, db.Now())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO covers (sha256, mime, file_ref, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (sha256) DO UPDATE SET file_ref = excluded.file_ref`, sha, mime, driveFileID, db.Now())
 	if err != nil {
 		return 0, err
 	}
@@ -471,16 +471,16 @@ func (s *Store) AddCover(ctx context.Context, sha, mime, driveFileID string) (in
 }
 
 type Cover struct {
-	ID          int64
-	SHA256      string
-	MIME        string
-	DriveFileID string
+	ID     int64
+	SHA256 string
+	MIME   string
+	Ref    string
 }
 
 func (s *Store) Cover(ctx context.Context, id int64) (*Cover, error) {
 	var c Cover
-	err := s.db.QueryRowContext(ctx, `SELECT id, sha256, mime, coalesce(drive_file_id, '') FROM covers WHERE id = ?`, id).
-		Scan(&c.ID, &c.SHA256, &c.MIME, &c.DriveFileID)
+	err := s.db.QueryRowContext(ctx, `SELECT id, sha256, mime, coalesce(file_ref, '') FROM covers WHERE id = ?`, id).
+		Scan(&c.ID, &c.SHA256, &c.MIME, &c.Ref)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

@@ -13,7 +13,6 @@ import (
 	"strings"
 
 	"github.com/HHim8826/kanade/server/internal/discord"
-	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
@@ -195,16 +194,12 @@ func (s *Server) publicCover(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	c, err := s.lib.Cover(r.Context(), id)
-	if err != nil || c == nil || c.DriveFileID == "" {
+	if err != nil || c == nil || c.Ref == "" {
 		http.NotFound(w, r)
 		return
 	}
 	data, err := s.thumbs.Get(r.Context(), c.SHA256, thumbs.Size(512), func(ctx context.Context) (io.ReadCloser, error) {
-		resp, err := s.drive.Do(ctx, http.MethodGet, gdrive.MediaURL(c.DriveFileID), nil, nil)
-		if err != nil {
-			return nil, err
-		}
-		return resp.Body, nil
+		return s.files.Open(ctx, c.Ref, 0, -1)
 	})
 	if err != nil {
 		if r.Context().Err() == nil {

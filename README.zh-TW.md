@@ -2,7 +2,7 @@
 
 # Kanade（奏）
 
-私人、自架的音樂庫：透過 BitTorrent 找到資源、選好檔案、下載、整理，存進你自己的 Google Drive，再從電腦或手機的瀏覽器播放（Android App 之後才做）。介面是繁體中文。
+私人、自架的音樂庫：透過 BitTorrent 找到資源、選好檔案、下載、整理，存進你自己的 Google Drive（或伺服器上的資料夾或 NAS、Cloudflare R2 bucket、OneDrive），再從電腦或手機的瀏覽器播放（Android App 之後才做）。介面是繁體中文。
 
 ![首頁：繼續播放、最近播放、未聽完的廣播劇](docs/images/home.webp)
 
@@ -10,7 +10,7 @@
 
 - **取得音樂**：透過 aria2 下載磁力連結、`.torrent` 檔與 RSS 訂閱（可設規則、自動下載），也可以直接下載音檔或 zip 的 HTTP/HTTPS 連結。種子的檔案由你挑選；下載比伺服器的暫存空間大時分批進行，每批匯入並清掉後才下載下一批。做種依分享率或時間停止。
 - **匯入與整理**：讀取標籤（並判斷文字編碼），依 CUE 切割整軌映像、把其他無損格式轉成 FLAC（FFmpeg），CUE 與 log 檔跟著專輯保存，標籤沒寫專輯時以資料夾為一張專輯；整份下載也可以變成一張專輯，每個資料夾一個分區。另外有 MusicBrainz 查詢、貼上 VGMdb 頁面讀取資料、單張或多張專輯一起編輯、分類、關聯專輯所屬的作品（動畫、遊戲、書籍，以 [Bangumi](https://bgm.tv) 的資料為準，並標註每首歌的用途：片頭曲、片尾曲、插曲…；多選的專輯可以一次關聯）、專輯自己的 Bangumi 條目（連結 Bangumi 帳號後，可以在專輯頁管理你的收藏：狀態、評分、標籤、吐槽），以及每一筆修改都能撤回的修改紀錄。
-- **儲存**：每個檔案都存進你自己的 Google Drive，上傳後以 SHA-256 核對；丟進 Drive 收件匣資料夾的檔案會自動匯入。伺服器只保留播放快取，小 VPS 就夠用。
+- **儲存**：每個檔案都存進你自己的 Google Drive，上傳後以 SHA-256 核對；丟進 Drive 收件匣資料夾的檔案會自動匯入。新匯入的音樂也可以改存到伺服器上的資料夾（或掛載在上面的 NAS）、Cloudflare R2 或其他 S3 相容的 bucket，或 OneDrive；已經放在資料夾、bucket 或 OneDrive 裡的收藏，也可以原位、只讀匯入，之後的新檔案會自動匯入。每個檔案都會和儲存服務提供的資訊核對，但 SHA-256 一律由 Kanade 自己計算。伺服器只保留播放快取，小 VPS 就夠用。
 - **播放**：播放佇列、隨機、重複、全曲庫隨機或自動接續播放、廣播劇從上次停下的地方繼續、同步歌詞（來自檔案、LRC，或從 LRCLIB 找）、書籤、睡眠定時、鎖定畫面控制、省流模式（以 Opus 128k 串流，流量約為 FLAC 的六分之一）、你的裝置（在手機接續電腦正在播的歌，連同佇列與位置，或把一台裝置當成另一台的遙控器），以及把正在聽的歌顯示成你的 Discord 狀態（「正在聽 Kanade」）：連結 Discord 帳號後由伺服器回報，電腦和手機都不用另外安裝程式。
 - **收藏**：我的最愛、歌單、依規則挑歌的智慧歌單（分類、歌手、播放次數、上次播放…）。這些都在「我的」頁，和書籤、播放記錄、聆聽統計與 Bangumi 收藏放在一起；曲庫只放音樂本身。
 - **我的聆聽**：每天實際聽了多久的年度熱圖、任意期間的排行與趨勢，可匯出 CSV 或 JSON。
@@ -65,19 +65,27 @@ curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade
 
 **Bangumi。** 在 [bgm.tv/dev/app](https://bgm.tv/dev/app) 建立應用程式，回調地址填 `https://<你的網址>/oauth/bangumi/callback`，把 App ID 與 App Secret 填到設定頁，再連結你的 Bangumi 帳號。只有在專輯的收藏對話框按下儲存，或綁定條目時勾選「綁定時加入我的 Bangumi 收藏」，Kanade 才會改動你的 Bangumi 收藏；播放和瀏覽都不會。
 
-每個服務的回調網址都不同（`/oauth/google/…`、`/oauth/discord/…`、`/oauth/bangumi/…`），設定頁會分別顯示，可以直接複製。
+每個服務的回調網址都不同（`/oauth/google/…`、`/oauth/discord/…`、`/oauth/bangumi/…`、`/oauth/onedrive/…`），設定頁會分別顯示，可以直接複製。
+
+**儲存位置。** 在「設定 → 儲存位置」新增：可以當「存放位置」（選為新匯入的位置後，新匯入的音樂存在這裡），也可以當「只讀來源」（原位匯入已經在那裡的收藏：Kanade 絕不寫入、移動或刪除裡面的任何檔案，在 Kanade 刪除歌曲時原檔也留在原處）。每種服務都由 Kanade 自己連線，不需要另外安裝任何東西。
+
+- **資料夾或 NAS**：填伺服器上的路徑。`kanade` 帳號要能寫入（存放位置：`sudo chown -R kanade: /mnt/nas/kanade`，SMB／NFS 則用掛載的 `uid=` 選項）或讀取（只讀來源）。systemd 服務只把 `/usr`、`/boot`、`/etc` 設成唯讀，`/mnt`、`/srv`、`/media` 都可以用。存放位置裡會有一個 `.kanade-store` 檔：NAS 沒掛載時不會把檔案寫到底下的本機磁碟；只讀來源突然看起來空了時，會當成沒掛載，而不是檔案都被刪除。要讓 Kanade 開機時等 NAS 掛載好，執行 `sudo systemctl edit kanade`，加上 `[Unit]` 與 `RequiresMountsFor=/mnt/nas`。
+- **Cloudflare R2（或其他 S3 相容服務）**：在 Cloudflare 的 R2 →「管理 API 權杖」建立權杖，存放位置選「物件讀取和寫入」、只讀來源選「物件唯讀」，並限定這個 bucket；把 Access Key ID、Secret Access Key、bucket 的 S3 API 端點（`https://<帳戶 ID>.r2.cloudflarestorage.com`）、bucket 名稱和裡面的資料夾填到 Kanade。Bucket 保持私有：由伺服器簽章讀取，播放時以 Range 讀取。大檔案分段上傳，中斷後可以續傳；刪除的檔案移到 bucket 裡的 `.kanade-trash/`，保留 30 天。金鑰之後可以用「更新金鑰」更換，新的金鑰會先試過能用才換上。
+- **OneDrive**：和 Google Drive 一樣，Kanade 使用你自己註冊的應用程式，你的登入不會經過任何其他人的伺服器。到 [Microsoft Entra →「應用程式註冊」](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) 新增註冊，帳戶類型選個人與組織帳戶，Web 重新導向 URI 填 `https://<你的網址>/oauth/onedrive/callback`（設定頁會顯示；用 IP 位址連線時，Kanade 用 `http://localhost/oauth/onedrive/callback`，你再把瀏覽器最後停住的網址貼回來）；接著在「憑證及秘密」新增用戶端密碼，複製它的「值」。登入時 Kanade 會要求 `Files.Read`（只讀來源）或 `Files.ReadWrite`（存放位置），不用另外加 API 權限，也不需要系統管理員同意。登入後再選擇資料夾。也支援中國的 OneDrive（世紀互聯）和美國政府雲。只讀來源的歌曲在匯入時逐首下載，用 OneDrive 的 quickXorHash 核對，播放時從 OneDrive 串流。用戶端密碼最長 24 個月後過期，用「更新用戶端密碼」換新的。
+
+在不同位置之間搬移檔案是另外的功能，之後才做；所以曲庫還有檔案在某個存放位置時，不能移除它。
 
 ## 目錄
 
 | 路徑 | 內容 |
 |---|---|
-| `server/` | Go 服務（`kanade`）：API、匯入、Drive 儲存、aria2 下載、串流快取、聆聽統計、內嵌的網頁端 |
+| `server/` | Go 服務（`kanade`）：API、匯入、儲存（Drive、資料夾、S3／R2、OneDrive）、aria2 下載、串流快取、聆聽統計、內嵌的網頁端 |
 | `server/internal/web/static/` | 瀏覽器端（Preact + htm，不需要建置），網址在 `/app/` |
 | `server/scripts/upload-folder.py` | 命令列上傳工具，也是用戶端上傳方式的參考 |
 | `scripts/kanade.sh` | 安裝與管理腳本（`kanade-manager`） |
 | `.github/workflows/ci.yml` | 推送到 main 與 pull request 的 CI：gofmt、vet、開 race detector 的測試（含 aria2 與 FFmpeg）、網頁端檢查（`server/scripts/check-web.mjs`）、shellcheck 與 actionlint |
 | `.github/workflows/release.yml` | 每個版本標籤先跑 CI，再建置並發佈 release |
-| `docs/` | 計畫、決策（D1–D11，優先於計畫）、含 API 與實作紀錄的後端設計、P0 驗證結果、曲庫調查；`docs/images/` 是上面的截圖 |
+| `docs/` | 計畫、決策（D1–D12，優先於計畫）、含 API 與實作紀錄的後端設計、P0 驗證結果、曲庫調查；`docs/images/` 是上面的截圖 |
 
 ## 建置與執行
 
@@ -115,4 +123,4 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ## 設計說明
 
-從 `docs/decisions.md` 與 `docs/backend-design.md` 開始看。簡單來說：直接透過 REST API 存取 Drive（D1）；每個檔案上傳後都以 SHA-256 核對；因為每次向 Drive 請求約要 0.6 秒，播放時會在背景把整首歌下載到本機快取（D7）；一切以 1.5 GB 記憶體的 VPS 為準。聆聽統計計算實際聽到的時間，切成 15 分鐘的區段，所以任何時區的「一天」都加得起來。
+從 `docs/decisions.md` 與 `docs/backend-design.md` 開始看。簡單來說：直接透過 REST API 存取 Drive（D1），S3／R2（由 Kanade 自己簽章）和 OneDrive（Microsoft Graph）也一樣，不經過 rclone；每個檔案上傳後都以 SHA-256 核對；因為每次向 Drive 請求約要 0.6 秒，播放時會在背景把整首歌下載到本機快取（D7）；一切以 1.5 GB 記憶體的 VPS 為準。聆聽統計計算實際聽到的時間，切成 15 分鐘的區段，所以任何時區的「一天」都加得起來。

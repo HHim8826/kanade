@@ -49,8 +49,11 @@ type Syncer struct {
 	Inbox func(ctx context.Context) (int, error)
 	// Forget drops what the stream cache holds of a file that is gone or changed; nil to skip.
 	Forget func(driveID string)
-	Every  time.Duration
-	Delay  time.Duration // before the first round; a minute when 0
+	// Trash moves a file the library let go of to its place's trash, wherever it is (#99); nil:
+	// Drive's, for Drive's files.
+	Trash func(ctx context.Context, ref string) error
+	Every time.Duration
+	Delay time.Duration // before the first round; a minute when 0
 
 	mu     sync.Mutex
 	status Status
@@ -255,15 +258,18 @@ func (s *Syncer) position(ctx context.Context) (string, error) {
 	return "", nil
 }
 
-// RetryTrash moves files the library let go of to the Drive trash, where an earlier try failed.
-// trash moves a file to the Drive trash; one Drive no longer has counts as done.
+// trash moves a file to its trash; one no longer there counts as done.
 func (s *Syncer) trash(ctx context.Context, id string) error {
+	if s.Trash != nil {
+		return s.Trash(ctx, id)
+	}
 	if err := s.Drive.Trash(ctx, id); err != nil && !gdrive.IsNotFound(err) {
 		return err
 	}
 	return nil
 }
 
+// RetryTrash moves files the library let go of to their trash, where an earlier try failed.
 func (s *Syncer) RetryTrash(ctx context.Context) (done int) {
 	ids, err := s.Lib.TrashDue(ctx, 100)
 	if err != nil {
@@ -276,7 +282,7 @@ func (s *Syncer) RetryTrash(ctx context.Context) (done int) {
 		}
 	}
 	if done > 0 {
-		s.Log.Info("deleted files moved to the drive trash", "count", done)
+		s.Log.Info("deleted files moved to the trash", "count", done)
 	}
 	return done
 }

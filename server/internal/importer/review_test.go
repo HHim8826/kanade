@@ -266,7 +266,7 @@ func TestPartialSourceCanBeCompleted(t *testing.T) {
 	waitState(t, im, first, BatchDone)
 	var asset int64
 	var drive string
-	im.db.QueryRow(`SELECT a.id, a.drive_file_id FROM assets a JOIN import_items i ON i.asset_id = a.id WHERE i.batch_id = ?`, first).Scan(&asset, &drive)
+	im.db.QueryRow(`SELECT a.id, a.file_ref FROM assets a JOIN import_items i ON i.asset_id = a.id WHERE i.batch_id = ?`, first).Scan(&asset, &drive)
 	lib.ObserveDriveFile(ctx, library.DriveObservation{ID: drive}) // gone from Drive
 	again2, _, _ := im.CreateBatch(ctx, "local", "", wsrc, false)
 	waitState(t, im, again2, BatchDone)

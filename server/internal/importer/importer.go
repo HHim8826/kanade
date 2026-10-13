@@ -31,6 +31,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/media"
 	"github.com/HHim8826/kanade/server/internal/staging"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 // Item states.
@@ -49,6 +50,29 @@ type Drive interface {
 	Upload(ctx context.Context, u gdrive.Upload) (gdrive.File, error)
 }
 
+// Destinations are the places imports can keep files (#99): Google Drive and the managed stores.
+// *storage.Set is one.
+type Destinations interface {
+	// Destination is the place with ID id (storage.DriveID or a store's), or the default for "".
+	Destination(ctx context.Context, id string) (storage.Dest, error)
+}
+
+// driveDest keeps files in Drive, for an importer without Destinations.
+type driveDest struct{ d Drive }
+
+func (driveDest) ID() string   { return storage.DriveID }
+func (driveDest) Name() string { return "Google Drive" }
+
+func (d driveDest) Put(ctx context.Context, f storage.PutFile) (string, error) {
+	folder, err := d.d.Folder(ctx, f.Dir)
+	if err != nil {
+		return "", err
+	}
+	file, err := d.d.Upload(ctx, gdrive.Upload{Path: f.Path, Name: f.Name, ParentID: folder, MIME: f.MIME,
+		Size: f.Size, SHA256: f.SHA256, Sessions: f.Sessions, Progress: f.Progress})
+	return file.ID, err
+}
+
 type Importer struct {
 	db      *sql.DB
 	lib     *library.Store
@@ -64,6 +88,7 @@ type Importer struct {
 	inboxWaiting atomic.Int64             // new inbox files the last scan left for later
 	settle       atomic.Int64             // SetInboxSettle's wait (ns); 0: the default; -1: none
 	albumArtists map[string]string        // batch|album folder|album -> decided album artist
+	scanning     map[int64]bool           // sources being scanned
 
 	// OnBatchDone runs when a batch has no pending items left, is canceled, or has its unsaved files
 	// discarded; unsaved counts the items whose source must be kept (KeepsSource). Client uploads
@@ -85,12 +110,46 @@ type Importer struct {
 	// SpaceWait is how long FFmpeg output waits for staging space that others hold before the file
 	// fails (review #46); 0 fails at once.
 	SpaceWait time.Duration
+	// Stores decides where imported files are kept (#99); nil: Google Drive.
+	Stores Destinations
+}
+
+// put keeps a file where imports go: where an upload of the asset started, when one did (it goes
+// on there), or the default place. assetID 0 is a file of no asset (a cover, a sidecar).
+func (im *Importer) put(ctx context.Context, assetID int64, f storage.PutFile) (string, error) {
+	dest, err := im.destination(ctx, assetID)
+	if err != nil {
+		return "", err
+	}
+	if f.Sessions == nil {
+		f.Sessions = &sessionStore{db: im.db, assetID: assetID, store: dest.ID()}
+	}
+	return dest.Put(ctx, f)
+}
+
+func (im *Importer) destination(ctx context.Context, assetID int64) (storage.Dest, error) {
+	if im.Stores == nil {
+		return driveDest{im.drive}, nil
+	}
+	var started string
+	if assetID != 0 {
+		im.db.QueryRowContext(ctx, `SELECT store FROM upload_sessions WHERE asset_id = ?`, assetID).Scan(&started)
+	}
+	if started != "" {
+		dest, err := im.Stores.Destination(ctx, started)
+		if !errors.Is(err, storage.ErrNoStore) && !errors.Is(err, storage.ErrReadOnly) {
+			return dest, err
+		}
+		// The place it started in is gone: it starts again where imports go now.
+		im.db.ExecContext(ctx, `DELETE FROM upload_sessions WHERE asset_id = ?`, assetID)
+	}
+	return im.Stores.Destination(ctx, "")
 }
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
 	return &Importer{db: d, lib: lib, drive: drive, staging: stagingDir, log: log,
 		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[coverKey]int64{}, albumArtists: map[string]string{},
-		driveDirs: map[string][]gdrive.File{}}
+		driveDirs: map[string][]gdrive.File{}, scanning: map[int64]bool{}}
 }
 
 var audioExt = map[string]bool{
@@ -216,7 +275,8 @@ type RetryResult struct {
 // analysis again, so a file that failed there is fetched, unpacked, converted or cut as it should
 // be (a CUE sheet that was fixed is read again); files that already have a plan keep it, preview
 // edits included, and new songs get groups of their own. Sidecars that found no album are tried
-// again with the rest. An upload that failed resumes where it stopped.
+// again with the rest. An upload that failed resumes where it stopped; a cloud source's file is
+// fetched from it again.
 //
 // A failed file whose source is gone is not queued only to fail again (review #57): when the
 // library still has the same file from another import (a later round of a download brought an
@@ -236,23 +296,29 @@ func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, erro
 		return res, err
 	}
 	rows, err := im.db.QueryContext(ctx, `SELECT id, role, local_path, source_path, source_kind, source_sha256, source_size,
-		source_piece, source_cut, drive_id, error FROM import_items WHERE batch_id = ? AND state = 'failed'`, batchID)
+		source_piece, source_cut, drive_id, ref, temp, error FROM import_items WHERE batch_id = ? AND state = 'failed'`, batchID)
 	if err != nil {
 		return res, err
 	}
 	// A file is gone when it is not there, or was not when the import failed: whatever is there now
 	// was not checked (aria2 may have written a fragment of it for a later round's pieces).
 	var lost []lostFile
+	var refetch []int64
 	for rows.Next() {
 		var f lostFile
-		var driveID, why string
+		var driveID, ref, why string
+		var temp bool
 		if err := rows.Scan(&f.id, &f.role, &f.path, &f.origin, &f.made, &f.sha, &f.size, &f.piece.Number, &f.piece.Cut,
-			&driveID, &why); err != nil {
+			&driveID, &ref, &temp, &why); err != nil {
 			rows.Close()
 			return res, err
 		}
 		if driveID != "" {
 			continue // an inbox file is fetched from Drive again
+		}
+		if ref != "" && (f.path == "" || temp) {
+			refetch = append(refetch, f.id) // a cloud source's file is fetched from it again
+			continue
 		}
 		if exists(f.path) && !strings.Contains(why, syscall.ENOENT.Error()) && !strings.HasPrefix(why, msgFetching) &&
 			!strings.HasPrefix(why, msgGone) {
@@ -292,6 +358,11 @@ func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, erro
 		missing = append(missing, f)
 	}
 	now := db.Now()
+	for _, id := range refetch {
+		if _, err := im.db.ExecContext(ctx, `UPDATE import_items SET local_path = '', temp = 0, updated_at = ? WHERE id = ?`, now, id); err != nil {
+			return res, err
+		}
+	}
 	for _, f := range remake {
 		if err := im.remake(ctx, batchID, f); err != nil {
 			return res, err
@@ -555,6 +626,9 @@ type item struct {
 	// In the Drive inbox (P2-6, D6); sha is Drive's own checksum.
 	driveID, driveParent, sha string
 	driveSize                 int64
+	// In a source (#99): imported where it is, path being the file there or a copy fetched to staging
+	// (from a cloud source, as fetch says: path is "" until it is fetched).
+	ref, fetch string
 }
 
 // next is the oldest waiting item of a running batch; a batch's sidecars wait for its audio, so
@@ -563,12 +637,12 @@ func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
 	var plan string
 	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp,
-		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.source_piece, i.source_cut, i.drive_id, i.drive_parent, i.sha256, i.drive_size
+		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.source_piece, i.source_cut, i.drive_id, i.drive_parent, i.sha256, i.drive_size, i.ref, i.fetch
 		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
 		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
 		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
 		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp,
-			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.sourcePiece, &it.sourceCut, &it.driveID, &it.driveParent, &it.sha, &it.driveSize)
+			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.sourcePiece, &it.sourceCut, &it.driveID, &it.driveParent, &it.sha, &it.driveSize, &it.ref, &it.fetch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -630,6 +704,9 @@ func (im *Importer) handle(ctx context.Context, it *item) {
 	if err2 != nil {
 		im.log.Error("record import result; the source is kept", "item", it.id, "err", err2)
 		return
+	}
+	if it.ref != "" {
+		im.noteSource(ctx, it, out)
 	}
 	if saved(out.state) { // only what is safely in the library; everything else stays for a retry or a decision (review #1)
 		switch {
@@ -785,6 +862,13 @@ func (im *Importer) setState(ctx context.Context, id int64, state string) {
 }
 
 func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
+	if it.ref != "" && it.path == "" { // in a cloud source: fetched now
+		p, err := im.fetchRef(ctx, it.batchID, it.id, it.ref, it.rel, it.driveSize, it.fetch)
+		if err != nil {
+			return outcome{}, fmt.Errorf("cannot fetch it: %w", err)
+		}
+		it.path, it.temp = p, true
+	}
 	if it.role == RoleSidecar {
 		return im.processSidecar(ctx, it)
 	}
@@ -821,6 +905,11 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		return out, err
 	}
 	out.sha = hex.EncodeToString(h.Sum(nil))
+	if it.ref != "" && !it.temp { // read where it is in a source: it must not have changed meanwhile
+		if err := unchangedLocal(it.path, st); err != nil {
+			return out, err
+		}
+	}
 
 	asset, err := im.lib.AssetByHash(ctx, out.sha, st.Size())
 	if err != nil {
@@ -848,15 +937,15 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		}
 	}
 
-	if asset.State != library.AssetVerified {
-		im.setState(ctx, it.id, StateUploading)
-		folder, err := im.drive.Folder(ctx, drivePath(in))
-		if err != nil {
+	if it.ref != "" { // in a source (#99): the library reads the file where it is
+		if err := im.lib.PlaceAsset(ctx, asset.ID, it.ref); err != nil {
 			return out, err
 		}
-		file, err := im.drive.Upload(ctx, gdrive.Upload{
-			Path: it.path, Name: filepath.Base(it.path), ParentID: folder, MIME: mimeOf(info),
-			Size: st.Size(), SHA256: out.sha, Sessions: &sessionStore{db: im.db, assetID: asset.ID},
+	} else if asset.State != library.AssetVerified {
+		im.setState(ctx, it.id, StateUploading)
+		ref, err := im.put(ctx, asset.ID, storage.PutFile{
+			Path: it.path, Dir: libraryDir(in), Name: filepath.Base(it.path), MIME: mimeOf(info),
+			Size: st.Size(), SHA256: out.sha,
 			Progress: func(sent, total int64) {
 				im.mu.Lock()
 				im.progress[it.id] = [2]int64{sent, total}
@@ -866,7 +955,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		if err != nil {
 			return out, fmt.Errorf("upload: %w", err)
 		}
-		if err := im.lib.MarkVerified(ctx, asset.ID, file.ID); err != nil {
+		if err := im.lib.MarkVerified(ctx, asset.ID, ref); err != nil {
 			return out, err
 		}
 	}
@@ -880,7 +969,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	case it.driveParent != "": // fetched from the Drive inbox: its folder is there
 		in.CoverID = im.driveCover(ctx, it, info)
 	default:
-		in.CoverID = im.coverFor(ctx, it.batchID, beside, info)
+		in.CoverID = im.coverFor(ctx, it.batchID, beside, info, im.sourceFile(it))
 	}
 	res, err := im.lib.Publish(ctx, asset.ID, in)
 	if err != nil {
@@ -1022,9 +1111,9 @@ var (
 	spokenPath  = regexp.MustCompile(`(?i)drama ?cd|\bradio\b|djcd|ドラマ|ラジオ`) // whole word: not Radiohead
 )
 
-// drivePath is where a file lands in Drive: library/<album artist>/<album>. It is only a
-// convenience for browsing Drive; the database stays the source of truth.
-func drivePath(in library.EntryInput) string {
+// libraryDir is where a file lands in Drive or a managed store: library/<album artist>/<album>. It
+// is only a convenience for browsing there; the database stays the source of truth.
+func libraryDir(in library.EntryInput) string {
 	clean := func(s, fallback string) string {
 		s = strings.TrimSpace(unsafeChars.Replace(s))
 		if r := []rune(s); len(r) > 120 {
@@ -1052,15 +1141,17 @@ func mimeOf(info *media.Info) string {
 	return "application/octet-stream"
 }
 
-// sessionStore keeps an asset's resumable-upload session in drive_uploads.
+// sessionStore keeps an asset's resumable-upload session in upload_sessions, with the place it
+// goes to.
 type sessionStore struct {
 	db      *sql.DB
 	assetID int64
+	store   string
 }
 
 func (s *sessionStore) LoadSession(ctx context.Context) (string, error) {
 	var uri string
-	err := s.db.QueryRowContext(ctx, `SELECT session_uri FROM drive_uploads WHERE asset_id = ?`, s.assetID).Scan(&uri)
+	err := s.db.QueryRowContext(ctx, `SELECT session FROM upload_sessions WHERE asset_id = ?`, s.assetID).Scan(&uri)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}
@@ -1068,14 +1159,14 @@ func (s *sessionStore) LoadSession(ctx context.Context) (string, error) {
 }
 
 func (s *sessionStore) SaveSession(ctx context.Context, uri string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO drive_uploads (asset_id, session_uri, created_at) VALUES (?, ?, ?)
-		ON CONFLICT (asset_id) DO UPDATE SET session_uri = excluded.session_uri, created_at = excluded.created_at`,
-		s.assetID, uri, db.Now())
+	_, err := s.db.ExecContext(ctx, `INSERT INTO upload_sessions (asset_id, session, store, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (asset_id) DO UPDATE SET session = excluded.session, store = excluded.store, created_at = excluded.created_at`,
+		s.assetID, uri, s.store, db.Now())
 	return err
 }
 
 func (s *sessionStore) DeleteSession(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM drive_uploads WHERE asset_id = ?`, s.assetID)
+	_, err := s.db.ExecContext(ctx, `DELETE FROM upload_sessions WHERE asset_id = ?`, s.assetID)
 	return err
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get, post } from '../api.js';
 import { BANDS, MAX_DB, PRESETS, TARGETS, boost as boostOf, effects, presetOf, setEffects } from '../effects.js';
+import { driveOnly } from '../places.js';
 import { useStore } from '../store.js';
 import { Dialog, ErrorBox, fmtBytes, html, showDialog, toast } from '../ui.js';
 
@@ -121,6 +122,9 @@ function Measured() {
     not_connected: '沒有連線 Google Drive，分析停了下來；連線後按「繼續分析」。',
     auth_expired: 'Google Drive 的授權已過期，分析停了下來；重新連線後按「繼續分析」。',
     drive: '有些檔案這次沒能從 Google Drive 讀完，下次分析時會再試。',
+    offline: '有些檔案所在的儲存位置目前無法使用（未掛載或連不上），分析停了下來；恢復後按「繼續分析」。',
+    store_auth: '有些檔案所在的儲存位置授權失效，分析停了下來；到「儲存位置」更新後按「繼續分析」。',
+    store: '有些檔案這次沒能從儲存位置讀完，下次分析時會再試。',
     room: '暫存空間不夠複製某些檔案，下次分析時會再試。',
   }[scan.reason] || scan.error;
   return html`<div class="measured">
@@ -129,7 +133,7 @@ function Measured() {
       ? html`<button class="btn text" onClick=${() => act({ auto: false })}>停止</button>`
       : html`${left > 0 && html`<button class="btn text" onClick=${() => act({ auto: true })}>${st.auto === '' ? '開始分析' : '繼續分析'}</button>`}
           ${s.failed > 0 && html`<button class="btn text" onClick=${() => act({ run: true, failed: true })}>重試無法分析的</button>`}`}
-    ${!scan.running && left > 0 && html`<p class="hint tight">${st.auto === 'off' ? '自動分析已停止。' : ''}分析會從 Google Drive 逐首讀取還沒分析的歌（約 ${fmtBytes(s.pending_bytes)}），只讀不存。</p>`}
+    ${!scan.running && left > 0 && html`<p class="hint tight">${st.auto === 'off' ? '自動分析已停止。' : ''}分析會從 ${driveOnly() ? 'Google Drive' : '歌曲所在的位置'}逐首讀取還沒分析的歌（約 ${fmtBytes(s.pending_bytes)}），只讀不存。</p>`}
     ${why && html`<p class="hint tight">${why}</p>`}
   </div>`;
 }

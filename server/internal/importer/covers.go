@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/media"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 const maxCoverFile = 16 << 20
@@ -29,7 +29,10 @@ var (
 // cover/folder/front/jacket image next to the album, then the scans folder. The art of a folder is
 // kept for the rest of the batch (review #150: a folder can be used again by a later one), unless
 // storing it failed: the next song tries again.
-func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, info *media.Info) int64 {
+//
+// inPlace, for a source's song (#99), is the reference in the source of a picture found beside it:
+// a source's pictures are the library's covers where they are, as its songs are.
+func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, info *media.Info, inPlace func(string) string) int64 {
 	if info.Cover != nil {
 		if id, _ := im.storeCover(ctx, info.Cover.Data); id != 0 {
 			return id
@@ -51,7 +54,16 @@ func (im *Importer) coverFor(ctx context.Context, batchID int64, path string, in
 			return 0
 		}
 		if len(data) <= maxCoverFile {
-			if id, err = im.storeCover(ctx, data); err != nil {
+			ref := ""
+			if inPlace != nil {
+				ref = inPlace(p)
+			}
+			if ref != "" {
+				id, err = im.placeCover(ctx, data, ref)
+			} else {
+				id, err = im.storeCover(ctx, data)
+			}
+			if err != nil {
 				return 0
 			}
 		}
@@ -162,22 +174,32 @@ func (im *Importer) storeCover(ctx context.Context, data []byte) (int64, error) 
 	return id, err
 }
 
+// placeCover takes a picture in a source as a cover, where it is.
+func (im *Importer) placeCover(ctx context.Context, data []byte, ref string) (int64, error) {
+	mime := http.DetectContentType(data)
+	if mime != "image/jpeg" && mime != "image/png" {
+		return 0, nil
+	}
+	sum := sha256.Sum256(data)
+	sha := hex.EncodeToString(sum[:])
+	if id, have, err := im.lib.CoverBySHA(ctx, sha); err != nil || (id != 0 && have != "") {
+		return id, err
+	}
+	return im.lib.AddCover(ctx, sha, mime, ref)
+}
+
 func (im *Importer) uploadCover(ctx context.Context, data []byte, sha, mime, ext string) (int64, error) {
 	tmp := filepath.Join(im.staging, "cover-"+sha+ext)
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return 0, err
 	}
 	defer os.Remove(tmp)
-	folder, err := im.drive.Folder(ctx, "covers")
-	if err != nil {
-		return 0, err
-	}
-	f, err := im.drive.Upload(ctx, gdrive.Upload{Path: tmp, Name: sha + ext, ParentID: folder, MIME: mime,
+	ref, err := im.put(ctx, 0, storage.PutFile{Path: tmp, Dir: "covers", Name: sha + ext, MIME: mime,
 		Size: int64(len(data)), SHA256: sha, Sessions: &memSessions{}})
 	if err != nil {
 		return 0, err
 	}
-	return im.lib.AddCover(ctx, sha, mime, f.ID)
+	return im.lib.AddCover(ctx, sha, mime, ref)
 }
 
 // memSessions keeps a session only for the life of one small upload.

@@ -2,6 +2,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { forgetAlbums } from '../effects.js';
 import { go, href } from '../router.js';
+import { driveOnly, missingNote, places, trashName, trashNote } from '../places.js';
 import { createStore, useStore } from '../store.js';
 import { siteName } from '../site.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
@@ -182,11 +183,11 @@ function TrackEditor({ id, close }) {
   const destroy = () => confirmDialog({
     title: '永久刪除歌曲', action: '永久刪除', danger: true,
     children: html`<p>要永久刪除「${d.title}」嗎？</p>
-      <p class="hint">會一併刪除它在所有專輯的收錄、歌單項目、收藏、歌詞與播放記錄。沒有其他歌曲使用的音檔會移到 Google Drive 垃圾桶（30 天內可在 Drive 還原）。這個操作無法在 ${siteName()} 撤回。</p>`,
+      <p class="hint">會一併刪除它在所有專輯的收錄、歌單項目、收藏、歌詞與播放記錄。${trashNote()}。這個操作無法在 ${siteName()} 撤回。</p>`,
     onConfirm: async () => {
       const r = await api('DELETE', '/tracks/' + id);
       changed();
-      toast(r.trash_failed ? '已刪除；有音檔沒能移到 Drive 垃圾桶' : '已永久刪除');
+      toast(r.trash_failed ? `已刪除；有音檔沒能移到${trashName()}` : '已永久刪除');
     },
   });
   return html`<${Dialog} title="編輯歌曲資訊" onClose=${close} actions=${d && html`
@@ -196,7 +197,7 @@ function TrackEditor({ id, close }) {
       <button class="btn text" onClick=${close}>取消</button>
       <button class="btn filled" disabled=${busy} onClick=${save}>儲存</button>`}>
     ${t.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${t.error} onRetry=${t.reload} />`}
-    ${d && d.missing && html`<div class="task-error">這首歌的音檔已從 Google Drive 遺失，暫時無法播放。從 Drive 垃圾桶還原後會自動恢復；不要了的話可以永久刪除。</div>`}
+    ${d && d.missing && html`<div class="task-error">${missingNote(d.place)}</div>`}
     ${f && html`<div class="form-grid">
       <${Field} label="曲名" value=${f.title} onInput=${set('title')} wide />
       <${Field} label="歌手" value=${f.artist} onInput=${set('artist')} />
@@ -322,7 +323,7 @@ function RemoveAlbum({ album, close }) {
     const res = await api('DELETE', `/albums/${album.id}${mode === 'delete' ? '?tracks=1' : ''}`);
     if (mode === 'delete') {
       changed();
-      toast(`已刪除專輯與 ${res.deleted_tracks} 首歌曲${res.trash_failed ? '；有音檔沒能移到 Drive 垃圾桶' : ''}`);
+      toast(`已刪除專輯與 ${res.deleted_tracks} 首歌曲${res.trash_failed ? `；有音檔沒能移到${trashName()}` : ''}`);
     } else {
       done(res, `已移除「${album.title}」，歌曲仍在「歌曲」分頁`);
     }
@@ -336,7 +337,7 @@ function RemoveAlbum({ album, close }) {
       <label class=${mode === 'keep' ? 'on' : ''}><input type="radio" checked=${mode === 'keep'} onChange=${() => setMode('keep')} />
         <span><b>只移除專輯</b><span class="sub">歌曲留在「歌曲」分頁，音檔不動。可在修改紀錄撤回。</span></span></label>
       <label class=${mode === 'delete' ? 'on' : ''}><input type="radio" checked=${mode === 'delete'} onChange=${() => setMode('delete')} />
-        <span><b>連同歌曲永久刪除</b><span class="sub">只在這張專輯的歌曲從曲庫刪除，音檔移到 Google Drive 垃圾桶（30 天內可在 Drive 還原），無法在 ${siteName()} 撤回。也收錄在其他專輯的歌曲與音檔不受影響。</span></span></label>
+        <span><b>連同歌曲永久刪除</b><span class="sub">只在這張專輯的歌曲從曲庫刪除；${trashNote()}。無法在 ${siteName()} 撤回。也收錄在其他專輯的歌曲與音檔不受影響。</span></span></label>
     </div>
   <//>`;
 }
@@ -677,8 +678,8 @@ export function folderAlbums(groups) {
 // sourceName says where a folder was imported from: folders of different imports are told apart.
 const sourceName = (s) => {
   const at = s.at ? new Date(s.at).toLocaleString('zh-TW', { year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '';
-  const kind = { download: '下載', upload: '上傳', local: '伺服器資料夾', inbox: 'Drive 收件匣' }[s.kind] || '匯入';
-  return [s.kind === 'download' || s.kind === 'local' ? `${kind}「${s.name}」` : kind, at].filter(Boolean).join(' · ');
+  const kind = { download: '下載', upload: '上傳', local: '伺服器資料夾', inbox: 'Drive 收件匣', source: '來源' }[s.kind] || '匯入';
+  return [s.kind === 'download' || s.kind === 'local' || s.kind === 'source' ? `${kind}「${s.name}」` : kind, at].filter(Boolean).join(' · ');
 };
 
 function FolderAlbumsDialog({ groups, close }) {
@@ -745,20 +746,23 @@ export function editArtistAliases(artist) {
     onSubmit=${async (text) => done(await api('PATCH', '/artists/' + artist.id, { aliases: lines(text) }), '已更新別名')} />`);
 }
 
-// ---- files gone from Drive (P2-6) ----
+// ---- files gone from where they were (P2-6, #99) ----
 
 export function Missing() {
   const list = useLoad(() => get('/library/missing'), []);
+  useStore(places, (v) => v.stores.length);
   return html`<section>
-    <h1 class="page-title">Drive 中遺失的檔案</h1>
-    <p class="hint">這些歌曲的音檔在 Google Drive 被刪除或移到垃圾桶，暫時無法播放；曲庫資料都還在。從 Drive 垃圾桶還原後，下一次同步（或設定頁的「完整對帳」）會自動恢復。若是不要了，可以在歌曲的「編輯資訊」裡永久刪除。</p>
+    <h1 class="page-title">${driveOnly() ? 'Drive 中遺失的檔案' : '遺失的檔案'}</h1>
+    <p class="hint">${driveOnly()
+      ? '這些歌曲的音檔在 Google Drive 被刪除或移到垃圾桶，暫時無法播放；曲庫資料都還在。從 Drive 垃圾桶還原後，下一次同步（或設定頁的「完整對帳」）會自動恢復。'
+      : '這些歌曲的音檔不在原本的位置（被刪除、移到垃圾桶或搬走），暫時無法播放；曲庫資料都還在。在 Google Drive 從垃圾桶還原後，下一次同步會自動恢復；在其他儲存位置把檔案放回原位後，下一次檢查或掃描會自動恢復。'}若是不要了，可以在歌曲的「編輯資訊」裡永久刪除。</p>
     ${list.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${list.error} onRetry=${list.reload} />`}
     ${list.data && !list.data.length && html`<${Empty} icon="note">沒有遺失的檔案。<//>`}
     ${list.data && list.data.length > 0 && html`<ul class="list">${list.data.map((m) => html`<li key=${m.track_id}>
       <button class="row plain wide" onClick=${() => editTrack(m.track_id)}>
         <span class="avatar"><${Icon} name="note" /></span>
         <span class="grow track-text"><span class="title">${m.title}</span>
-          <span class="sub">${[m.artist || '未知歌手', m.album, m.format.toUpperCase()].filter(Boolean).join(' · ')}</span></span>
+          <span class="sub">${[m.artist || '未知歌手', m.album, m.format.toUpperCase(), !driveOnly() && m.place && m.place.name].filter(Boolean).join(' · ')}</span></span>
       </button></li>`)}</ul>`}
   </section>`;
 }

@@ -41,20 +41,25 @@ const LocalhostRedirect = "http://localhost" + CallbackPath
 // that has https and a domain name (or is on this computer), LocalhostRedirect otherwise (plain
 // http, or an IP address).
 func RedirectFor(publicURL string) string {
+	return RedirectAt(publicURL, CallbackPath)
+}
+
+// RedirectAt is RedirectFor for another callback (Microsoft's sign-in takes the same redirects).
+func RedirectAt(publicURL, callback string) string {
 	base := strings.TrimRight(publicURL, "/")
 	u, err := url.Parse(base)
 	if err != nil {
-		return LocalhostRedirect
+		return "http://localhost" + callback
 	}
 	host := u.Hostname()
 	ip := net.ParseIP(host)
 	switch {
 	case host == "localhost" || ip != nil && ip.IsLoopback():
-		return base + CallbackPath
+		return base + callback
 	case u.Scheme == "https" && ip == nil && strings.Contains(host, "."):
-		return base + CallbackPath
+		return base + callback
 	}
-	return LocalhostRedirect
+	return "http://localhost" + callback
 }
 
 // tokenError is an error answer from the token endpoint, such as invalid_grant.

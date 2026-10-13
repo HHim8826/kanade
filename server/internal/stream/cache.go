@@ -8,6 +8,7 @@
 package stream
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,32 @@ func retryAfter(n int) time.Duration { return 500 * time.Millisecond << min(n-1,
 // Source opens a byte range of a remote file; end < 0 means to the end of the file.
 type Source interface {
 	OpenRange(ctx context.Context, id string, start, end int64) (*http.Response, error)
+}
+
+// Local is a Source some of whose files are on the server (a folder store, #99): those are read
+// where they are instead of copied into the cache; ok is false for a file elsewhere.
+type Local interface {
+	LocalFile(ctx context.Context, id string) (f *os.File, ok bool, err error)
+	LocalPath(ctx context.Context, id string) (path string, ok bool, err error)
+}
+
+// ErrChanged is a file on the server whose size is not the library's: other bytes are there now.
+var ErrChanged = errors.New("the file in the storage location changed since it was imported")
+
+// localFile opens id when it is on the server, checked to have the size the library knows.
+func (c *Cache) localFile(ctx context.Context, id string, size int64) (f *os.File, ok bool, err error) {
+	l, isLocal := c.src.(Local)
+	if !isLocal {
+		return nil, false, nil
+	}
+	if f, ok, err = l.LocalFile(ctx, id); !ok || err != nil {
+		return nil, ok, err
+	}
+	if st, err := f.Stat(); err != nil || st.Size() != size {
+		f.Close()
+		return nil, true, cmp.Or(err, ErrChanged)
+	}
+	return f, true, nil
 }
 
 type Stats struct {
@@ -153,6 +180,11 @@ func (c *Cache) acquire(id string, size int64) (*file, error) {
 // Hold returns the path of id's cached copy when the whole file is there, kept (not dropped or
 // evicted) until release is called.
 func (c *Cache) Hold(id string) (path string, release func(), ok bool) {
+	if l, isLocal := c.src.(Local); isLocal {
+		if p, local, err := l.LocalPath(context.Background(), id); local {
+			return p, func() {}, err == nil
+		}
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	cf, found := c.files[id]
@@ -374,6 +406,14 @@ func (c *Cache) Unprefetch() {
 func (c *Cache) Prefetch(id string, size int64) error {
 	if c.lean.Load() {
 		return nil
+	}
+	if _, local := c.src.(Local); local {
+		if f, ok, _ := c.localFile(context.Background(), id, size); ok {
+			if f != nil {
+				f.Close()
+			}
+			return nil // read where it is when played
+		}
 	}
 	c.mu.Lock()
 	c.next = id
@@ -605,6 +645,24 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 		status = http.StatusPartialContent
 	}
 	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+	if f, ok, err := c.localFile(r.Context(), id, size); ok {
+		c.Play(id)
+		if err != nil {
+			c.log.Warn("stream", "file", id, "err", err)
+			c.Unavailable(w, err)
+			return
+		}
+		defer f.Close()
+		w.WriteHeader(status)
+		if r.Method != http.MethodHead {
+			n, err := io.Copy(w, io.NewSectionReader(f, start, end-start+1))
+			c.Stats.ServedBytes.Add(n)
+			if err != nil && r.Context().Err() == nil {
+				c.log.Warn("stream", "file", id, "err", err)
+			}
+		}
+		return
+	}
 	if r.Method == http.MethodHead {
 		w.WriteHeader(status)
 		return
@@ -642,6 +700,14 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 // time), or straight from Drive when the cache has no room: an original read to be re-encoded for
 // lite mode. Drive failing again and again ends it, as it does a request.
 func (c *Cache) Copy(ctx context.Context, w io.Writer, id string, size int64) error {
+	if f, ok, err := c.localFile(ctx, id, size); ok {
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err := io.Copy(w, f)
+		return err
+	}
 	cf, err := c.acquire(id, size)
 	if errors.Is(err, errFull) {
 		c.Stats.SourceRequests.Add(1)
@@ -674,7 +740,10 @@ func (c *Cache) Unavailable(w http.ResponseWriter, err error) {
 	h.Set("Cache-Control", "no-store")
 	h.Set("Content-Type", "application/json")
 	reason, lasting := "", false
-	if c.Explain != nil {
+	switch {
+	case errors.Is(err, ErrChanged):
+		reason, lasting = "gone", true
+	case c.Explain != nil:
 		reason, lasting = c.Explain(err)
 	}
 	if !lasting {

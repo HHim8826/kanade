@@ -1,5 +1,6 @@
 import { api, coverURL, get, post, streamURL } from './api.js';
 import { attach, balanceGain, learn, output, wake } from './effects.js';
+import { driveOnly } from './places.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
 
@@ -1250,8 +1251,11 @@ function cantPlay(item, why, code) {
   const said = {
     not_connected: '沒有連線 Google Drive，無法播放。請到「設定」連線。',
     auth_expired: 'Google Drive 的授權已過期，無法播放。請到「設定」重新連線。',
-    gone: `「${item.title}」的檔案已不在 Google Drive。`,
+    gone: driveOnly() ? `「${item.title}」的檔案已不在 Google Drive。` : `「${item.title}」的檔案已不在原本的位置。`,
     drive: `暫時無法從 Google Drive 讀取「${item.title}」，請稍後再試。`,
+    offline: `「${item.title}」所在的儲存位置目前無法使用（未掛載或連不上），請稍後再試。`,
+    store_auth: `「${item.title}」所在的儲存位置授權失效，無法播放。請到「設定」的「儲存位置」更新。`,
+    store: `暫時無法讀取「${item.title}」，請稍後再試。`,
     network: `連不上伺服器，無法播放「${item.title}」。`,
   }[why];
   toast(said || (why === null && (code === 3 || code === 4) ? `這個瀏覽器無法播放「${item.title}」的格式。` : `無法播放「${item.title}」`), 'error');

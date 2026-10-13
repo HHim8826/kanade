@@ -13,12 +13,12 @@ import (
 
 // Sidecar is a file kept with an album in Drive, such as a CUE sheet or a rip log (decision D2 §5).
 type Sidecar struct {
-	ID          int64  `json:"id"`
-	AlbumID     int64  `json:"album_id,omitempty"`
-	Name        string `json:"name"`
-	Kind        string `json:"kind"` // cue | log
-	Size        int64  `json:"size"`
-	DriveFileID string `json:"-"`
+	ID      int64  `json:"id"`
+	AlbumID int64  `json:"album_id,omitempty"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"` // cue | log
+	Size    int64  `json:"size"`
+	Ref     string `json:"-"`
 }
 
 // mergedFrom is the album and every album merged into it, directly or through others: their
@@ -29,15 +29,15 @@ const mergedFrom = `WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT a.id FR
 // was kept before.
 func (s *Store) FindSidecar(ctx context.Context, albumID int64, sha string, size int64) (*Sidecar, error) {
 	if albumID == 0 {
-		return scanSidecar(s.db.QueryRowContext(ctx, `SELECT id, coalesce(album_id, 0), name, kind, size, drive_file_id FROM sidecars
+		return scanSidecar(s.db.QueryRowContext(ctx, `SELECT id, coalesce(album_id, 0), name, kind, size, file_ref FROM sidecars
 			WHERE sha256 = ? AND size = ? AND album_id IS NULL`, sha, size))
 	}
-	return scanSidecar(s.db.QueryRowContext(ctx, mergedFrom+` SELECT id, coalesce(album_id, 0), name, kind, size, drive_file_id FROM sidecars
+	return scanSidecar(s.db.QueryRowContext(ctx, mergedFrom+` SELECT id, coalesce(album_id, 0), name, kind, size, file_ref FROM sidecars
 		WHERE sha256 = ?2 AND size = ?3 AND album_id IN (SELECT id FROM family) ORDER BY id LIMIT 1`, albumID, sha, size))
 }
 
 func (s *Store) AddSidecar(ctx context.Context, albumID int64, name, kind, sha string, size int64, driveFileID string) (int64, error) {
-	r, err := s.db.ExecContext(ctx, `INSERT INTO sidecars (album_id, name, kind, sha256, size, drive_file_id, created_at)
+	r, err := s.db.ExecContext(ctx, `INSERT INTO sidecars (album_id, name, kind, sha256, size, file_ref, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)`, nullID(albumID), name, kind, sha, size, driveFileID, db.Now())
 	if err != nil {
 		return 0, err
@@ -46,13 +46,13 @@ func (s *Store) AddSidecar(ctx context.Context, albumID int64, name, kind, sha s
 }
 
 func (s *Store) Sidecar(ctx context.Context, id int64) (*Sidecar, error) {
-	return scanSidecar(s.db.QueryRowContext(ctx, `SELECT id, coalesce(album_id, 0), name, kind, size, drive_file_id FROM sidecars
+	return scanSidecar(s.db.QueryRowContext(ctx, `SELECT id, coalesce(album_id, 0), name, kind, size, file_ref FROM sidecars
 		WHERE id = ?`, id))
 }
 
 func (s *Store) albumSidecars(ctx context.Context, albumID int64) ([]Sidecar, error) {
 	// With the albums merged into it; the same file kept twice is listed once.
-	rows, err := s.db.QueryContext(ctx, mergedFrom+` SELECT min(id), coalesce(album_id, 0), name, kind, size, drive_file_id FROM sidecars
+	rows, err := s.db.QueryContext(ctx, mergedFrom+` SELECT min(id), coalesce(album_id, 0), name, kind, size, file_ref FROM sidecars
 		WHERE album_id IN (SELECT id FROM family) GROUP BY sha256, size ORDER BY kind, name`, albumID)
 	if err != nil {
 		return nil, err
@@ -61,7 +61,7 @@ func (s *Store) albumSidecars(ctx context.Context, albumID int64) ([]Sidecar, er
 	out := []Sidecar{}
 	for rows.Next() {
 		var c Sidecar
-		if err := rows.Scan(&c.ID, &c.AlbumID, &c.Name, &c.Kind, &c.Size, &c.DriveFileID); err != nil {
+		if err := rows.Scan(&c.ID, &c.AlbumID, &c.Name, &c.Kind, &c.Size, &c.Ref); err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -71,7 +71,7 @@ func (s *Store) albumSidecars(ctx context.Context, albumID int64) ([]Sidecar, er
 
 func scanSidecar(row *sql.Row) (*Sidecar, error) {
 	var c Sidecar
-	err := row.Scan(&c.ID, &c.AlbumID, &c.Name, &c.Kind, &c.Size, &c.DriveFileID)
+	err := row.Scan(&c.ID, &c.AlbumID, &c.Name, &c.Kind, &c.Size, &c.Ref)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -148,7 +148,7 @@ type DriveObservation struct {
 // under the same file ID, is missing: the library never trusts content it has not checked. It
 // reports how many assets changed state and whether they are now missing.
 func (s *Store) ObserveDriveFile(ctx context.Context, o DriveObservation) (changed int, missing bool, err error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, sha256, size, state FROM assets WHERE drive_file_id = ? AND state IN (?, ?)`,
+	rows, err := s.db.QueryContext(ctx, `SELECT id, sha256, size, state FROM assets WHERE file_ref = ? AND state IN (?, ?)`,
 		o.ID, AssetVerified, AssetMissing)
 	if err != nil {
 		return 0, false, err
@@ -192,9 +192,11 @@ func (s *Store) ObserveDriveFile(ctx context.Context, o DriveObservation) (chang
 	return changed, missing, nil
 }
 
-// DriveFiles lists the Drive file IDs of library files that should be there (verified or missing).
+// DriveFiles lists the Drive file IDs of library files that should be there (verified or missing);
+// files in other places (#99) have references with a colon.
 func (s *Store) DriveFiles(ctx context.Context) (map[string]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT drive_file_id, state FROM assets WHERE drive_file_id IS NOT NULL AND state IN (?, ?)`,
+	rows, err := s.db.QueryContext(ctx, `SELECT file_ref, state FROM assets WHERE file_ref IS NOT NULL AND instr(file_ref, ':') = 0
+		AND state IN (?, ?)`,
 		AssetVerified, AssetMissing)
 	if err != nil {
 		return nil, err
@@ -211,7 +213,7 @@ func (s *Store) DriveFiles(ctx context.Context) (map[string]string, error) {
 	return out, rows.Err()
 }
 
-// MissingItem is a library song whose file is gone from Drive.
+// MissingItem is a library song whose file is gone from where it was.
 type MissingItem struct {
 	TrackID int64  `json:"track_id"`
 	Title   string `json:"title"`
@@ -220,11 +222,12 @@ type MissingItem struct {
 	AlbumID int64  `json:"album_id,omitempty"`
 	Format  string `json:"format"`
 	Size    int64  `json:"size"`
+	Ref     string `json:"-"`
 }
 
 func (s *Store) Missing(ctx context.Context) ([]MissingItem, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.artist, coalesce(al.title, ''), coalesce(al.id, 0), a.format, a.size
-		FROM assets a JOIN track_assets ta ON ta.asset_id = a.id JOIN tracks t ON t.id = ta.track_id
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.title, t.artist, coalesce(al.title, ''), coalesce(al.id, 0), a.format, a.size,
+		coalesce(a.file_ref, '') FROM assets a JOIN track_assets ta ON ta.asset_id = a.id JOIN tracks t ON t.id = ta.track_id
 		LEFT JOIN album_entries e ON e.id = (SELECT min(id) FROM album_entries WHERE asset_id = a.id)
 		LEFT JOIN albums al ON al.id = e.album_id
 		WHERE a.state = ? ORDER BY al.title, t.title`, AssetMissing)
@@ -235,7 +238,7 @@ func (s *Store) Missing(ctx context.Context) ([]MissingItem, error) {
 	out := []MissingItem{}
 	for rows.Next() {
 		var m MissingItem
-		if err := rows.Scan(&m.TrackID, &m.Title, &m.Artist, &m.Album, &m.AlbumID, &m.Format, &m.Size); err != nil {
+		if err := rows.Scan(&m.TrackID, &m.Title, &m.Artist, &m.Album, &m.AlbumID, &m.Format, &m.Size, &m.Ref); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -260,8 +263,8 @@ const trashMemory = time.Hour
 
 // TrashDue lists files owed to the Drive trash whose next try is due.
 func (s *Store) TrashDue(ctx context.Context, limit int) ([]string, error) {
-	s.db.ExecContext(ctx, `DELETE FROM drive_trash WHERE done_at > 0 AND done_at < ?`, db.Now()-trashMemory.Milliseconds())
-	rows, err := s.db.QueryContext(ctx, `SELECT file_id FROM drive_trash WHERE done_at = 0 AND next_at <= ? ORDER BY created_at LIMIT ?`,
+	s.db.ExecContext(ctx, `DELETE FROM file_trash WHERE done_at > 0 AND done_at < ?`, db.Now()-trashMemory.Milliseconds())
+	rows, err := s.db.QueryContext(ctx, `SELECT file_id FROM file_trash WHERE done_at = 0 AND next_at <= ? ORDER BY created_at LIMIT ?`,
 		db.Now(), limit)
 	if err != nil {
 		return nil, err
@@ -295,7 +298,7 @@ func (s *Store) TrashFile(ctx context.Context, fileID string, trash func(context
 	trashMu.Lock()
 	defer trashMu.Unlock()
 	var done int64
-	if err := s.db.QueryRowContext(ctx, `SELECT done_at FROM drive_trash WHERE file_id = ?`, fileID).Scan(&done); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT done_at FROM file_trash WHERE file_id = ?`, fileID).Scan(&done); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return TrashSkipped, nil
 		}
@@ -305,21 +308,21 @@ func (s *Store) TrashFile(ctx context.Context, fileID string, trash func(context
 		return TrashSkipped, nil
 	}
 	var used int
-	if s.db.QueryRowContext(ctx, `SELECT 1 FROM assets WHERE drive_file_id = ? LIMIT 1`, fileID).Scan(&used) == nil {
-		_, err := s.db.ExecContext(ctx, `DELETE FROM drive_trash WHERE file_id = ?`, fileID)
+	if s.db.QueryRowContext(ctx, `SELECT 1 FROM assets WHERE file_ref = ? LIMIT 1`, fileID).Scan(&used) == nil {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, fileID)
 		return TrashReused, err
 	}
 	if err := trash(ctx, fileID); err != nil {
 		s.TrashFailed(ctx, fileID, err)
 		return TrashFailedTry, err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE drive_trash SET done_at = ?, last_error = '' WHERE file_id = ?`, db.Now(), fileID)
+	_, err := s.db.ExecContext(ctx, `UPDATE file_trash SET done_at = ?, last_error = '' WHERE file_id = ?`, db.Now(), fileID)
 	return Trashed, err
 }
 
 // TrashFailed records a failed try; the next waits longer (a minute, doubling, at most a day).
 func (s *Store) TrashFailed(ctx context.Context, fileID string, cause error) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE drive_trash SET tries = tries + 1, last_error = ?,
+	_, err := s.db.ExecContext(ctx, `UPDATE file_trash SET tries = tries + 1, last_error = ?,
 		next_at = ? + min(60000 << min(tries, 11), 86400000) WHERE file_id = ? AND done_at = 0`, cause.Error(), db.Now(), fileID)
 	return err
 }
@@ -328,7 +331,7 @@ func (s *Store) TrashFailed(ctx context.Context, fileID string, cause error) err
 func (s *Store) TrashPending(ctx context.Context) (int, string, error) {
 	var n int
 	var last string
-	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce((SELECT last_error FROM drive_trash WHERE done_at = 0 AND last_error != ''
-		ORDER BY next_at DESC LIMIT 1), '') FROM drive_trash WHERE done_at = 0`).Scan(&n, &last)
+	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce((SELECT last_error FROM file_trash WHERE done_at = 0 AND last_error != ''
+		ORDER BY next_at DESC LIMIT 1), '') FROM file_trash WHERE done_at = 0`).Scan(&n, &last)
 	return n, last, err
 }

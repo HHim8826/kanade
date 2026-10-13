@@ -267,7 +267,7 @@ func TestEntryInputFallbacks(t *testing.T) {
 	if in.Artist != "AA" || in.AlbumArtist != "AA" {
 		t.Fatalf("artist fallback: %+v", in)
 	}
-	if p := drivePath(library.EntryInput{Album: "a/b", AlbumArtist: ".."}); p != "library/Unknown Artist/a／b" {
+	if p := libraryDir(library.EntryInput{Album: "a/b", AlbumArtist: ".."}); p != "library/Unknown Artist/a／b" {
 		t.Fatalf("drivePath = %q", p)
 	}
 }
@@ -452,7 +452,7 @@ func TestRetryTellsGoneFiles(t *testing.T) {
 	// The earlier import's copy is still kept with its album (review #67).
 	album := exec(`INSERT INTO albums (title, created_at, updated_at) VALUES ('A', 0, 0)`)
 	exec(`UPDATE import_items SET sha256 = 'c0e' WHERE id = ?`, kept)
-	exec(`INSERT INTO sidecars (album_id, name, kind, sha256, size, drive_file_id, created_at) VALUES (?, 'album.cue', 'cue', 'c0e', 3, 'd', 0)`, album)
+	exec(`INSERT INTO sidecars (album_id, name, kind, sha256, size, file_ref, created_at) VALUES (?, 'album.cue', 'cue', 'c0e', 3, 'd', 0)`, album)
 	dup := item(later, "CD1/album.cue", "failed", gone)
 	there := item(later, "there.log", "failed", "upload failed: EOF")
 	back := item(later, "back.cue", "failed", gone)

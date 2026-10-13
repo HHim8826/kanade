@@ -1,0 +1,288 @@
+package importer
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/storage"
+)
+
+// withStores gives the importer storage locations (#99): imports go where the Set's default says.
+func withStores(t *testing.T, im *Importer) *storage.Set {
+	t.Helper()
+	set := &storage.Set{DB: im.db, Log: im.log, DataDir: t.TempDir()}
+	set.Forget = im.ForgetSource
+	im.Stores = set
+	return set
+}
+
+func addFolder(t *testing.T, set *storage.Set, root, mode string) *storage.Store {
+	t.Helper()
+	cfg, _ := json.Marshal(map[string]string{"root": root})
+	st, err := set.Add(context.Background(), storage.NewStore{Kind: storage.KindLocal, Name: "NAS", Mode: mode, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+var jpeg = append([]byte{0xFF, 0xD8, 0xFF, 0xE0, 0, 16, 'J', 'F', 'I', 'F', 0}, make([]byte, 64)...)
+
+// tree lists the files below dir with their sizes and times, to see nothing changed there.
+func tree(t *testing.T, dir string) string {
+	t.Helper()
+	var out []string
+	filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err == nil && !info.IsDir() {
+			rel, _ := filepath.Rel(dir, p)
+			out = append(out, fmt.Sprintf("%s %d %d", rel, info.Size(), info.ModTime().UnixNano()))
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return strings.Join(out, "\n")
+}
+
+func assetRefs(t *testing.T, im *Importer) map[string]string {
+	t.Helper()
+	rows, err := im.db.Query(`SELECT a.state || ' ' || coalesce(a.file_ref, ''), t.title FROM assets a
+		JOIN track_assets ta ON ta.asset_id = a.id JOIN tracks t ON t.id = ta.track_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var ref, title string
+		rows.Scan(&ref, &title)
+		out[title] = ref
+	}
+	return out
+}
+
+// Imports kept in a folder of the server (#99): songs, covers and CUE sheets there, read back; no
+// Google Drive needed.
+func TestImportToFolder(t *testing.T) {
+	ctx := context.Background()
+	im, lib, fd := setup(t)
+	set := withStores(t, im)
+	lib0 := t.TempDir()
+	addFolder(t, set, lib0, storage.Managed)
+	if err := set.SetDefault(ctx, "1"); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "Album", "01.mp3"), map[string]string{"TIT2": "One", "TPE1": "Band", "TALB": "Album", "TRCK": "1"})
+	os.WriteFile(filepath.Join(src, "Album", "cover.jpg"), jpeg, 0o644)
+	os.WriteFile(filepath.Join(src, "Album", "rip.log"), []byte("EAC extraction logfile"), 0o644)
+	b, _, err := im.CreateBatch(ctx, "local", "", src, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v := runUntilDone(t, im, b); states(v)["Album/01.mp3"] != StatePublished || states(v)["Album/rip.log"] != StatePublished {
+		t.Fatalf("states %v", states(v))
+	}
+	if fd.uploads != 0 {
+		t.Fatalf("%d uploads to Drive", fd.uploads)
+	}
+	refs := assetRefs(t, im)
+	if refs["One"] != "verified local:1:library/Band/Album/01.mp3" {
+		t.Fatalf("refs %v", refs)
+	}
+	stored, _ := os.ReadFile(filepath.Join(lib0, "library/Band/Album/01.mp3"))
+	orig, _ := os.ReadFile(filepath.Join(src, "Album", "01.mp3"))
+	if string(stored) != string(orig) {
+		t.Fatal("the stored copy is not the file")
+	}
+	albums, _ := lib.Albums(ctx, 10, 0, false)
+	cover, err := lib.Cover(ctx, albums[0].CoverID)
+	if err != nil || cover == nil || !strings.HasPrefix(cover.Ref, "local:1:covers/") {
+		t.Fatalf("cover %+v %v", cover, err)
+	}
+	var sidecar string
+	im.db.QueryRow(`SELECT file_ref FROM sidecars`).Scan(&sidecar)
+	if sidecar != "local:1:sidecars/Band/Album/rip.log" {
+		t.Fatalf("sidecar %q", sidecar)
+	}
+	rc, err := set.Open(ctx, sidecar, 0, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc.Close()
+	var sessions int
+	im.db.QueryRow(`SELECT count(*) FROM upload_sessions`).Scan(&sessions)
+	if sessions != 0 {
+		t.Fatalf("%d sessions left", sessions)
+	}
+}
+
+// A source is imported where it is (#99) and never written to; scans follow what changes there.
+func TestSourceScans(t *testing.T) {
+	ctx := context.Background()
+	im, _, fd := setup(t)
+	set := withStores(t, im)
+	src := t.TempDir()
+	song := func(rel, title string) string {
+		p := filepath.Join(src, rel)
+		taggedMP3(t, p, map[string]string{"TIT2": title, "TPE1": "Band", "TALB": "Album", "TRCK": "1"})
+		return p
+	}
+	song("Band/Album/01.mp3", "One")
+	song("Band/Album/02.mp3", "Two")
+	os.WriteFile(filepath.Join(src, "Band/Album/folder.jpg"), jpeg, 0o644)
+	os.WriteFile(filepath.Join(src, "Band/Album/01.lrc"), []byte("[00:01.00]la"), 0o644)
+	os.WriteFile(filepath.Join(src, "Band/Album/notes.txt"), []byte("x"), 0o644)
+	st := addFolder(t, set, src, storage.Source)
+	before := tree(t, src)
+	scan := func() ScanResult {
+		t.Helper()
+		res, err := im.ScanSource(ctx, set, st.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Batch != 0 {
+			runUntilDone(t, im, res.Batch)
+		}
+		return res
+	}
+	res := scan()
+	if res.Files != 2 || res.New != 2 || res.Batch == 0 {
+		t.Fatalf("first scan %+v", res)
+	}
+	refs := assetRefs(t, im)
+	if refs["One"] != "verified local:1:Band/Album/01.mp3" || refs["Two"] != "verified local:1:Band/Album/02.mp3" {
+		t.Fatalf("refs %v", refs)
+	}
+	if fd.uploads != 0 {
+		t.Fatal("uploaded")
+	}
+	var lyrics string
+	im.db.QueryRow(`SELECT l.text FROM lyrics l JOIN tracks t ON t.id = l.track_id WHERE t.title = 'One'`).Scan(&lyrics)
+	if !strings.Contains(lyrics, "la") {
+		t.Fatalf("lyrics %q", lyrics)
+	}
+	if after := tree(t, src); after != before {
+		t.Fatalf("the source changed:\n%s\n---\n%s", before, after)
+	}
+	var cover string
+	im.db.QueryRow(`SELECT c.file_ref FROM albums al JOIN covers c ON c.id = al.cover_id`).Scan(&cover)
+	if cover != "local:1:Band/Album/folder.jpg" {
+		t.Fatalf("the album's cover is %q, not the folder's picture where it is", cover)
+	}
+	if res := scan(); res.New+res.Changed+res.Moved+res.Gone+res.Back != 0 || res.Batch != 0 {
+		t.Fatalf("a scan with nothing new: %+v", res)
+	}
+
+	// Moved: followed by content, the song kept.
+	os.MkdirAll(filepath.Join(src, "Band/Album (2020)"), 0o755)
+	os.Rename(filepath.Join(src, "Band/Album/02.mp3"), filepath.Join(src, "Band/Album (2020)/02.mp3"))
+	if res := scan(); res.Moved != 1 || res.New != 0 || res.Gone != 0 {
+		t.Fatalf("moved: %+v", res)
+	}
+	if refs := assetRefs(t, im); refs["Two"] != "verified local:1:Band/Album (2020)/02.mp3" {
+		t.Fatalf("after the move %v", refs)
+	}
+	// Gone, then back.
+	os.Rename(filepath.Join(src, "Band/Album/01.mp3"), filepath.Join(t.TempDir(), "away.mp3"))
+	if res := scan(); res.Gone != 1 {
+		t.Fatalf("gone: %+v", res)
+	}
+	if refs := assetRefs(t, im); refs["One"] != "missing local:1:Band/Album/01.mp3" {
+		t.Fatalf("gone %v", refs)
+	}
+	song("Band/Album/01.mp3", "One")
+	// The same tags make the same bytes, but a new time: read again, the same song back.
+	res = scan()
+	if refs := assetRefs(t, im); refs["One"] != "verified local:1:Band/Album/01.mp3" {
+		t.Fatalf("back %v (%+v)", refs, res)
+	}
+	// Other content at the same place: the old song is missing, the new one imported.
+	song("Band/Album/01.mp3", "One (2024 mix)")
+	if res := scan(); res.Changed != 1 {
+		t.Fatalf("changed: %+v", res)
+	}
+	refs = assetRefs(t, im)
+	if refs["One"] != "missing " || refs["One (2024 mix)"] != "verified local:1:Band/Album/01.mp3" {
+		t.Fatalf("changed %v", refs)
+	}
+}
+
+// A source that is not all there (emptied, as a NAS not mounted looks; or most of it gone at once)
+// marks nothing missing.
+func TestSourceNotAllThere(t *testing.T) {
+	ctx := context.Background()
+	im, _, _ := setup(t)
+	set := withStores(t, im)
+	src := t.TempDir()
+	for i := 1; i <= 30; i++ {
+		taggedMP3(t, filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)), map[string]string{"TIT2": fmt.Sprint("Song ", i), "TALB": "A", "TPE1": "B"})
+	}
+	st := addFolder(t, set, src, storage.Source)
+	res, err := im.ScanSource(ctx, set, st.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runUntilDone(t, im, res.Batch)
+	hidden := t.TempDir()
+	os.Rename(filepath.Join(src, "A"), filepath.Join(hidden, "A"))
+	if _, err := im.ScanSource(ctx, set, st.ID, false); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("scanning an empty source: %v", err)
+	}
+	if s, _ := set.Get(ctx, st.ID); s.State != storage.StateOffline {
+		t.Fatalf("state %+v", s)
+	}
+	os.MkdirAll(filepath.Join(src, "A"), 0o755)
+	for i := 1; i <= 5; i++ {
+		os.Rename(filepath.Join(hidden, fmt.Sprintf("A/%02d.mp3", i)), filepath.Join(src, fmt.Sprintf("A/%02d.mp3", i)))
+	}
+	res, err = im.ScanSource(ctx, set, st.ID, false)
+	if err != nil || res.Held != 25 || res.Gone != 0 {
+		t.Fatalf("most gone at once: %+v %v", res, err)
+	}
+	var missing int
+	im.db.QueryRow(`SELECT count(*) FROM assets WHERE state = 'missing'`).Scan(&missing)
+	if missing != 0 {
+		t.Fatalf("%d marked missing", missing)
+	}
+}
+
+// A song deleted from the library leaves its file in the source alone, and scans leave the file
+// out until it changes.
+func TestSourceSongDeleted(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "01.mp3"), map[string]string{"TIT2": "One"})
+	st := addFolder(t, set, src, storage.Source)
+	res, _ := im.ScanSource(ctx, set, st.ID, false)
+	runUntilDone(t, im, res.Batch)
+	var track int64
+	im.db.QueryRow(`SELECT id FROM tracks`).Scan(&track)
+	refs, err := lib.DeleteTrack(ctx, track)
+	if err != nil || len(refs) != 1 {
+		t.Fatalf("delete: %v %v", refs, err)
+	}
+	if n, err := lib.TrashFile(ctx, refs[0], set.Trash); n != library.Trashed || err != nil {
+		t.Fatalf("let go: %v %v", n, err)
+	}
+	if _, err := os.Stat(filepath.Join(src, "01.mp3")); err != nil {
+		t.Fatal("the source's file went:", err)
+	}
+	if res, _ := im.ScanSource(ctx, set, st.ID, false); res.New+res.Changed != 0 {
+		t.Fatalf("imported again: %+v", res)
+	}
+	future := time.Now().Add(time.Hour)
+	os.Chtimes(filepath.Join(src, "01.mp3"), future, future)
+	if res, _ := im.ScanSource(ctx, set, st.ID, false); res.Changed != 1 {
+		t.Fatalf("changed after being let go of: %+v", res)
+	}
+}

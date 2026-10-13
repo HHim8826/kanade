@@ -32,6 +32,8 @@ DIR/
 - `sidecars/`：CUE、LOG 等旁附檔。
 - `inbox/`：收件匣（D6，P2-6）。放進來的音樂就地歸檔進 `library/`；曲庫已有的移到 `inbox/重複`，處理完剩下的移到 `inbox/已處理`。
 
+其他存放位置（#99、#100、#95，見「儲存位置」）用同樣的 `library/`、`covers/`、`sidecars/`，放在資料夾、bucket 的 prefix 或選定的 OneDrive 資料夾之下。資料夾與 bucket 另有 `.kanade-store`（確認是同一個位置、NAS 有掛載）與 `.kanade-trash/YYYYMMDD/`（刪除的檔案，30 天後清掉）；OneDrive 刪除時進它自己的回收筒。曲庫裡檔案的位置（`file_ref`）是 Drive 的 file ID，或 `<種類>:<位置 ID>:<鍵>`：資料夾與 bucket 的鍵是相對路徑，OneDrive 的鍵是 item ID（改名、搬移後不變）。
+
 ## 套件分層（`server/internal/`）
 
 | 套件 | 責任 |
@@ -66,15 +68,15 @@ DIR/
 
 | 表 | 內容 |
 |---|---|
-| `assets` | 音檔：`sha256`＋`size` 唯一、格式、取樣率、位元深度、聲道、時長、音訊 MD5、Drive file ID、狀態 |
+| `assets` | 音檔：`sha256`＋`size` 唯一、格式、取樣率、位元深度、聲道、時長、音訊 MD5、檔案位置 `file_ref`（Drive file ID 或 `<種類>:<位置>:<鍵>`）、狀態 |
 | `tracks` | 錄音版本：曲名、顯示用歌手、版本說明 |
 | `track_assets` | 錄音版本與音檔的多對多（同錄音的不同格式） |
 | `albums` | 專輯版本：名稱、專輯歌手、日期、型號、封面 |
 | `album_entries` | 專輯收錄：專輯、track、asset、碟號、曲序；收錄專屬資料存在這裡，不改寫共用音檔 |
 | `artists`、`track_artists` | 歌手；第一版照原字串，不拆分多人名單 |
-| `import_batches`、`import_items` | 每次匯入與每個檔案：原始路徑、原始標籤（保留原始位元組）、偵測到的編碼、狀態、錯誤 |
+| `import_batches`、`import_items` | 每次匯入與每個檔案：原始路徑、原始標籤（保留原始位元組）、偵測到的編碼、狀態、錯誤；來源的檔案另有 `ref`（原處的位置）與 `fetch`（雲端來源：掃描時看到的版本、雜湊與同資料夾的圖片和 LRC） |
 | `downloads` | BT 任務：aria2 gid、infohash、狀態、檔案清單與選取、做種資訊 |
-| `drive_uploads` | 進行中的可續傳上傳 session |
+| `upload_sessions` | 進行中的可續傳上傳：Drive 的 session URI、bucket 的分段上傳（upload ID 與已完成的分段）、OneDrive 的上傳工作階段；`store` 是去處 |
 | `drive_folders` | 路徑到 Drive 資料夾 ID 的快取 |
 | `search_index` | FTS5 trigram：曲名、歌手、專輯名 |
 | `users`、`sessions`、`settings`、`credentials` | 帳號、登入 token（只存雜湊）、設定、OAuth token |
@@ -84,12 +86,14 @@ DIR/
 | `lyrics` | 每首歌曲一份歌詞：來源（內嵌／LRC／手動）、是否有時間軸 |
 | `aliases` | 歌手、專輯、歌曲的其他名稱，建入搜尋索引 |
 | `edit_groups`、`edits` | 修改紀錄：每個操作一組，逐欄記舊值與新值，供撤回 |
-| `sidecars` | 與專輯一起保存的 CUE、LOG：Drive file ID、SHA-256、所屬專輯 |
+| `sidecars` | 與專輯一起保存的 CUE、LOG：檔案位置、SHA-256、所屬專輯 |
 | `import_sources` | 轉換或分軌的來源檔（SHA-256＋大小）與由它產生的音檔，用於再次匯入時略過 |
 | `rss_sources`、`rss_items` | RSS 來源（網址、間隔、規則、自動下載、認證、輪詢狀態）與條目（GUID、下載連結、info hash、大小、做種數、對應的下載） |
 | `passkeys`、`oauth_states` | passkey（公開金鑰、名稱、最後使用）；OAuth 授權進行中的 state |
 | `uploads` | 客戶端上傳：群組、路徑、大小、已收到的位元組、SHA-256、狀態 |
-| `drive_trash` | 移到 Drive 垃圾桶的檔案，供撤回時找回 |
+| `file_trash` | 移到垃圾桶（Drive、OneDrive 的回收筒，或資料夾與 bucket 的 `.kanade-trash`）的檔案，供撤回時找回；還沒移成功的在背景重試 |
+| `stores` | 儲存位置（#99）：種類（`local`、`s3`、`onedrive`）、名稱、用途（`managed` 存放位置、`source` 只讀來源）、設定（JSON，不含祕密）、`secret`（金鑰、用戶端密碼與 refresh token）、上次檢查的狀態、錯誤與用量、來源是否自動匯入、上次掃描。ID 是 AUTOINCREMENT，絕不重複使用 |
+| `source_files` | 只讀來源上次掃描看到的檔案：鍵、路徑、大小、版本（修改時間、ETag 或 cTag）、讀過的 SHA-256、狀態（排入、已匯入、略過、失敗、曲庫不要了）、不見的時間 |
 | `album_sections` | 專輯的命名區段（例如合集裡的 Episode 1），依碟號（#82） |
 | `album_scopes` | 下載的「專輯資料夾＋專輯標籤」對應的專輯，跨批次維持同一張；`derived` 表示專輯歌手是推導的（#81、#85、#86、#88） |
 | `categories`、`album_categories` | 分類（作品、系列或任何分組）與專輯的多對多（#92） |
@@ -175,7 +179,15 @@ DIR/
 | `GET /drive/sync` | 同步狀態：上次變更檢查、上次完整對帳與結果、是否進行中、基準對帳是否未完成、收件匣上次檢查 |
 | `POST /drive/reconcile` | 在背景開始完整對帳（202；已在進行時 409） |
 | `POST /drive/inbox` | 立即檢查收件匣：`{"files": 排入匯入的數量, "waiting": 剛放進來、等下次的數量}` |
-| `GET /library/missing` | 音檔在 Drive 遺失的歌曲 |
+| `GET /library/missing` | 音檔遺失的歌曲；每首附 `place`（原本在哪：`kind`、`name`、`mode`） |
+| `GET /storage` | 新匯入的去處（`default`：`drive` 或位置 ID）、Drive 是否連線與歌曲數、每個儲存位置（狀態、用量、`use`：曲庫有幾首在這裡、遺失幾首；`location`；OneDrive 的 `signed_in`）、資料目錄、OneDrive 要登記的 `onedrive_redirect` 與是否要貼上網址（`onedrive_paste`） |
+| `POST /storage` | `{"kind", "name", "mode", "config", "secret"}` 新增：資料夾檢查可讀寫（資料目錄裡的自動建立）與不和其他位置、暫存、快取重疊；bucket 先用金鑰連線測試（最多 45 秒）；OneDrive 只檢查用戶端資料，之後登入。201 回傳位置 |
+| `PATCH /storage/{id}` | `name`、`auto_scan`；`secret`：bucket 的新金鑰或 OneDrive 的新用戶端密碼，先試過能用才換上；`folder`：OneDrive 的資料夾（item ID），曲庫還有檔案在原本的資料夾時 409 |
+| `DELETE /storage/{id}` | 移除：只讀來源的歌曲一起離開曲庫（原檔不動，回傳 `songs`）；存放位置還有曲庫的檔案時 409 |
+| `PUT /storage/default` | `{"id": "drive" 或位置 ID}` 新匯入的去處；只讀來源不行 |
+| `POST /storage/{id}/check`、`POST /storage/{id}/scan` | 檢查連線與用量；在背景掃描來源（`{"preview": true}` 時新檔案先停在預覽）或檢查存放位置裡曲庫的檔案（202，進行中時 409） |
+| `POST /storage/{id}/connect` | OneDrive 登入：`{}` 回傳 `{"url", "redirect_uri", "paste"}`（回呼 `GET /oauth/onedrive/callback`，公開但只接受本服務為這個位置產生、10 分鐘內的 state）；`{"url"}` 貼上瀏覽器最後停住的網址完成登入 |
+| `GET /storage/{id}/folders?parent=`、`POST /storage/{id}/folders` | OneDrive 的資料夾：`{"here", "folders"}`；`{"parent", "name"}` 新增（只有存放位置可以） |
 | `POST /account/password` | `{"current", "password"}` 改自己的密碼：結束所有登入、保留 passkey（#76） |
 | `GET /sessions`、`DELETE /sessions/{id}`、`POST /sessions/end-others` | 自己的登入（裝置、最後使用）；結束一個；結束其他全部 |
 | `GET /site`、`PUT /site`、`PUT`／`DELETE /site/icon` | 站名與圖示：`{"name","default","icon"}`（icon 是上傳圖示的版本，空字串為內建圖示）；改名送 `{"name"}`（空字串恢復預設）；圖示以請求本文上傳 PNG、JPEG 或 WebP。錯誤回 400 與 `reason`：`name`、`format`、`small`、`large` |
@@ -779,6 +791,21 @@ DIR/
 - 驗證：
   - Go 測試：假編碼器提早放棄、原檔卡在下一段時立刻結束並釋放名額，修正前卡到期限；請求取消的工作不算失敗；轉了沒變小的送原檔、不再預先轉；照原檔播放時上一首停止，被等待、預載中的與同一首的不停；快取 `Play` 停止上一首的下載、保留預載。用真的 FFmpeg：20 秒 48 kHz 立體聲的純音 FLAC 轉出來比較大而照原檔送；開頭是無效 FLAC、後面卡住的原檔在 0.3 秒內結束（修正前卡到 20 秒的測試期限）。API：省流、低碼率 MP3、低碼率 FLAC、沒變小、轉檔失敗各自的 Content-Type 與 `/lite` 的回答（兩次相同）；未完成的 A 之後播原檔 B、省流開著播 128k MP3 B、另一首省流 B，A 都停止（修正前第一種不停）；預載中的不停。presence：閒置回報在連線前不留、連線後列出、舊的與別的帳號的不採用、不出現在 Discord、播放後再閒置、斷線移除。完整測試含 `-race` 通過。
   - Chromium（示範資料）：省流的歌只問一次並顯示 Opus、伺服器照原檔送時顯示「這首播放原檔」；三個瀏覽器：控制還沒播過歌的裝置時靜音、取消靜音、模式繞一圈、音量都在兩邊一致，事件流重連後仍正確，不出現在 Discord；控制另一台時標題顯示對方的歌並每秒前進、暫停後停住、改名後跟著換、控制閒置裝置時只有站名、結束控制後回到自己的歌。收藏對話框在淺色、深色與手機寬度截圖確認（測試資料為虛構），沒有橫向捲動。
+
+### 儲存位置：資料夾與 NAS、Cloudflare R2、OneDrive（2026-10-12～13，#99、#100、#95，遷移 39：`stores`、`source_files`）
+
+- 使用者要求：伺服器的磁碟或掛載的 NAS 可以當存放位置或只讀來源（#99）；Cloudflare R2（S3 相容）可以存放（#100）；OneDrive 先做只讀匯入，再做存放（#95）。跨位置搬移是另外的功能，還沒做：存放位置還有曲庫的檔案時不能移除，OneDrive 也不能換資料夾。
+- 做法和 Drive 一樣，每種服務都由 Go 直接連線（D1），不嵌入、也不需要 rclone：S3 自己做 SigV4 簽章，OneDrive 走 Microsoft Graph。和 OpenList 的 OneDrive driver 比較過：它預設透過自己的線上 API 登入並續期 refresh token（token 會經過它的伺服器）；Kanade 維持使用者自己註冊應用程式（和 Google Drive 相同），只參考它支援的國家雲（中國世紀互聯、美國政府雲；德國雲 2021 年已關閉，不支援）。
+- 位置（`internal/storage`）：曲庫檔案的位置是 `file_ref`（Drive file ID，或 `<種類>:<位置>:<鍵>`），`Set` 依位置找到後端（Drive、`Local`、`S3`、`OneDrive`），提供讀取（含 Range）、`Stat`、`Walk`、寫入（`Put`，存放位置才有）與移到垃圾桶（只讀來源的檔案一律不動）。錯誤分成離線（連不上、逾時、429／5xx，稍後重試）、金鑰或登入被拒（`store_auth`，要使用者處理）、找不到、空間不足，串流與設定頁照這些說明。後端依位置的設定快取；OneDrive 的 refresh token 會輪換，所以不算在快取的判斷裡。
+- 資料夾（#99）：存放位置寫入 `.kanade-tmp` 後核對再改名到位；`.kanade-store` 確認是同一個位置，NAS 沒掛載時不寫到底下的本機磁碟；和資料目錄同一顆磁碟時遵守磁碟保留空間。只讀來源以修改時間判斷變動，搬動的檔案依內容找回；一次不見超過一半（且超過 20 首）時當成沒掛載，不標成遺失。播放直接讀原檔，不經過快取。
+- R2／S3（#100）：endpoint、bucket、prefix、金鑰；path-style，金鑰只存在伺服器、不回傳。新增或換金鑰時先連線測試（最多 45 秒，沒有回應就說明是連不上），存放位置寫入 `.kanade-store`，prefix 不能和其他位置重疊。64 MiB 以下整檔上傳，以上分段（每段至少 16 MiB、最多 10000 段），upload ID 與已完成的分段存在 `upload_sessions`，續傳時以 ListParts 核對 ETag；物件的 metadata 存 Kanade 算的 `sha256`，上傳後以 HEAD 核對大小與 metadata，不符就刪除。ETag 只當版本，不當內容雜湊。刪除是複製到 `.kanade-trash/YYYYMMDD/` 再刪原物件；每天清掉 30 天以上的垃圾與 7 天以上沒完成的分段上傳。用量每 6 小時（寫入後提早）列出物件加總。請求失敗時退避重試 4 次；bucket 保持私有，播放經伺服器以 Range 讀進快取。
+- OneDrive（#95）：使用者在 Microsoft Entra 註冊應用程式（Web 平台、重新導向 `/oauth/onedrive/callback`；公開網址不是 https 網域時用 `http://localhost/...` 再貼上網址，和 Google 相同），新增時填用戶端 ID、用戶端密碼、租用戶與雲端，接著登入：state 存在 `oauth_states`（10 分鐘），只讀來源要求 `offline_access Files.Read`、存放位置要求 `Files.ReadWrite`；登入後記下 drive ID 與帳號，已選資料夾時不接受另一個 OneDrive 的帳號。存取權杖只放記憶體，refresh token 輪換後存回。再用資料夾選擇器選資料夾（存放位置可以新增資料夾），同一個 OneDrive 的位置不能重疊。下載連結快取 20 分鐘，401／403／404／410 時重新取得；429、503 依 Retry-After 等待（最多 2 分鐘、5 次）。檔案的鍵是 item ID，改名或搬移後不變；版本是 cTag。存放：上傳工作階段每段 10 MiB，續傳時依 `nextExpectedRanges`；名稱中 OneDrive 不收的字元換成全形，同名不同內容時用「名稱 (2)」；完成後核對大小與 quickXorHash，不符就刪除。刪除進 OneDrive 的回收筒。用戶端密碼最長 24 個月過期，可以更換（先用 refresh token 試過；登入本身失效時仍換上，之後重新連線）。
+- 雲端來源的匯入：掃描時排入的檔案沒有本機路徑，`fetch` 記下版本、雜湊，以及同資料夾（碟片資料夾也看上一層）的圖片與同名 LRC（最多 12 張圖）；分析時以 Range 讀標籤，輪到它時才下載到暫存（遵守暫存空間），以 OneDrive 的 quickXorHash 核對、下載前後的版本必須相同，再由 Kanade 計算 SHA-256；匯入完成後刪除暫存副本，曲庫讀原處的檔案。資料夾裡的封面圖片原位引用，不另外存一份。新匯入的去處無法使用時（例如沒有連線 Drive、也沒有存放位置），只讀來源的歌仍可匯入，但只內嵌在音檔裡的封面不會保存、需要轉檔或分軌的檔案匯入失敗（之後可重試），設定頁會說明。匯入失敗的檔案在任務的「重試」時重新下載；掃描不會重複排入沒變動的失敗檔案，免得每 6 小時的自動掃描一直重試壞檔。
+- 檢查（`internal/storesync`）：每 10 分鐘檢查各位置是否可用；只讀來源預設每 6 小時掃描並自動匯入新檔案；存放位置每天核對曲庫的檔案還在。逾時：儲存位置的 HTTP 用戶端在服務端 2 分鐘沒有回應標頭時放棄並照常重試（原本用沒有逾時的預設用戶端，對方卡住時請求會一直等）。
+- 網頁端：設定 →「儲存位置」選新匯入的去處、每個位置的狀態與用量、曲庫有幾首在那裡；新增對話框分資料夾、R2／S3、OneDrive 三種，各有設定說明（R2 權杖的權限、Entra 的註冊步驟與要登記的重新導向 URI、雲端選擇）；OneDrive 的連線對話框（新分頁登入後自動接著選資料夾，或貼上網址）、資料夾選擇器（路徑、上一層、新增資料夾）、重新連線、更換資料夾、更新用戶端密碼；bucket 的更新金鑰。歌曲詳細資料、遺失的檔案與刪除的說明依檔案所在的位置。
+- 驗證：
+  - Go 測試：簽章用 AWS 文件的範例值；假 S3 在伺服器端獨立驗證簽章，測整檔與分段上傳、第 3 段失敗後續傳、放棄的上傳、核對失敗時刪除、垃圾桶與清理、輪換的金鑰、離線與不回應的服務（45 秒上限，測試中縮短）；對 `rclone serve s3` 實測（只在開發環境，測試名稱含 CJK 與特殊字元的路徑、第 2 段被拒後續傳）。假 Microsoft 登入與 Graph：登入（偽造與重複使用的 state、拒絕授權）、資料夾分頁、略過隱藏資料夾、搬移後同一個鍵、下載連結過期後重新取得、權杖過期刷新並存回輪換的 refresh token、節流等待、撤銷的登入記成 `store_auth`、上傳工作階段續傳與工作階段消失後重來、同名不同內容、相同內容沿用、回收筒、只讀來源不寫入、錯誤與正確的用戶端密碼、中國雲的登入網址。匯入：bucket 來源（碟片資料夾、上一層的封面、LRC、內容改變後重新匯入、不見後標成遺失）；OneDrive 來源以 quickXorHash 擋下損壞的下載（不會被當成檔案）、重試後重新下載並匯入、沒有任何寫入、暫存沒有留下副本。API：新增、callback 與貼上網址（另一個位置的 state 被拒）、資料夾、新增資料夾（只讀來源 409）、選資料夾、和只讀來源重疊、使用中不能換資料夾。完整測試含 `-race` 通過。
+  - Chromium（示範資料，bucket 用 `rclone serve s3`）：錯誤金鑰在新增對話框說明且不新增、正確的新增並寫入標記、設為新匯入的位置、上傳的歌存進 bucket 並從 bucket 播放（Range、跳轉）、用量、錯誤與正確的新金鑰、bucket 只讀來源掃描匯入（資料夾圖片成為封面）並從原處播放、沒有寫入來源與暫存沒有副本、刪除後進 `.kanade-trash`。OneDrive（示範環境連不到 Microsoft，登入後的 Graph 回應由測試提供）：新增表單、要登記的重新導向 URI、登入網址與要求的權限、callback 拒絕不是這裡產生的 state、還沒連線與還沒選資料夾的提示、資料夾選擇器（進入、路徑回上一層、只讀來源不能新增資料夾）、選定後提議掃描、手機寬度。沒有真的 R2 或 OneDrive 帳號，實際服務只有在正式環境使用時才會確認。
 
 ## 使用方式（開發環境）
 

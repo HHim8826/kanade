@@ -14,7 +14,7 @@ const itemStates = {
   excluded: '已排除', expanded: '已展開', split: '已分軌', discarded: '已捨棄',
 };
 const batchStates = { analyzing: '分析中', review: '等待確認', running: '進行中', done: '完成', canceled: '已取消' };
-const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳', inbox: 'Drive 收件匣' };
+const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload: '上傳', inbox: 'Drive 收件匣', source: '來源掃描' };
 
 const fmtWhen = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
@@ -111,7 +111,7 @@ export function Tasks() {
   const clearable = t && (downloads.some((d) => d.clearable) || imports.some((b) => b.clearable) || hasMore('downloads') || hasMore('imports'));
   const clearAll = () => confirmDialog({
     title: '清除已結束的記錄', action: '清除',
-    children: html`<p>從任務清單移除所有已結束的下載與匯入記錄。已入庫的歌曲、專輯和 Drive 上的檔案都不受影響；還在進行、做種，或還有檔案沒存進曲庫的任務會留著。</p>`,
+    children: html`<p>從任務清單移除所有已結束的下載與匯入記錄。已入庫的歌曲、專輯和存好的檔案都不受影響；還在進行、做種，或還有檔案沒存進曲庫的任務會留著。</p>`,
     onConfirm: async () => {
       const r = await post('/tasks/clear');
       toast(`已移除 ${r.downloads} 個下載和 ${r.imports} 個匯入的記錄`);
@@ -132,7 +132,7 @@ export function Tasks() {
     </div>
     <${ErrorBox} error=${tasks.error} onRetry=${tasks.reload} />
     ${tasks.data && tasks.data.disk && tasks.data.disk.low && html`<div class="error-box" role="alert"><span>
-      磁碟空間不足（剩 ${fmtBytes(tasks.data.disk.free_bytes)}，需保留 ${fmtBytes(tasks.data.disk.reserve_bytes)}）：已清掉播放快取${tasks.data.disk.stopped ? '，並暫停下載、暫不接受新的下載與上傳' : ''}。空間恢復後會自動繼續，不會刪除還沒存進 Drive 的檔案。</span></div>`}
+      磁碟空間不足（剩 ${fmtBytes(tasks.data.disk.free_bytes)}，需保留 ${fmtBytes(tasks.data.disk.reserve_bytes)}）：已清掉播放快取${tasks.data.disk.stopped ? '，並暫停下載、暫不接受新的下載與上傳' : ''}。空間恢復後會自動繼續，不會刪除還沒存好的檔案。</span></div>`}
     ${!tasks.data && !tasks.error && html`<${Spinner} />`}
     ${t && html`
       ${clearable && html`<div class="task-tools"><button class="btn text" onClick=${clearAll}><${Icon} name="delete" />清除已結束的記錄</button></div>`}
@@ -365,7 +365,7 @@ function ImportCard({ b, onChange }) {
   const done = total - (c.pending || 0) - (c.uploading || 0);
   const clear = () => post(`/imports/${b.id}/clear`).then(onChange, (e) => toast(e.message, 'error'));
   const retry = () => post(`/imports/${b.id}/retry`).then((r) => { toast(retried(r), r.lost ? 'error' : 'info'); onChange(); }, (e) => toast(e.message, 'error'));
-  const kept = { upload: '原始檔留在伺服器的暫存空間', download: '下載的檔案會保留', inbox: '檔案留在 Drive 收件匣' }[b.kind] || '';
+  const kept = { upload: '原始檔留在伺服器的暫存空間', download: '下載的檔案會保留', inbox: '檔案留在 Drive 收件匣', source: '檔案留在來源原處' }[b.kind] || '';
   const discard = () => confirmDialog({
     title: '捨棄未存進曲庫的檔案', action: '捨棄', danger: true,
     children: html`<p>這次匯入有 ${b.unsaved} 個檔案沒有存進曲庫（原因見下方各檔案）。捨棄後就不再重試，${b.kind === 'upload' ? '伺服器上的上傳暫存會刪除' : b.kind === 'download' ? '下載的檔案會在下載任務結束（做種的在做種結束）後刪除' : '不會刪除任何檔案'}。</p>`,

@@ -1427,7 +1427,7 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) ([]string, error) {
 			continue
 		}
 		var fileID sql.NullString
-		tx.QueryRowContext(ctx, `SELECT drive_file_id FROM assets WHERE id = ?`, a).Scan(&fileID)
+		tx.QueryRowContext(ctx, `SELECT file_ref FROM assets WHERE id = ?`, a).Scan(&fileID)
 		for _, q := range []string{
 			`UPDATE import_items SET asset_id = NULL WHERE asset_id = ?`,
 			`DELETE FROM plays WHERE asset_id = ?`,
@@ -1441,7 +1441,7 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) ([]string, error) {
 		if fileID.Valid && fileID.String != "" {
 			drive = append(drive, fileID.String)
 			// Owed to the Drive trash until it is there, in the same transaction (review #26).
-			if _, err := tx.ExecContext(ctx, `INSERT INTO drive_trash (file_id, created_at) VALUES (?, ?) ON CONFLICT (file_id)
+			if _, err := tx.ExecContext(ctx, `INSERT INTO file_trash (file_id, created_at) VALUES (?, ?) ON CONFLICT (file_id)
 				DO UPDATE SET created_at = excluded.created_at, done_at = 0, tries = 0, next_at = 0, last_error = ''`,
 				fileID.String, db.Now()); err != nil {
 				return nil, err

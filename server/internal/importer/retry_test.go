@@ -243,7 +243,7 @@ func TestDeletedSongIsNotSavedElsewhere(t *testing.T) {
 	waitState(t, im, second, BatchDone)
 	os.Rename(p, p+".away")
 	var drive string
-	im.db.QueryRow(`SELECT a.drive_file_id FROM assets a JOIN import_items i ON i.asset_id = a.id WHERE i.batch_id = ?`, second).Scan(&drive)
+	im.db.QueryRow(`SELECT a.file_ref FROM assets a JOIN import_items i ON i.asset_id = a.id WHERE i.batch_id = ?`, second).Scan(&drive)
 	lib.ObserveDriveFile(ctx, library.DriveObservation{ID: drive})
 	if res, err := im.Retry(ctx, again()); err != nil || res != (RetryResult{Fetching: 1}) {
 		t.Fatalf("missing in Drive: %+v %v", res, err)
