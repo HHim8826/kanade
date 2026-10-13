@@ -251,11 +251,10 @@ func TestSkippedSongStops(t *testing.T) {
 		t.Fatalf("b: %q", g)
 	}
 	eventually(t, "a stopped", func() bool { return enc.cancelled.Load() == 1 })
+	// Its unfinished file goes as its making ends, once the encoder has stopped.
+	eventually(t, "a's unfinished file gone", func() bool { names, _ := os.ReadDir(s.dir); return len(names) == 1 })
 	if _, err := os.Stat(s.path(a.SHA256)); !os.IsNotExist(err) {
 		t.Fatal("a skipped song was kept")
-	}
-	if names, _ := os.ReadDir(s.dir); len(names) != 1 {
-		t.Fatalf("left in the folder: %v", names)
 	}
 }
 
