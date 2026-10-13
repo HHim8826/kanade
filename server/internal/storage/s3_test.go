@@ -6,9 +6,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/HHim8826/kanade/server/internal/db"
 
 	"github.com/HHim8826/kanade/server/internal/storage/storagetest"
 )
@@ -327,3 +330,92 @@ func TestR2EndpointWithItsBucket(t *testing.T) {
 		t.Fatalf("added: %v", err)
 	}
 }
+
+// A bucket store added before with an R2 endpoint ending with its bucket's name has the bucket taken
+// out by migration 44, its folder saying where its files are: each file's path is what it was (so
+// the library's keys stay), and the bucket's listing asks for the bucket. Other stores stay as they
+// were.
+func TestR2EndpointWithItsBucketMigrated(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "db.sqlite")
+	old, err := db.OpenVersion(ctx, path, 43)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const acct = "https://0123abcd.r2.cloudflarestorage.com"
+	before := map[string]S3Config{
+		"r2":      {Endpoint: acct + "/test", Bucket: "music", Prefix: "kanade", Region: "auto"},
+		"deeper":  {Endpoint: acct + "/test/sub/", Bucket: "music", Region: "auto"},
+		"right":   {Endpoint: acct, Bucket: "music", Prefix: "kanade", Region: "auto"},
+		"proxied": {Endpoint: "https://minio.example/s3", Bucket: "music", Prefix: "kanade", Region: "us-east-1"},
+	}
+	for name, cfg := range before {
+		raw, _ := json.Marshal(cfg)
+		if _, err := old.Exec(`INSERT INTO stores (kind, name, mode, config, created_at) VALUES ('s3', ?, 'managed', ?, 1)`, name, string(raw)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old.Exec(`INSERT INTO stores (kind, name, mode, config, created_at) VALUES ('local', 'nas', 'managed', '{"root":"/mnt/nas/test"}', 1)`)
+	old.Close()
+	d, err := db.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	after := map[string]S3Config{}
+	rows, _ := d.Query(`SELECT name, config FROM stores WHERE kind = 's3'`)
+	for rows.Next() {
+		var name, raw string
+		rows.Scan(&name, &raw)
+		var cfg S3Config
+		json.Unmarshal([]byte(raw), &cfg)
+		after[name] = cfg
+	}
+	rows.Close()
+	want := map[string]S3Config{
+		"r2":      {Endpoint: acct, Bucket: "test", Prefix: "music/kanade", Region: "auto"},
+		"deeper":  {Endpoint: acct, Bucket: "test", Prefix: "sub/music", Region: "auto"},
+		"right":   before["right"],
+		"proxied": before["proxied"],
+	}
+	for name, w := range want {
+		if after[name] != w {
+			t.Fatalf("%s: %+v, want %+v", name, after[name], w)
+		}
+	}
+	var local string
+	d.QueryRow(`SELECT config FROM stores WHERE kind = 'local'`).Scan(&local)
+	if local != `{"root":"/mnt/nas/test"}` {
+		t.Fatalf("a folder store changed: %s", local)
+	}
+	// Each file's path as it was; the listing asks for the bucket now.
+	asked := func(cfg S3Config, do func(*S3)) string {
+		var got string
+		client := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
+			got = r.URL.EscapedPath() + "?" + r.URL.RawQuery
+			return nil, errors.New("not sent")
+		})}
+		b, err := newS3("x", Managed, cfg, S3Secret{AccessKey: "k", SecretKey: "s"}, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		do(b)
+		return got
+	}
+	defer func(b func(int) time.Duration) { s3Backoff = b }(s3Backoff)
+	s3Backoff = func(int) time.Duration { return 0 }
+	for _, name := range []string{"r2", "deeper"} {
+		open := func(b *S3) { b.Open(ctx, "library/Artist/01.flac", 0, -1) }
+		if was, is := asked(before[name], open), asked(after[name], open); was != is {
+			t.Fatalf("%s: a file read from %s, was %s", name, is, was)
+		}
+		list := func(b *S3) { b.Walk(ctx, func(Object) error { return nil }) }
+		if got := asked(after[name], list); !strings.HasPrefix(got, "/test?") {
+			t.Fatalf("%s: listed with %s", name, got)
+		}
+	}
+}
+
+type roundTrip func(*http.Request) (*http.Response, error)
+
+func (f roundTrip) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
