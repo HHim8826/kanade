@@ -416,7 +416,13 @@ func (o *OneDrive) Stat(ctx context.Context, key string) (Object, error) {
 	return it.object(it.Name), nil
 }
 
-// link is a download link of an item: one Graph gave in the last minutes, or a new one.
+// errNoLink is a file Graph gave without its download link: its /content is asked instead.
+var errNoLink = errors.New("OneDrive gave no download link for the file")
+
+// link is a download link of an item: one Graph gave in the last minutes, or a new one. A file Graph
+// gives without one is errNoLink, not gone: Graph has left the link out of a personal OneDrive's
+// files, which were then taken for gone though they were there (their songs and covers 503). Only
+// an item Graph does not have (404), or a folder, is not there.
 func (o *OneDrive) link(ctx context.Context, key string, fresh bool) (string, error) {
 	o.mu.Lock()
 	l, ok := o.links[key]
@@ -425,23 +431,128 @@ func (o *OneDrive) link(ctx context.Context, key string, fresh bool) (string, er
 		return l.url, nil
 	}
 	var it odItem
-	if err := o.call(ctx, http.MethodGet, o.item(key)+"?$select=id,deleted,file,@microsoft.graph.downloadUrl", nil, &it); err != nil {
+	if err := o.call(ctx, http.MethodGet, o.item(key)+"?$select=id,deleted,file,folder,@microsoft.graph.downloadUrl", nil, &it); err != nil {
 		return "", err
 	}
-	if it.Deleted != nil || it.File == nil || it.Link == "" {
+	if it.Folder != nil {
 		return "", ErrNotFound
 	}
+	if it.Deleted != nil || it.File == nil || it.Link == "" {
+		return "", errNoLink // not what Graph says of a file there: its /content says what it is
+	}
+	o.keepLink(key, it.Link)
+	return it.Link, nil
+}
+
+func (o *OneDrive) keepLink(key, link string) {
 	o.mu.Lock()
 	if len(o.links) > 2000 {
 		clear(o.links)
 	}
-	o.links[key] = odLink{it.Link, o.now()}
+	o.links[key] = odLink{link, o.now()}
 	o.mu.Unlock()
-	return it.Link, nil
+}
+
+// setRange asks for bytes [start, end] (end < 0: to the end) of a file.
+func setRange(req *http.Request, start, end int64) {
+	if start > 0 || end >= 0 {
+		r := fmt.Sprintf("bytes=%d-", start)
+		if end >= 0 {
+			r += strconv.FormatInt(end, 10)
+		}
+		req.Header.Set("Range", r)
+	}
+}
+
+// served is the file's bytes from start in an answer to a read: one not honouring the range sent
+// the whole file, skipped to start. ok is false for an answer that is not the file's bytes.
+func served(resp *http.Response, start int64) (rc io.ReadCloser, ok bool, err error) {
+	switch {
+	case resp.StatusCode == http.StatusPartialContent || (resp.StatusCode == http.StatusOK && start == 0):
+		return resp.Body, true, nil
+	case resp.StatusCode == http.StatusOK: // the range not honoured: skipped to
+		if _, err := io.CopyN(io.Discard, resp.Body, start); err != nil {
+			resp.Body.Close()
+			return nil, true, offline("OneDrive: %v", err)
+		}
+		return resp.Body, true, nil
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		resp.Body.Close()
+		return nil, true, fmt.Errorf("OneDrive: %s", resp.Status)
+	}
+	return nil, false, nil
+}
+
+// fromContent reads a file Graph gave without its download link through its /content, which
+// redirects to the link (kept as the file's for the next reads), or sends bytes [start, end] itself.
+// A token refused is refreshed once; throttling is waited out.
+func (o *OneDrive) fromContent(ctx context.Context, key string, start, end int64) (string, io.ReadCloser, error) {
+	_, graph := o.cfg.hosts()
+	client := *o.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	stale := ""
+	for n := 1; ; n++ {
+		tok, err := o.token(ctx, stale)
+		if err != nil {
+			return "", nil, err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, graph+o.item(key)+"/content", nil)
+		if err != nil {
+			return "", nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		setRange(req, start, end)
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil {
+				return "", nil, ctx.Err()
+			}
+			if n >= 3 {
+				return "", nil, offline("OneDrive: %v", unwrapNet(err))
+			}
+			if err := wait(ctx, odBackoff(n)); err != nil {
+				return "", nil, err
+			}
+			continue
+		}
+		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+			resp.Body.Close()
+			loc, err := resp.Location()
+			if err != nil {
+				return "", nil, fmt.Errorf("%w (%s)", errNoLink, resp.Status)
+			}
+			o.keepLink(key, loc.String())
+			return loc.String(), nil, nil
+		}
+		if rc, ok, err := served(resp, start); ok {
+			return "", rc, err
+		}
+		var e odError
+		json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&e)
+		resp.Body.Close()
+		msg := strings.TrimSpace(e.Error.Code + ": " + e.Error.Message)
+		switch {
+		case resp.StatusCode == http.StatusUnauthorized && stale == "":
+			stale = tok // expired or revoked early: refreshed once
+		case resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone:
+			return "", nil, fmt.Errorf("%w: %s", ErrNotFound, msg)
+		case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == 509 || resp.StatusCode >= 500:
+			if n >= odTries {
+				return "", nil, offline("OneDrive is busy (%s); try again later", resp.Status)
+			}
+			if err := wait(ctx, retryAfter(resp, n)); err != nil {
+				return "", nil, err
+			}
+		case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
+			return "", nil, fmt.Errorf("%w: %s", ErrAuth, msg)
+		default:
+			return "", nil, fmt.Errorf("OneDrive: reading the file: %s %s", resp.Status, msg)
+		}
+	}
 }
 
 // Open reads with the item's download link (no token: the link is its own), asking for another
-// when it has expired.
+// when it has expired; a file Graph gives without one is read through its /content.
 func (o *OneDrive) Open(ctx context.Context, key string, start, end int64) (io.ReadCloser, error) {
 	if err := o.ready(); err != nil {
 		return nil, err
@@ -449,6 +560,12 @@ func (o *OneDrive) Open(ctx context.Context, key string, start, end int64) (io.R
 	fresh := false
 	for n := 1; ; n++ {
 		link, err := o.link(ctx, key, fresh)
+		if errors.Is(err, errNoLink) {
+			var rc io.ReadCloser
+			if link, rc, err = o.fromContent(ctx, key, start, end); rc != nil {
+				return rc, nil
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -456,13 +573,7 @@ func (o *OneDrive) Open(ctx context.Context, key string, start, end int64) (io.R
 		if err != nil {
 			return nil, err
 		}
-		if start > 0 || end >= 0 {
-			r := fmt.Sprintf("bytes=%d-", start)
-			if end >= 0 {
-				r += strconv.FormatInt(end, 10)
-			}
-			req.Header.Set("Range", r)
-		}
+		setRange(req, start, end)
 		resp, err := o.client.Do(req)
 		if err != nil {
 			if ctx.Err() != nil {
@@ -474,18 +585,8 @@ func (o *OneDrive) Open(ctx context.Context, key string, start, end int64) (io.R
 			wait(ctx, odBackoff(n))
 			continue
 		}
-		switch {
-		case resp.StatusCode == http.StatusPartialContent || (resp.StatusCode == http.StatusOK && start == 0):
-			return resp.Body, nil
-		case resp.StatusCode == http.StatusOK: // the range not honoured: skipped to
-			if _, err := io.CopyN(io.Discard, resp.Body, start); err != nil {
-				resp.Body.Close()
-				return nil, offline("OneDrive: %v", err)
-			}
-			return resp.Body, nil
-		case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
-			resp.Body.Close()
-			return nil, fmt.Errorf("OneDrive: %s", resp.Status)
+		if rc, ok, err := served(resp, start); ok {
+			return rc, err
 		}
 		resp.Body.Close()
 		if n >= odTries {

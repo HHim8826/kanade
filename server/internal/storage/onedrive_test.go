@@ -187,6 +187,51 @@ func TestOneDriveSource(t *testing.T) {
 	}
 }
 
+// A file Graph gives without its download link (it has left it out of a personal OneDrive's files,
+// which were then taken for gone: their songs and covers 503) is read through its /content: from the
+// link it redirects to, kept for the next reads and asked for again when it expires, or from the
+// bytes it sends itself. One gone is not there still.
+func TestOneDriveNoLinks(t *testing.T) {
+	ctx := context.Background()
+	g := fakeGraph(t)
+	music := g.Add("Music", nil)
+	one := g.Add("Music/Album/01 One.flac", []byte("fLaC-one-0123456789"))
+	two := g.Add("Music/Album/02 Two.flac", []byte("fLaC-two"))
+	s, _ := newSet(t)
+	st := signIn(t, s, g, Source)
+	if _, err := s.SetFolder(ctx, st.ID, music); err != nil {
+		t.Fatal(err)
+	}
+	g.NoLinks = true
+	ref := Ref(KindOneDrive, st.ID, one)
+	if got := read(t, s, ref, 5, 7); got != "one" || g.Requests["content"] != 1 {
+		t.Fatalf("a range without a link: %q (%d asked)", got, g.Requests["content"])
+	}
+	if got := read(t, s, ref, 0, -1); got != "fLaC-one-0123456789" || g.Requests["content"] != 1 {
+		t.Fatalf("the link it redirected to not kept: %q (%d asked)", got, g.Requests["content"])
+	}
+	g.ExpireLinks()
+	if got := read(t, s, ref, 9, -1); got != "0123456789" || g.Requests["content"] != 2 {
+		t.Fatalf("after the link expired: %q (%d asked)", got, g.Requests["content"])
+	}
+	g.ContentServes = true
+	g.ExpireLinks()
+	if got := read(t, s, ref, 5, 7); got != "one" {
+		t.Fatalf("a range sent by /content: %q", got)
+	}
+	if got := read(t, s, Ref(KindOneDrive, st.ID, two), 0, -1); got != "fLaC-two" {
+		t.Fatalf("a file sent by /content: %q", got)
+	}
+	for _, links := range []bool{true, false} {
+		g.NoLinks, g.ContentServes = links, false
+		g.Delete(two)
+		g.ExpireLinks()
+		if _, err := s.Open(ctx, Ref(KindOneDrive, st.ID, two), 0, -1); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("deleted in OneDrive (no links %v): %v", links, err)
+		}
+	}
+}
+
 // A OneDrive as a managed store: a folder made and chosen; files kept with names OneDrive takes,
 // the same file once, another under a free name, large ones in upload sessions that resume, each
 // checked against OneDrive's quickXorHash of it; deleted to the recycle bin.

@@ -40,6 +40,11 @@ type Graph struct {
 	Hold func(r *http.Request)
 	// Damage has a download of the item deliver other bytes than its own (its last one changed).
 	Damage func(id string) bool
+	// NoLinks leaves the download link out of the items it gives, as Graph has done for files of a
+	// personal OneDrive: their /content is asked instead.
+	NoLinks bool
+	// ContentServes has /content send the bytes itself instead of redirecting to the download link.
+	ContentServes bool
 	// Requests counts requests by what they are ("token", "children", "download", "upload", ...).
 	Requests map[string]int
 }
@@ -306,8 +311,15 @@ func (g *Graph) view(it *Item) map[string]any {
 		file["hashes"] = map[string]string{"quickXorHash": g.QuickXor(it.Data)}
 	}
 	v["file"] = file
-	v["@microsoft.graph.downloadUrl"] = fmt.Sprintf("%s/download/%s?gen=%d", g.URL, url.PathEscape(it.ID), g.links)
+	if !g.NoLinks {
+		v["@microsoft.graph.downloadUrl"] = g.link(it)
+	}
 	return v
+}
+
+// link is the item's download link now.
+func (g *Graph) link(it *Item) string {
+	return fmt.Sprintf("%s/download/%s?gen=%d", g.URL, url.PathEscape(it.ID), g.links)
 }
 
 // pathOf is a folder's path below the root ("" for the root).
@@ -403,6 +415,18 @@ func (g *Graph) api(w http.ResponseWriter, r *http.Request, p string) {
 		}
 		it.Deleted = true
 		w.WriteHeader(http.StatusNoContent)
+	case tail == "content" && r.Method == http.MethodGet:
+		g.Requests["content"]++
+		if it.Deleted || it.Folder {
+			graphError(w, http.StatusNotFound, "itemNotFound")
+			return
+		}
+		if g.ContentServes {
+			sendRange(w, r, it.Data)
+			return
+		}
+		w.Header().Set("Location", g.link(it))
+		w.WriteHeader(http.StatusFound)
 	case tail == "children" && r.Method == http.MethodGet:
 		g.Requests["children"]++
 		var kids []*Item
@@ -471,6 +495,11 @@ func (g *Graph) download(w http.ResponseWriter, r *http.Request, escaped string)
 	if g.Damage != nil && g.Damage(id) && len(data) > 0 {
 		data = append(append([]byte{}, data[:len(data)-1]...), data[len(data)-1]^0xff)
 	}
+	sendRange(w, r, data)
+}
+
+// sendRange sends data, or the range of it asked for.
+func sendRange(w http.ResponseWriter, r *http.Request, data []byte) {
 	if rng := r.Header.Get("Range"); rng != "" {
 		a, b, _ := strings.Cut(strings.TrimPrefix(rng, "bytes="), "-")
 		start, _ := strconv.Atoi(a)
