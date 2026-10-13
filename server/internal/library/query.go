@@ -74,6 +74,9 @@ type AlbumQuery struct {
 	Recent        bool  // the latest made first, else by album artist and title
 	Category      int64 // > 0: in this category; -1: in no category
 	Search        string
+	// Place picks albums with a song whose file is in Google Drive ("drive") or in a storage
+	// location ("<kind>:<id>", #99).
+	Place string
 }
 
 func (s *Store) AlbumsBy(ctx context.Context, q AlbumQuery) ([]AlbumSummary, error) {
@@ -89,6 +92,16 @@ func (s *Store) AlbumsBy(ctx context.Context, q AlbumQuery) ([]AlbumSummary, err
 		args = append(args, q.Category)
 	case q.Category < 0:
 		where = append(where, `al.id NOT IN (SELECT album_id FROM album_categories)`)
+	}
+	switch {
+	case q.Place == "drive":
+		where = append(where, `al.id IN (SELECT e.album_id FROM album_entries e JOIN assets a ON a.id = e.asset_id
+			WHERE coalesce(a.file_ref, '') != '' AND instr(a.file_ref, ':') = 0)`)
+	case q.Place != "":
+		prefix := q.Place + ":"
+		where = append(where, `al.id IN (SELECT e.album_id FROM album_entries e JOIN assets a ON a.id = e.asset_id
+			WHERE substr(a.file_ref, 1, ?) = ?)`)
+		args = append(args, len(prefix), prefix)
 	}
 	if t := strings.TrimSpace(q.Search); t != "" {
 		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(t) + "%"

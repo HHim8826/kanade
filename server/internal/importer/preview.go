@@ -259,7 +259,7 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 		if enc != "" && !slices.Contains(media.Encodings(), enc) {
 			return badOp("unknown encoding %q", enc)
 		}
-		b, _ := json.Marshal(batchOptions{Encoding: enc})
+		b, _ := json.Marshal(batchOptions{Encoding: enc, Store: im.options(ctx, batchID).Store})
 		if _, err := im.db.ExecContext(ctx, `UPDATE import_batches SET options = ? WHERE id = ?`, string(b), batchID); err != nil {
 			return err
 		}

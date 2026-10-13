@@ -3,7 +3,9 @@ package importer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -352,8 +354,9 @@ func (im *Importer) queueSource(ctx context.Context, st *storage.Store, root str
 	}
 	defer tx.Rollback()
 	now := db.Now()
-	r, err := tx.ExecContext(ctx, `INSERT INTO import_batches (kind, source, state, preview, root, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		"source", st.Name, BatchAnalyzing, preview, root, now)
+	opts, _ := json.Marshal(batchOptions{Store: st.ID})
+	r, err := tx.ExecContext(ctx, `INSERT INTO import_batches (kind, source, state, preview, root, options, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"source", st.Name, BatchAnalyzing, preview, root, string(opts), now)
 	if err != nil {
 		return 0, err
 	}
@@ -382,6 +385,24 @@ func (im *Importer) queueSource(ctx context.Context, st *storage.Store, root str
 	}
 	im.Wake()
 	return batchID, nil
+}
+
+// sourceCategory puts the album a source's song went into in the category the source's albums go
+// in (#92), as it is set now.
+func (im *Importer) sourceCategory(ctx context.Context, batchID, entryID int64) {
+	if entryID == 0 {
+		return
+	}
+	var category, album int64
+	err := im.db.QueryRowContext(ctx, `SELECT s.category, e.album_id FROM import_batches b
+		JOIN stores s ON s.id = json_extract(b.options, '$.store') JOIN album_entries e ON e.id = ?
+		WHERE b.id = ? AND b.kind = 'source' AND s.category IS NOT NULL`, entryID, batchID).Scan(&category, &album)
+	if err == nil {
+		err = im.lib.AddImported(ctx, album, category)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		im.log.Warn("put a source's album in its category", "batch", batchID, "err", err)
+	}
 }
 
 // noteSource records what became of a source's file once its import is recorded.

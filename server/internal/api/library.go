@@ -19,6 +19,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/lite"
+	"github.com/HHim8826/kanade/server/internal/storage"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
 
@@ -53,6 +54,21 @@ func (s *Server) albums(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		q.Category = id
+	}
+	switch p := r.URL.Query().Get("place"); p {
+	case "", "drive":
+		q.Place = p
+	default: // a storage location (#99)
+		id, err := strconv.ParseInt(p, 10, 64)
+		var st *storage.Store
+		if err == nil && s.files != nil {
+			st, err = s.files.Get(r.Context(), id)
+		}
+		if err != nil || st == nil {
+			writeError(w, http.StatusBadRequest, errors.New(`place is "drive" or a storage location's ID`))
+			return
+		}
+		q.Place = st.Kind + ":" + p
 	}
 	list, err := s.lib.AlbumsBy(r.Context(), q)
 	if err != nil {

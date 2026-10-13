@@ -4,7 +4,7 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { loadPlaces } from '../places.js';
 import { confirmDialog, Field, textDialog, useRunner } from './organize.js';
-import { Dialog, ErrorBox, Icon, copyText, fmtBytes, html, showDialog, toast } from '../ui.js';
+import { Dialog, ErrorBox, Icon, copyText, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
 
 const kinds = { local: '資料夾', s3: 'R2／S3', onedrive: 'OneDrive' };
 const modes = { managed: '存放位置', source: '只讀來源' };
@@ -45,6 +45,22 @@ function scanLine(st) {
     ${s.error && html`<span class="sub state-failed">${s.error}</span>`}`;
 }
 
+// CategoryField picks the category a source's albums go in when they are imported (#92).
+function CategoryField({ value, onChange, disabled, field }) {
+  const cats = useLoad(() => get('/categories').then((v) => v.categories), []);
+  if (!cats.data) return null;
+  const pick = html`<select value=${String(value || 0)} disabled=${disabled} onChange=${(e) => onChange(Number(e.target.value))}>
+    <option value="0">不放進分類</option>
+    ${cats.data.map((c) => html`<option key=${c.id} value=${String(c.id)}>${c.name}</option>`)}
+  </select>`;
+  const hint = cats.data.length
+    ? '只影響之後匯入的專輯；已在曲庫的，可以在曲庫的專輯頁依來源篩選後全選加入。'
+    : '還沒有分類；可以在曲庫的「分類」建立。';
+  return field
+    ? html`<label class="field">匯入的專輯放進分類${pick}<span class="hint tight">${hint}</span></label>`
+    : html`<div class="store-category"><label class="select-field">新匯入的專輯放進分類${pick}</label><span class="sub">${hint}</span></div>`;
+}
+
 function StoreRow({ st, isDefault, onChange }) {
   const [busy, run] = useRunner();
   const scan = (preview) => run(async () => {
@@ -62,6 +78,11 @@ function StoreRow({ st, isDefault, onChange }) {
     onSubmit: async (name) => { await api('PATCH', `/storage/${st.id}`, { name: name.trim() }); onChange(); },
   });
   const auto = (on) => run(async () => { await api('PATCH', `/storage/${st.id}`, { auto_scan: on }); onChange(); });
+  const categorize = (category) => run(async () => {
+    await api('PATCH', `/storage/${st.id}`, { category });
+    toast(category ? '之後從這裡匯入的專輯會放進這個分類' : '之後從這裡匯入的專輯不放進分類');
+    onChange();
+  });
   const makeDefault = () => run(async () => {
     await api('PUT', '/storage/default', { id: st.id });
     toast(`新匯入的音樂會存到「${st.name}」`);
@@ -101,6 +122,7 @@ function StoreRow({ st, isDefault, onChange }) {
       <span class="grow"><span class="title">自動匯入新檔案</span><span class="sub">每 6 小時掃描一次：新的檔案直接匯入，不見的標成遺失、回來的恢復。</span></span>
       <input type="checkbox" role="switch" checked=${st.auto_scan} disabled=${busy} onChange=${(e) => auto(e.target.checked)} />
     </label>`}
+    ${st.mode === 'source' && html`<${CategoryField} value=${st.category} disabled=${busy} onChange=${categorize} />`}
     <div class="actions">
       ${od && !st.signed_in && html`<button class="btn filled" onClick=${connect}><${Icon} name="cloud" />連線 OneDrive</button>`}
       ${od && st.signed_in && !odConfig(st).folder && html`<button class="btn filled" onClick=${pickFolder}><${Icon} name="folder" />選擇資料夾</button>`}
@@ -191,6 +213,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
   const [root, setRoot] = useState('');
   const [bucket, setBucket] = useState({ endpoint: '', bucket: '', prefix: 'kanade', region: 'auto', access_key_id: '', secret_access_key: '' });
   const [app, setApp] = useState({ client_id: '', client_secret: '', tenant: 'common', region: '' });
+  const [category, setCategory] = useState(0);
   const [error, setError] = useState(null);
   const [busy, run] = useRunner();
   const suggested = dataDir ? dataDir.replace(/\/$/, '') + '/library' : '';
@@ -208,7 +231,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
     if (!ready || busy) return;
     setError(null);
     run(async () => {
-      const body = { kind, mode, name: name.trim() || fallbackName() };
+      const body = { kind, mode, name: name.trim() || fallbackName(), category: mode === 'source' ? category : 0 };
       if (kind === 'local') {
         body.config = { root: root.trim() };
       } else if (kind === 'onedrive') {
@@ -270,6 +293,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
           <${Field} label="區域" value=${bucket.region} onInput=${setB('region')} placeholder="auto" />
         </div>
         <p class="hint tight">在 Cloudflare 的 R2 →「管理 API 權杖」建立權杖：${mode === 'managed' ? '權限選「物件讀取和寫入」' : '權限選「物件唯讀」即可'}，並限定這個 bucket。端點在 bucket 的「設定」裡（S3 API）。Bucket 保持私有：播放時由伺服器簽章讀取。金鑰只存在伺服器，不會再顯示。其他 S3 相容服務（MinIO、Backblaze B2 等）也可以，區域照服務填寫。</p>`}
+      ${mode === 'source' && html`<${CategoryField} field value=${category} onChange=${setCategory} />`}
       <${Field} label="名稱（可不填）" value=${name} onInput=${setName} placeholder=${kind === 's3' ? '例如：R2 音樂庫' : kind === 'onedrive' ? '例如：OneDrive 音樂' : mode === 'managed' ? '例如：NAS 音樂庫' : '例如：NAS 上的收藏'} maxLength=${60} />
       <${ErrorBox} error=${error} />
       <button type="submit" hidden></button>

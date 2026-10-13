@@ -161,8 +161,9 @@ func (s *Server) changeStore(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Name     *string         `json:"name"`
 		AutoScan *bool           `json:"auto_scan"`
-		Secret   json.RawMessage `json:"secret"` // a bucket's new keys, a OneDrive app's client secret
-		Folder   *string         `json:"folder"` // a OneDrive's folder (its item ID)
+		Secret   json.RawMessage `json:"secret"`   // a bucket's new keys, a OneDrive app's client secret
+		Folder   *string         `json:"folder"`   // a OneDrive's folder (its item ID)
+		Category *int64          `json:"category"` // a source: the category its albums go in (#92), 0: none
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -182,6 +183,12 @@ func (s *Server) changeStore(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Folder != nil && !s.setStoreFolder(w, r, st, *req.Folder) {
 		return
+	}
+	if req.Category != nil {
+		if err := s.files.SetCategory(r.Context(), st.ID, *req.Category); err != nil {
+			s.storeError(w, r, err)
+			return
+		}
 	}
 	if len(req.Secret) > 0 {
 		if _, err := s.files.SetKeys(r.Context(), st.ID, req.Secret); err != nil {

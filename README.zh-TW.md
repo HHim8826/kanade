@@ -73,6 +73,8 @@ curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade
 - **Cloudflare R2（或其他 S3 相容服務）**：在 Cloudflare 的 R2 →「管理 API 權杖」建立權杖，存放位置選「物件讀取和寫入」、只讀來源選「物件唯讀」，並限定這個 bucket；把 Access Key ID、Secret Access Key、bucket 的 S3 API 端點（`https://<帳戶 ID>.r2.cloudflarestorage.com`）、bucket 名稱和裡面的資料夾填到 Kanade。Bucket 保持私有：由伺服器簽章讀取，播放時以 Range 讀取。大檔案分段上傳，中斷後可以續傳；刪除的檔案移到 bucket 裡的 `.kanade-trash/`，保留 30 天。金鑰之後可以用「更新金鑰」更換，新的金鑰會先試過能用才換上。
 - **OneDrive**：和 Google Drive 一樣，Kanade 使用你自己註冊的應用程式，你的登入不會經過任何其他人的伺服器。到 [Microsoft Entra →「應用程式註冊」](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) 新增註冊，帳戶類型選個人與組織帳戶，Web 重新導向 URI 填 `https://<你的網址>/oauth/onedrive/callback`（設定頁會顯示；用 IP 位址連線時，Kanade 用 `http://localhost/oauth/onedrive/callback`，你再把瀏覽器最後停住的網址貼回來）；接著在「憑證及秘密」新增用戶端密碼，複製它的「值」。登入時 Kanade 會要求 `Files.Read`（只讀來源）或 `Files.ReadWrite`（存放位置），不用另外加 API 權限，也不需要系統管理員同意。登入後再選擇資料夾。也支援中國的 OneDrive（世紀互聯）和美國政府雲。只讀來源的歌曲在匯入時逐首下載，用 OneDrive 的 quickXorHash 核對，播放時從 OneDrive 串流。用戶端密碼最長 24 個月後過期，用「更新用戶端密碼」換新的。
 
+只讀來源可以指定一個分類：之後從它匯入的專輯自動放進這個分類。曲庫的「專輯」頁有儲存位置時，可以依來源篩選（全部、Google Drive 或某個位置），篩選後全選就能一次整理已經匯入的專輯。
+
 在不同位置之間搬移檔案是另外的功能，之後才做；所以曲庫還有檔案在某個存放位置時，不能移除它。
 
 ## 目錄

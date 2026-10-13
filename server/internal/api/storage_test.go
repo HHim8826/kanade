@@ -151,6 +151,13 @@ func TestStorageSource(t *testing.T) {
 	if rec := do(t, h, "PUT", "/api/v1/storage/default", token, map[string]any{"id": "1"}); rec.Code != http.StatusConflict {
 		t.Fatalf("a source as the default: %d %s", rec.Code, rec.Body)
 	}
+	cat := decode[struct{ ID int64 }](t, do(t, h, "POST", "/api/v1/categories", token, map[string]string{"name": "NAS"}).Body)
+	if rec := do(t, h, "PATCH", "/api/v1/storage/1", token, map[string]any{"category": cat.ID + 1}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("a category that is not there: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "PATCH", "/api/v1/storage/1", token, map[string]any{"category": cat.ID}); rec.Code >= 300 {
+		t.Fatalf("category: %d %s", rec.Code, rec.Body)
+	}
 	go s.importer.Run(t.Context())
 	if rec := do(t, h, "POST", "/api/v1/storage/1/scan", token, nil); rec.Code != http.StatusAccepted {
 		t.Fatalf("scan: %d %s", rec.Code, rec.Body)
@@ -164,8 +171,22 @@ func TestStorageSource(t *testing.T) {
 	}
 	var scan struct{ Files, New int }
 	json.Unmarshal(st.Scan, &scan)
-	if st.Use.Songs != 1 || scan.Files != 1 || scan.New != 1 {
+	if st.Use.Songs != 1 || scan.Files != 1 || scan.New != 1 || st.Category != cat.ID {
 		t.Fatalf("scanned: %+v %s", st, st.Scan)
+	}
+	// The album is in the source's category, and listed by where its files are.
+	albums := func(query string) string {
+		rec := do(t, h, "GET", "/api/v1/albums?"+query, token, nil)
+		if rec.Code != 200 {
+			return fmt.Sprint(rec.Code)
+		}
+		return fmt.Sprint(len(decode[[]library.AlbumSummary](t, rec.Body)))
+	}
+	for query, want := range map[string]string{"": "1", "place=1": "1", "place=drive": "0", "category=" + fmt.Sprint(cat.ID): "1",
+		"place=2": "400", "place=local:1": "400"} {
+		if got := albums(query); got != want {
+			t.Errorf("albums?%s: %s, want %s", query, got, want)
+		}
 	}
 	rec := do(t, h, "DELETE", "/api/v1/storage/1", token, nil)
 	if rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"songs":1}` {

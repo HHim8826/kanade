@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -284,5 +285,96 @@ func TestSourceSongDeleted(t *testing.T) {
 	os.Chtimes(filepath.Join(src, "01.mp3"), future, future)
 	if res, _ := im.ScanSource(ctx, set, st.ID, false); res.Changed != 1 {
 		t.Fatalf("changed after being let go of: %+v", res)
+	}
+}
+
+// A source's albums go in the category it names (#92), as it is set when they are imported; the
+// library lists albums by where their files are.
+func TestSourceCategory(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	startWorker(t, im)
+	src := t.TempDir()
+	song := func(rel, album string) {
+		taggedMP3(t, filepath.Join(src, rel), map[string]string{"TIT2": "Song " + album, "TPE1": "Band", "TALB": album, "TRCK": "1"})
+	}
+	song("A/01.mp3", "Album A")
+	c, err := lib.CreateCategory(ctx, "NAS 收藏")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := json.Marshal(map[string]string{"root": src})
+	if _, err := set.Add(ctx, storage.NewStore{Kind: storage.KindLocal, Name: "Managed", Mode: storage.Managed, Config: json.RawMessage(`{"root":"` + t.TempDir() + `"}`), Category: c.ID}); err == nil {
+		t.Fatal("a managed location with a category")
+	}
+	if _, err := set.Add(ctx, storage.NewStore{Kind: storage.KindLocal, Name: "NAS", Mode: storage.Source, Config: cfg, Category: 999}); err == nil {
+		t.Fatal("a category that is not there")
+	}
+	st, err := set.Add(ctx, storage.NewStore{Kind: storage.KindLocal, Name: "NAS", Mode: storage.Source, Config: cfg, Category: c.ID})
+	if err != nil || st.Category != c.ID {
+		t.Fatalf("added %+v %v", st, err)
+	}
+	// In review, the encoding changed: the batch still knows its source.
+	res, err := im.ScanSource(ctx, set, st.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, im, res.Batch, BatchReview)
+	enc := "big5"
+	if err := im.ApplyOp(ctx, res.Batch, PlanOp{Op: "encoding", Encoding: &enc}); err != nil {
+		t.Fatal(err)
+	}
+	if got := im.options(ctx, res.Batch); got.Store != st.ID || got.Encoding != enc {
+		t.Fatalf("options %+v", got)
+	}
+	waitState(t, im, res.Batch, BatchReview)
+	if err := im.Start(ctx, res.Batch); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, im, res.Batch, "done")
+	in := func(q library.AlbumQuery) string {
+		t.Helper()
+		list, err := lib.AlbumsBy(ctx, q)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, a := range list {
+			names = append(names, a.Title)
+		}
+		return strings.Join(names, ",")
+	}
+	if got := in(library.AlbumQuery{Limit: 10, Category: c.ID}); got != "Album A" {
+		t.Fatalf("in the category: %q", got)
+	}
+	// No category any more: the next album stays out of it.
+	if err := set.SetCategory(ctx, st.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	song("B/01.mp3", "Album B")
+	res, err = im.ScanSource(ctx, set, st.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, im, res.Batch, "done")
+	if got := in(library.AlbumQuery{Limit: 10, Category: c.ID}); got != "Album A" {
+		t.Fatalf("in the category: %q", got)
+	}
+	if got := in(library.AlbumQuery{Limit: 10, Place: "local:" + strconv.FormatInt(st.ID, 10)}); got != "Album A,Album B" {
+		t.Fatalf("in the folder: %q", got)
+	}
+	if got := in(library.AlbumQuery{Limit: 10, Place: "drive"}) + in(library.AlbumQuery{Limit: 10, Place: "local:99"}); got != "" {
+		t.Fatalf("elsewhere: %q", got)
+	}
+	// The category removed: the source puts albums in none.
+	if err := set.SetCategory(ctx, st.ID, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lib.DeleteCategory(ctx, c.ID); err != nil {
+		t.Fatal(err)
+	}
+	if st, _ := set.Get(ctx, st.ID); st.Category != 0 {
+		t.Fatalf("still %d", st.Category)
 	}
 }

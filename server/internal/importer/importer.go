@@ -976,6 +976,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		return out, err
 	}
 	im.rememberSourceAlbum(ctx, it, res.EntryID)
+	im.sourceCategory(ctx, it.batchID, res.EntryID)
 	if it.plan != nil && it.plan.Section != "" && res.EntryID != 0 { // a collection's section (review #82)
 		var album int64
 		if im.db.QueryRowContext(ctx, `SELECT album_id FROM album_entries WHERE id = ?`, res.EntryID).Scan(&album) == nil {

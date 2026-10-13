@@ -184,6 +184,14 @@ type CategorizeRequest struct {
 	Create string  `json:"create"`
 }
 
+// AddImported puts an album an import brought in a category (a source's, #92), unless it is in it
+// already or the category is gone. It is how the album came, not an edit of the user's.
+func (s *Store) AddImported(ctx context.Context, album, category int64) error {
+	_, err := s.db.ExecContext(ctx, `INSERT OR IGNORE INTO album_categories (category_id, album_id, added_at)
+		SELECT id, ?, ? FROM categories WHERE id = ?`, album, db.Now(), category)
+	return err
+}
+
 // Categorize applies a CategorizeRequest after checking every album and category.
 func (s *Store) Categorize(ctx context.Context, req CategorizeRequest) (group int64, created *Category, err error) {
 	albums := uniqueIDs(req.Albums)

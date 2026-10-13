@@ -357,6 +357,7 @@ func unplayable(info *media.Info) string {
 type batchOptions struct {
 	Encoding string    `json:"encoding,omitempty"` // re-decode legacy tag bytes with this encoding (D2 §4)
 	Grouping *Grouping `json:"grouping,omitempty"` // how its songs go into albums (review #82)
+	Store    int64     `json:"store,omitempty"`    // a source's batch: the source (#99)
 }
 
 func (im *Importer) options(ctx context.Context, batchID int64) batchOptions {

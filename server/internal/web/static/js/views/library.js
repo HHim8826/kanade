@@ -173,9 +173,16 @@ const trackFilters = [['', '全部'], ['no_album', '未分類（沒有專輯）'
 export function Library({ tab = 'albums', filter = '' }) {
   const rev = useLibRev();
   const paged = !tabURL[tab];
-  if (tab !== 'tracks' || !trackFilters.some(([k]) => k === filter)) filter = '';
   if (!tabs.some(([k]) => k === tab)) tab = 'albums';
-  const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? '&filter=' + filter : ''}`;
+  // Albums by where their files are (#95): Google Drive or a storage location, by its ID.
+  if (tab === 'tracks' ? !trackFilters.some(([k]) => k === filter) : tab !== 'albums' || !/^(drive|\d+)$/.test(filter)) filter = '';
+  const where = useStore(places);
+  const stores = where.stores;
+  // A location removed since the address was made.
+  const gone = tab === 'albums' && where.loaded && /^\d+$/.test(filter) && !stores.some((st) => String(st.id) === filter);
+  const placeFilters = tab === 'albums' && (stores.length || filter)
+    ? [['', '全部'], ['drive', 'Google Drive'], ...stores.map((st) => [String(st.id), st.name])] : [];
+  const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? (tab === 'albums' ? '&place=' : '&filter=') + filter : ''}`;
   const data = useLoad(() => get(base), [base], rev);
   // Later pages, for this tab, filter and library version only (review #9).
   const key = `${base}:${rev}`;
@@ -214,9 +221,12 @@ export function Library({ tab = 'albums', filter = '' }) {
     </nav>
     ${tab === 'tracks' && html`<nav class="seg filter-seg" aria-label="篩選">${trackFilters.map(([k, label]) => html`<a key=${k}
       class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/tracks' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
+    ${placeFilters.length > 0 && html`<nav class="seg filter-seg" aria-label="來源">${placeFilters.map(([k, label]) => html`<a key=${k}
+      class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/albums' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
     ${tab === 'tracks' && filter === 'no_album' && html`<${FolderCard} rev=${rev} />`}
-    ${data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
-    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} />`}
+    ${gone ? html`<${Empty} icon="album">這個儲存位置已經移除了。<//>`
+      : data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
+    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} empty=${filter ? '這裡沒有專輯。' : undefined} />`}
     ${list && tab === 'artists' && html`<ul class="list">
       ${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
         <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}</span><span class="sub">${a.tracks} 首</span></a></li>`)}

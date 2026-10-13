@@ -42,6 +42,7 @@ type Store struct {
 	Usage     *Usage          `json:"usage,omitempty"`
 	AutoScan  bool            `json:"auto_scan"`
 	Scan      json.RawMessage `json:"scan,omitempty"`
+	Category  int64           `json:"category,omitempty"` // a source: the category its albums go in (#92)
 	CreatedAt int64           `json:"created_at"`
 	secret    string
 }
@@ -107,13 +108,13 @@ func tried(err error, where string) error {
 	return err
 }
 
-const storeCols = `id, kind, name, mode, config, secret, state, error, checked_at, usage, auto_scan, scan, created_at`
+const storeCols = `id, kind, name, mode, config, secret, state, error, checked_at, usage, auto_scan, scan, coalesce(category, 0), created_at`
 
 func scanStore(row interface{ Scan(...any) error }) (*Store, error) {
 	var st Store
 	var config, usage, scan string
 	if err := row.Scan(&st.ID, &st.Kind, &st.Name, &st.Mode, &config, &st.secret, &st.State, &st.Error, &st.CheckedAt,
-		&usage, &st.AutoScan, &scan, &st.CreatedAt); err != nil {
+		&usage, &st.AutoScan, &scan, &st.Category, &st.CreatedAt); err != nil {
 		return nil, err
 	}
 	st.Config = json.RawMessage(config)
@@ -503,6 +504,8 @@ type NewStore struct {
 	Mode   string          `json:"mode"`
 	Config json.RawMessage `json:"config"`
 	Secret json.RawMessage `json:"secret,omitempty"`
+	// Category is where a source's albums are put (#92); 0: none.
+	Category int64 `json:"category,omitempty"`
 }
 
 // ErrInvalid is a store that cannot be added as asked; the message says why.
@@ -575,8 +578,11 @@ func (s *Set) Add(ctx context.Context, n NewStore) (*Store, error) {
 	default:
 		return nil, invalid("unknown kind %q", n.Kind)
 	}
-	r, err := s.DB.ExecContext(ctx, `INSERT INTO stores (kind, name, mode, config, secret, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-		n.Kind, n.Name, n.Mode, string(config), string(secret), db.Now())
+	if err := s.checkCategory(ctx, n.Mode, n.Category); err != nil {
+		return nil, err
+	}
+	r, err := s.DB.ExecContext(ctx, `INSERT INTO stores (kind, name, mode, config, secret, category, created_at) VALUES (?, ?, ?, ?, ?, nullif(?, 0), ?)`,
+		n.Kind, n.Name, n.Mode, string(config), string(secret), n.Category, db.Now())
 	if err != nil {
 		return nil, err
 	}
@@ -682,6 +688,39 @@ func (s *Set) Rename(ctx context.Context, id int64, name string) error {
 func (s *Set) SetAutoScan(ctx context.Context, id int64, on bool) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE stores SET auto_scan = ? WHERE id = ?`, on, id)
 	return err
+}
+
+// SetCategory has the albums a source brings put in a category (#92); 0: in none. Albums it brought
+// before stay where they are.
+func (s *Set) SetCategory(ctx context.Context, id, category int64) error {
+	st, err := s.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	if st == nil {
+		return ErrNoStore
+	}
+	if err := s.checkCategory(ctx, st.Mode, category); err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, `UPDATE stores SET category = nullif(?, 0) WHERE id = ?`, category, id)
+	return err
+}
+
+func (s *Set) checkCategory(ctx context.Context, mode string, category int64) error {
+	if category == 0 {
+		return nil
+	}
+	if mode != Source {
+		return invalid("only a source's albums are put in a category")
+	}
+	var one int
+	if err := s.DB.QueryRowContext(ctx, `SELECT 1 FROM categories WHERE id = ?`, category).Scan(&one); errors.Is(err, sql.ErrNoRows) {
+		return invalid("there is no category %d", category)
+	} else if err != nil {
+		return err
+	}
+	return nil
 }
 
 // SetScan records the last scan (a source) or check (a managed store) of a store.
