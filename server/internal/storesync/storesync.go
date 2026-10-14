@@ -162,15 +162,17 @@ func (s *Syncer) Reconcile(ctx context.Context, id int64) (res Result, err error
 	} else if now.State != storage.StateOK {
 		return res, errors.New(now.Error)
 	}
+	// What the library keeps there is read first: a file an import or a move puts there while it is
+	// listed is checked next time, not taken for one gone.
+	uses, err := s.Lib.StoreRefs(ctx, st.Kind, id)
+	if err != nil {
+		return res, err
+	}
 	there := map[string]int64{}
 	if err := b.Walk(ctx, func(o storage.Object) error { there[o.Key] = o.Size; return nil }); err != nil {
 		return res, err // a partial listing marks nothing
 	}
 	res.Files = len(there)
-	uses, err := s.Lib.StoreRefs(ctx, st.Kind, id)
-	if err != nil {
-		return res, err
-	}
 	var gone, back []string
 	for _, u := range uses {
 		_, _, key, _ := storage.Parse(u.Ref)

@@ -166,7 +166,12 @@ func (s *Server) tasks(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	out := map[string]any{"downloads": downloads, "imports": imports, "more_downloads": moreDownloads, "more_imports": moreImports, "now": now}
+	moves, err := s.mover.List(r.Context())
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	out := map[string]any{"downloads": downloads, "imports": imports, "moves": moves, "more_downloads": moreDownloads, "more_imports": moreImports, "now": now}
 	if s.disk != nil {
 		out["disk"] = s.disk.Status() // low disk: the task page says what is held back
 	}
@@ -242,5 +247,10 @@ func (s *Server) clearTasks(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]int{"downloads": downloads, "imports": imports})
+	moves, err := s.mover.Clear(r.Context(), 0)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]int{"downloads": downloads, "imports": imports, "moves": moves})
 }

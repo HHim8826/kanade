@@ -3,6 +3,7 @@ import { api, get, post } from '../api.js';
 import { href } from '../router.js';
 import { Dialog, Empty, ErrorBox, FilePick, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast } from '../ui.js';
 import { Field, confirmDialog, done } from './organize.js';
+import { MoveCard } from './moves.js';
 import { go } from '../router.js';
 
 const downloadStates = {
@@ -108,17 +109,23 @@ export function Tasks() {
   const isOlder = (k, id) => older[k] && t && !t[k].some((x) => x.id === id);
   const downloads = list('downloads');
   const imports = list('imports');
-  const clearable = t && (downloads.some((d) => d.clearable) || imports.some((b) => b.clearable) || hasMore('downloads') || hasMore('imports'));
+  const moves = t ? t.moves || [] : [];
+  const clearable = t && (downloads.some((d) => d.clearable) || imports.some((b) => b.clearable) || hasMore('downloads') || hasMore('imports')
+    || moves.some((m) => m.state === 'done' || m.state === 'canceled'));
   const clearAll = () => confirmDialog({
     title: '清除已結束的記錄', action: '清除',
-    children: html`<p>從任務清單移除所有已結束的下載與匯入記錄。已入庫的歌曲、專輯和存好的檔案都不受影響；還在進行、做種，或還有檔案沒存進曲庫的任務會留著。</p>`,
+    children: html`<p>從任務清單移除所有已結束的下載、匯入與搬移記錄。已入庫的歌曲、專輯和存好（或搬好）的檔案都不受影響；還在進行、做種，或還有檔案沒存進曲庫的任務會留著。</p>`,
     onConfirm: async () => {
       const r = await post('/tasks/clear');
-      toast(`已移除 ${r.downloads} 個下載和 ${r.imports} 個匯入的記錄`);
+      toast(`已移除 ${r.downloads} 個下載、${r.imports} 個匯入${r.moves ? `和 ${r.moves} 個搬移` : ''}的記錄`);
       setOlder({ downloads: null, imports: null });
       tasks.reload();
     },
   });
+  // Moves are listed once there are any: first while one is under way.
+  const movesFirst = moves.some((m) => m.state === 'running' || m.state === 'waiting');
+  const moveList = moves.length > 0 && html`<h2 class="section-title">搬移檔案</h2>
+    ${moves.map((m) => html`<${MoveCard} key=${m.id} v=${m} onChange=${tasks.reload} />`)}`;
   const more = (k) => hasMore(k) && html`<button class="btn text more-tasks" disabled=${loadingMore === k} onClick=${() => loadMore(k)}>
     ${loadingMore === k ? '載入中…' : '顯示更早的記錄'}</button>`;
   return html`<section>
@@ -136,6 +143,7 @@ export function Tasks() {
     ${!tasks.data && !tasks.error && html`<${Spinner} />`}
     ${t && html`
       ${clearable && html`<div class="task-tools"><button class="btn text" onClick=${clearAll}><${Icon} name="delete" />清除已結束的記錄</button></div>`}
+      ${movesFirst && moveList}
       <h2 class="section-title">下載</h2>
       ${downloads.length ? downloads.map((d) => html`<${DownloadCard} key=${d.id} d=${d} onSelect=${() => setSelecting(d.id)}
           onChange=${isOlder('downloads', d.id) ? changedOlder('downloads', d.id) : tasks.reload} />`)
@@ -146,6 +154,7 @@ export function Tasks() {
           onChange=${isOlder('imports', b.id) ? changedOlder('imports', b.id) : tasks.reload} />`)
         : html`<${Empty} icon="upload">沒有匯入紀錄<//>`}
       ${more('imports')}
+      ${!movesFirst && moveList}
     `}
     ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(direct) => { setAdding(false); tasks.reload(); toast(direct ? '已加入，空間足夠時開始下載' : '已加入，正在取得檔案清單'); }} />`}
     ${selecting && html`<${SelectFiles} id=${selecting} onClose=${() => setSelecting(null)} onDone=${() => { setSelecting(null); tasks.reload(); }} />`}

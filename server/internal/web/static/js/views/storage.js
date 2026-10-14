@@ -5,6 +5,7 @@ import { api, get, post } from '../api.js';
 import { keepPlaces, loadPlaces } from '../places.js';
 import { confirmDialog, Field, textDialog, useRunner } from './organize.js';
 import { Dialog, ErrorBox, Icon, copyText, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
+import { moveFiles } from './moves.js';
 
 const kinds = { local: '資料夾', s3: 'R2／S3', onedrive: 'OneDrive' };
 const modes = { managed: '存放位置', source: '只讀來源' };
@@ -105,7 +106,7 @@ function StoreRow({ st, isDefault, onChange }) {
     title: `移除「${st.name}」`, action: '移除', danger: st.mode === 'source' && st.use.songs > 0,
     children: st.mode === 'source'
       ? html`<p>${st.use.songs > 0 ? `這個來源的 ${st.use.songs} 首歌會從曲庫移除（連同它們的播放記錄、收藏和歌單項目）。` : ''}這個來源還在預覽或匯入中的檔案會一起取消，不會再匯入。${st.location} 裡的檔案不會動。</p>`
-      : html`<p>只是不再使用這個位置；${st.location} 裡的檔案不會動。</p>`,
+      : html`<p>只是不再使用這個位置；${st.location} 裡的檔案不會動（包括垃圾桶裡的，以及剛搬走、還沒移到垃圾桶的舊副本），不需要的話可以自己刪除。</p>`,
     onConfirm: async () => {
       const r = await api('DELETE', `/storage/${st.id}`);
       toast(r.songs ? `已移除，曲庫少了 ${r.songs} 首歌` : '已移除');
@@ -151,12 +152,13 @@ function StoreRow({ st, isDefault, onChange }) {
       ${ready && html`<button class="btn text" disabled=${busy} onClick=${check}>檢查連線</button>`}
       ${st.kind === 's3' && html`<button class="btn text" onClick=${() => changeKeys(st, onChange)}>更新金鑰</button>`}
       ${od && st.signed_in && html`<button class="btn text" onClick=${connect}>重新連線</button>`}
-      ${od && st.signed_in && odConfig(st).folder && html`<button class="btn text" disabled=${hasFiles || st.running} title=${hasFiles ? '曲庫還有檔案在這個資料夾；搬到別處的功能另外設計' : ''} onClick=${pickFolder}>更換資料夾</button>`}
+      ${st.mode === 'managed' && hasFiles && html`<button class="btn tonal" onClick=${() => moveFiles({ origin: String(st.id), title: st.name, onDone: onChange })}><${Icon} name="move" />搬移到…</button>`}
+      ${od && st.signed_in && odConfig(st).folder && html`<button class="btn text" disabled=${hasFiles || st.running} title=${hasFiles ? '曲庫還有檔案在這個資料夾：先用「搬移到…」把它們搬到別處' : ''} onClick=${pickFolder}>更換資料夾</button>`}
       ${od && html`<button class="btn text" onClick=${() => changeClientSecret(st, onChange)}>更新用戶端密碼</button>`}
       <button class="btn text" onClick=${rename}>重新命名</button>
-      <button class="btn text danger-text" disabled=${inUse || st.running} title=${inUse ? '曲庫還有檔案存在這裡；搬到別處的功能另外設計，目前要先刪除這些歌曲' : ''} onClick=${remove}>移除</button>
+      <button class="btn text danger-text" disabled=${inUse || st.running} title=${inUse ? '曲庫還有檔案存在這裡：先用「搬移到…」把它們搬到別處' : ''} onClick=${remove}>移除</button>
     </div>
-    ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面、附屬檔或內頁圖` : ''}存在這裡，所以不能移除。</p>`}`}
+    ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面、附屬檔或內頁圖` : ''}存在這裡，所以不能移除；用「搬移到…」把它們搬到別處之後就可以${st.use.missing ? `（${st.use.missing} 首遺失的歌沒辦法搬，要先刪除或找回）` : ''}。</p>`}`}
   </div>`;
 }
 
@@ -208,7 +210,8 @@ export function StorageLocations({ first }) {
         ? '還沒連線 Google Drive：匯入會失敗。請連線 Google Drive，或新增一個存放位置並選它。'
         : '這個位置目前無法使用：匯入會失敗，直到它恢復。'}${v.stores.some((s) => s.mode === 'source')
         ? '只讀來源的歌仍可原位匯入，但需要轉檔或分軌的檔案會匯入失敗（之後可以在任務重試），只內嵌在音檔裡的封面也不會保存。' : ''}</div>`}
-      <div class="sub">Google Drive 有曲庫的 ${drive.songs || 0} 首歌。</div>
+      <div class="store-drive"><span class="sub grow">Google Drive 有曲庫的 ${drive.songs || 0} 首歌。</span>
+        ${drive.songs > 0 && (managed.length > 0) && html`<button class="btn text" onClick=${() => moveFiles({ origin: 'drive', title: 'Google Drive', onDone: load })}><${Icon} name="move" />搬移到…</button>`}</div>
     </div>
     ${v.stores.map((st) => html`<${StoreRow} key=${st.id} st=${st} isDefault=${String(st.id) === v.default} onChange=${load} />`)}
     <div class="actions"><button class="btn tonal" onClick=${add}><${Icon} name="add" />新增儲存位置</button></div>`;

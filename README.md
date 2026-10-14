@@ -75,7 +75,7 @@ Each service has its own callback address (`/oauth/google/…`, `/oauth/discord/
 
 A source can name a category: the albums imported from it from then on are put in it. Once there are storage locations, the library's albums can be filtered by where their files are (all, Google Drive, or a location), and selecting them all sorts out the albums already imported at once.
 
-Moving files from one location to another is a feature of its own, still to come: a managed location cannot be removed while the library has files there.
+To change places, move the files: 搬移到… (Move to…) on a managed location's row (or Google Drive's) moves every library file there to another location, and 搬移檔案 (Move files) in an album's menu or on a selection of albums moves just those albums. Each file is copied and checked against its SHA-256 before the library reads it from the new place; the old copy goes to its location's trash 15 minutes later. The task page follows the move, and a destination that is offline or full is tried again by itself. A source's files are never moved. A managed location cannot be removed while the library has files there: move them first.
 
 ## Layout
 

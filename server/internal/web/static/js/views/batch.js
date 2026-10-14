@@ -2,11 +2,12 @@ import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { addToPlaylist, favs } from '../actions.js';
 import { enqueue, fromEntry, playNext, playQueue } from '../player.js';
-import { trashName, trashNote } from '../places.js';
+import { driveOnly, trashName, trashNote } from '../places.js';
 import { go } from '../router.js';
 import { siteName } from '../site.js';
 import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { Field, KindPicker, changed, done, useRunner } from './organize.js';
+import { moveFiles } from './moves.js';
 import { linkAlbumsWorks } from './works.js';
 
 // Acting on several albums or songs at once (review #83): the selection bar's actions and their
@@ -57,6 +58,7 @@ export function AlbumActions({ sel }) {
     <${Btn} icon="work" label="關聯作品…" onClick=${() => linkAlbumsWorks(ids, chosen)} />
     <${Btn} icon="merge" label="合併…" onClick=${() => showDialog((close) => html`<${MergeAlbums} albums=${chosen} close=${close} onDone=${sel.stop} />`)} />
     <${Btn} icon="edit" label="修改資訊…" onClick=${() => showDialog((close) => html`<${EditAlbums} ids=${ids} close=${close} />`)} />
+    ${!driveOnly() && html`<${Btn} icon="move" label="搬移檔案…" onClick=${() => moveFiles({ albums: ids, title: chosen[0] ? chosen[0].title : '' })} />`}
     <${Btn} icon="delete" label="移除…" danger onClick=${() => showDialog((close) => html`<${RemoveAlbums} ids=${ids} close=${close} onDone=${sel.stop} />`)} />`;
 }
 

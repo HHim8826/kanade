@@ -367,6 +367,37 @@ func (c *Cache) forgetLocked(id string) {
 	c.retired[cf] = true
 }
 
+// Moved finds what is cached of a file moved to another place (the same bytes, kept and checked
+// there) under its new reference: a whole copy goes on being played from the cache instead of
+// fetched again. One still being fetched stays under the old reference, let go of as any other.
+func (c *Cache) Moved(from, to string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	cf, ok := c.files[from]
+	if _, taken := c.files[to]; !ok || taken {
+		return
+	}
+	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	if cf.missing > 0 || cf.stale {
+		return
+	}
+	for _, fl := range cf.fillers {
+		if !fl.done {
+			return
+		}
+	}
+	cf.id = to
+	delete(c.files, from)
+	c.files[to] = cf
+	if c.current == from {
+		c.current = to
+	}
+	if c.next == from {
+		c.next = to
+	}
+}
+
 // Budget is the most the cache keeps.
 func (c *Cache) Budget() int64 {
 	c.mu.Lock()

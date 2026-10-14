@@ -14,6 +14,7 @@ import { SubjectRow } from './bangumi.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { viewCover } from './coverview.js';
+import { moveFiles } from './moves.js';
 import { AlbumGallery, openGallery, uploadImages } from './gallery.js';
 import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
   restoreAlbum, splitAlbum, useLibRev, vgmdbAlbum } from './organize.js';
@@ -293,6 +294,7 @@ export function Album({ id }) {
     { icon: 'work', label: '關聯 Bangumi 作品…', onClick: () => linkWorks(a) },
     { icon: 'note', label: a.subject ? 'Bangumi 條目…' : '綁定 Bangumi 條目…', onClick: () => bindSubject(a) },
     a.original && { icon: 'restore', label: '恢復原標籤…', onClick: () => restoreAlbum(a) },
+    !driveOnly() && { icon: 'move', label: '搬移檔案到…', onClick: () => moveFiles({ albums: [a.id], title: a.title }) },
     { icon: 'delete', label: '移除專輯…', onClick: () => removeAlbum(a) },
   ]);
   return html`<section>

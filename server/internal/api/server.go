@@ -40,6 +40,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/lite"
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
+	"github.com/HHim8826/kanade/server/internal/mover"
 	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
@@ -85,6 +86,7 @@ type Deps struct {
 	Settings  *settings.Store  // the service settings the settings page changes
 	Site      *site.Store      // the site's name and icon; nil: Kanade's own
 	Staging   *staging.Budget  // shared by downloads, uploads and the importer
+	Mover     *mover.Mover     // moves files to another storage location; nil: one that is not run
 	Pinned    map[string]bool  // resources given as serve flags: they win until the next start
 	StreamKey []byte           // HMAC key for signed stream URLs
 	Log       *slog.Logger
@@ -116,6 +118,7 @@ type Server struct {
 	storeMu      sync.Mutex
 	storeRunning map[int64]bool // stores being scanned or checked
 	loudness     *loudness.Service
+	mover        *mover.Mover
 	thumbs       *thumbs.Store
 	lite         *lite.Store
 	backup       *backup.Service
@@ -163,7 +166,13 @@ func New(d Deps) *Server {
 			d.Files.Drive = d.Drive
 		}
 	}
-	srv := &Server{proxy: proxy, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, lite: d.Lite, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, files: d.Files, lib: d.Library, importer: d.Importer,
+	if d.Mover == nil {
+		d.Mover = mover.New(d.DB, d.Library, d.Files, d.Config.Path(config.DirStaging, "moves"), d.Log)
+		if d.Cache != nil {
+			d.Mover.OnMoved = d.Cache.Moved
+		}
+	}
+	srv := &Server{proxy: proxy, mover: d.Mover, bgm: d.Bangumi, bgmAccounts: bangumi.NewAccounts(d.DB, d.Bangumi, d.Config.PublicURL), presence: d.Presence, discord: d.Discord, thumbs: d.Thumbs, lite: d.Lite, backup: d.Backup, cfg: d.Config, db: d.DB, auth: d.Auth, drive: d.Drive, files: d.Files, lib: d.Library, importer: d.Importer,
 		cache: d.Cache, downloads: d.Downloads, aria2: d.Aria2, uploads: d.Uploads, mb: d.Identify, lrclib: d.Lyrics, rss: d.RSS, disk: d.Disk, sync: d.Sync, storeSync: d.StoreSync, storeRunning: map[int64]bool{}, streamKey: d.StreamKey, log: d.Log, version: d.Version, started: time.Now(),
 		settings: d.Settings, site: d.Site, staging: d.Staging, pinned: d.Pinned, loudness: d.Loudness}
 	d.Discord.CoverURL = srv.publicCoverURL
@@ -398,6 +407,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/tasks/clear", s.authed(s.clearTasks))
 	mux.Handle("POST /api/v1/downloads/{id}/clear", s.authed(s.clearDownload))
 	mux.Handle("POST /api/v1/imports/{id}/clear", s.authed(s.clearImport))
+	mux.Handle("POST /api/v1/moves/preview", s.authed(s.previewMove))
+	mux.Handle("POST /api/v1/moves", s.authed(s.startMove))
+	mux.Handle("GET /api/v1/moves", s.authed(s.moves))
+	mux.Handle("GET /api/v1/moves/{id}", s.authed(s.move))
+	mux.Handle("POST /api/v1/moves/{id}/cancel", s.authed(s.cancelMove))
+	mux.Handle("POST /api/v1/moves/{id}/retry", s.authed(s.retryMove))
+	mux.Handle("POST /api/v1/moves/{id}/clear", s.authed(s.clearMove))
 
 	mux.Handle("GET /api/v1/rss/sources", s.authed(s.rssSources))
 	mux.Handle("POST /api/v1/rss/sources", s.authed(s.createRSSSource))

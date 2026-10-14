@@ -659,3 +659,35 @@ func TestDriveFailureIsAnswered(t *testing.T) {
 		t.Fatalf("after two failures: %d", rec.Code)
 	}
 }
+
+// A file moved to another place is played from what is cached under its new reference; one not
+// cached whole stays under the old one.
+func TestMovedKeepsTheCopy(t *testing.T) {
+	const size = 2*blockSize + 7
+	c, src := newCache(t, size, 4*size, 0)
+	if rec := get(c, "a", size, ""); !bytes.Equal(rec.Body.Bytes(), src.data) {
+		t.Fatal("first read")
+	}
+	c.Play("a")
+	calls := src.calls.Load()
+	c.Moved("a", "b")
+	if rec := get(c, "b", size, "bytes=5-"); !bytes.Equal(rec.Body.Bytes(), src.data[5:]) || src.calls.Load() != calls {
+		t.Fatalf("moved: %d bytes, %d more requests", rec.Body.Len(), src.calls.Load()-calls)
+	}
+	if _, _, ok := c.Hold("a", "abc"); ok {
+		t.Fatal("still under the old reference")
+	}
+	if cur, _ := c.Playing(); cur != "b" {
+		t.Fatalf("playing %q", cur)
+	}
+	part, _ := c.acquire("c", "abc", size)
+	defer c.release(part)
+	c.Moved("c", "d")
+	c.mu.Lock()
+	_, old := c.files["c"]
+	_, moved := c.files["d"]
+	c.mu.Unlock()
+	if !old || moved {
+		t.Fatalf("a file not cached whole: under the old reference %v, the new %v", old, moved)
+	}
+}

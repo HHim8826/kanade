@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -323,6 +324,26 @@ func (s *Set) Stat(ctx context.Context, ref string) (Object, error) {
 	}
 	o, err := b.Stat(ctx, key)
 	return o, named(st, err)
+}
+
+// FileName is the name a library file has where it is kept: what an import named it (its file's
+// name; a name next to it when that was taken).
+func (s *Set) FileName(ctx context.Context, ref string) (string, error) {
+	if IsDrive(ref) {
+		d, ok := s.Drive.(interface {
+			GetFile(ctx context.Context, id, fields string) (gdrive.File, error)
+		})
+		if !ok {
+			return "", ErrNoStore
+		}
+		f, err := d.GetFile(ctx, ref, "name")
+		return f.Name, err
+	}
+	o, err := s.Stat(ctx, ref)
+	if err != nil {
+		return "", err
+	}
+	return path.Base(o.Path), nil
 }
 
 // Name is the name of the place a reference is in, for people: "Google Drive" or the store's.

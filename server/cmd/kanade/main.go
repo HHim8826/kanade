@@ -41,6 +41,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/logfile"
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
+	"github.com/HHim8826/kanade/server/internal/mover"
 	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
@@ -273,6 +274,11 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	ups.ShareBudget(budget)
 	budget.Use(staging.OnDisk(imp.WorkCommitted))
 	imp.Budget = budget
+	// Moving the library's files to another storage location; a file being played goes on being
+	// played from the stream cache.
+	moves := mover.New(d, lib, files, cfg.Path(config.DirStaging, "moves"), log)
+	moves.Budget = budget
+	moves.OnMoved = cache.Moved
 	imp.SpaceWait = 10 * time.Minute // FFmpeg output waits for space others hold (review #46)
 	imp.Refetch = downloads.Refetch  // files lost before their import are fetched again (review #57)
 	imp.OnBatchDone = func(ctx context.Context, kind, source string, unsaved int) {
@@ -335,7 +341,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	srv := api.New(api.Deps{Config: cfg, DB: d, Auth: authSvc, Drive: drive, Files: files, Library: lib, Importer: imp,
 		Cache: cache, Downloads: downloads, Aria2: aria, Uploads: ups, StreamKey: streamKey, Log: log, Version: version,
 		Identify: mb, Lyrics: lrclib.New(strings.TrimRight(cfg.PublicURL, "/") + "/"), RSS: feeds, Disk: guard, Sync: syncer, StoreSync: stores,
-		Settings: store, Site: named, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Lite: lites, Backup: backups, Presence: players, Discord: status})
+		Settings: store, Site: named, Staging: budget, Pinned: pinned, Loudness: loud, Thumbs: covers, Lite: lites, Backup: backups, Presence: players, Discord: status, Mover: moves})
 	go imp.Run(ctx)
 	go stores.Run(ctx)
 	ariaDone := make(chan struct{})
@@ -346,6 +352,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	go syncer.Run(ctx)
 	go loud.Run(ctx)
 	go backups.Run(ctx)
+	go moves.Run(ctx)
 
 	has, err := authSvc.HasUsers(ctx)
 	if err != nil {

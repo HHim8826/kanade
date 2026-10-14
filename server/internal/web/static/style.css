@@ -628,6 +628,8 @@ input[type=checkbox]:focus-visible, input[type=radio]:focus-visible { outline: 2
 .choice-list { display: flex; flex-direction: column; gap: 8px; }
 .choice-list label { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border: 1px solid var(--outline-variant); border-radius: var(--radius-m); cursor: pointer; }
 .choice-list label.on { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 8%, transparent); }
+.choice-list label.disabled { cursor: default; opacity: 0.55; }
+.store-drive { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .choice-list label > span { display: flex; flex-direction: column; gap: 4px; }
 .choice-list input { margin-top: 2px; }
 .mb-head { display: flex; flex-direction: column; gap: 2px; padding: 12px; border-radius: var(--radius-m); background: var(--surface-container); }

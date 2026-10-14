@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
@@ -63,7 +62,7 @@ func (im *Importer) processSidecar(ctx context.Context, it *item) (outcome, erro
 	if album == nil {
 		return out, errors.New("the album is gone")
 	}
-	dir := "sidecars/" + strings.TrimPrefix(libraryDir(library.EntryInput{Album: album.Title, AlbumArtist: album.AlbumArtist}), "library/")
+	dir := HomeDir("sidecar", album.AlbumArtist, album.Title, "")
 	name := filepath.Base(it.path)
 	var ref string
 	switch df, ok := im.df(); {

@@ -292,15 +292,30 @@ func (im *Importer) imageDir(ctx context.Context, m library.AlbumImage) (string,
 	if album == nil {
 		return "", errors.New("the album is gone")
 	}
-	dir := "images/" + strings.TrimPrefix(libraryDir(library.EntryInput{Album: album.Title, AlbumArtist: album.AlbumArtist}), "library/")
-	if d := path.Dir(m.Path); d != "." {
-		for _, s := range strings.Split(d, "/") {
-			if s = strings.TrimSpace(unsafeChars.Replace(s)); s != "" && s != "." && s != ".." {
-				dir += "/" + s
+	return HomeDir("image", album.AlbumArtist, album.Title, path.Dir(m.Path)), nil
+}
+
+// HomeDir is the folder a managed location keeps an album's file in, as an import puts it: the
+// file's kind's folder (library/ for a song, sidecars/, images/), then the album artist and the
+// album; for a picture, then the folders it was in below the album's (sub). A cover is in covers/.
+func HomeDir(kind, albumArtist, album, sub string) string {
+	dir := libraryDir(library.EntryInput{Album: album, AlbumArtist: albumArtist})
+	switch kind {
+	case "cover":
+		return "covers"
+	case "sidecar":
+		return "sidecars/" + strings.TrimPrefix(dir, "library/")
+	case "image":
+		dir = "images/" + strings.TrimPrefix(dir, "library/")
+		if sub != "." && sub != "" {
+			for _, s := range strings.Split(sub, "/") {
+				if s = strings.TrimSpace(unsafeChars.Replace(s)); s != "" && s != "." && s != ".." {
+					dir += "/" + s
+				}
 			}
 		}
 	}
-	return dir, nil
+	return dir
 }
 
 // putImage uploads the picture at p to the managed store, where imageDir says.
