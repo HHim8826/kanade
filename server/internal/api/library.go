@@ -213,14 +213,41 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	}
 	// Whichever way it comes, this song is the one played: what the server was making or downloading
 	// for the one before, the other way, stops unless a request or the preload holds it (review #208).
+	// A song loaded ahead (pre=1: gapless playback, the next song ready for the moment this one
+	// ends) is the one preloaded instead, until the player says it plays it (playingStream).
+	ahead := r.URL.Query().Get("pre") == "1"
 	if s.wantsLite(r, a) {
-		s.cache.Play(a.Ref)
-		if s.serveLite(w, r, a) {
+		if !ahead {
+			s.cache.Play(a.Ref)
+		}
+		if s.serveLite(w, r, a, ahead) {
 			return
 		}
 	}
+	if ahead {
+		s.cache.ServeAhead(w, r, a.Ref, a.Size, contentType(a.Format), a.SHA256)
+		return
+	}
 	s.lite.Played(a.SHA256)
 	s.cache.Serve(w, r, a.Ref, a.Size, contentType(a.Format), a.SHA256)
+}
+
+// playingStream is a player saying it plays song id now, a song it loaded ahead (gapless playback):
+// from here it is the song played, as a stream request for it would have made it.
+func (s *Server) playingStream(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	a, err := s.lib.StreamTarget(r.Context(), id)
+	if err != nil || a == nil {
+		w.WriteHeader(http.StatusNoContent) // nothing to play: its stream says why
+		return
+	}
+	s.cache.Play(a.Ref)
+	s.lite.Played(a.SHA256)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // streamLite tells a player in lite mode how song id came, asked once its stream answered (review
@@ -260,7 +287,7 @@ func liteSong(a *library.Asset) lite.Song {
 // re-encoded, now or a short while ago (lite.ErrFailed), or is not smaller re-encoded
 // (lite.ErrNotSmaller), so every request of one playing gets the same file; or, long or played from
 // the middle, it is made for the next time (lite.ErrLater, review #226).
-func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.Asset) bool {
+func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.Asset, ahead bool) bool {
 	var from int64 // where the request starts: from the end ("bytes=-500") is not the start either
 	if v, ok := strings.CutPrefix(r.Header.Get("Range"), "bytes="); ok {
 		first, _, _ := strings.Cut(v, "-")
@@ -268,7 +295,11 @@ func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.As
 			from = 1
 		}
 	}
-	f, err := s.lite.Get(r.Context(), liteSong(a), from)
+	get := s.lite.Get
+	if ahead {
+		get = s.lite.GetAhead
+	}
+	f, err := get(r.Context(), liteSong(a), from)
 	var se *lite.SourceError
 	switch {
 	case err == nil:

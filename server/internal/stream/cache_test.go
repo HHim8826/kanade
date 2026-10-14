@@ -542,6 +542,48 @@ func TestPlayStopsTheOneBefore(t *testing.T) {
 	}
 }
 
+// A song a player loads ahead (gapless playback) is the one preloaded, not the one played: the song
+// playing goes on downloading, and the one ahead after its request, until Play says it plays.
+func TestLoadedAheadIsNotPlayed(t *testing.T) {
+	const size = 64 * blockSize
+	src := &slowSource{data: make([]byte, size)}
+	c, err := NewCache(src, t.TempDir(), 1<<30, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	running := func(id string) bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		cf := c.files[id]
+		if cf == nil {
+			return false
+		}
+		cf.mu.Lock()
+		defer cf.mu.Unlock()
+		for _, fl := range cf.fillers {
+			if !fl.done {
+				return true
+			}
+		}
+		return false
+	}
+	get(c, "a", size, "bytes=0-1000")
+	req := httptest.NewRequest("GET", "/x", nil)
+	req.Header.Set("Range", "bytes=0-1000")
+	rec := httptest.NewRecorder()
+	c.ServeAhead(rec, req, "b", size, "audio/flac", "abc")
+	if rec.Code != 206 || rec.Body.Len() != 1001 {
+		t.Fatalf("ahead: %d, %d bytes", rec.Code, rec.Body.Len())
+	}
+	if cur, next := c.Playing(); cur != "a" || next != "b" || !running("a") || !running("b") {
+		t.Fatalf("loaded ahead: playing %q, next %q; a %v, b %v", cur, next, running("a"), running("b"))
+	}
+	c.Play("b")
+	if cur, _ := c.Playing(); cur != "b" || running("a") || !running("b") {
+		t.Fatalf("played: playing %q; a %v, b %v", cur, running("a"), running("b"))
+	}
+}
+
 // A prefetch waits while downloads are running; a request never does.
 func TestPrefetchWaitsItsTurn(t *testing.T) {
 	const size = 64 * blockSize

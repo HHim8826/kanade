@@ -77,6 +77,53 @@ func (p prefixer) Opus(ctx context.Context, src string, in io.Reader, dst string
 	return os.WriteFile(dst, append([]byte("OggS lite of "), data...), 0o600)
 }
 
+// A song loaded ahead (pre=1: gapless playback), re-encoded or not, is not the song played until
+// the player says it plays it (POST .../play).
+func TestStreamLoadedAhead(t *testing.T) {
+	drive := &memDrive{files: map[string][]byte{}, down: map[string]bool{}}
+	s, h := newTestServer(t, func(d *Deps) {
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		cache, err := stream.NewCache(drive, d.Config.Path(config.DirCache), 64<<20, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Cache = cache
+		if d.Lite, err = lite.New(d.Config.Path(config.DirLite), LiteBudget, prefixer{}, cache, log); err != nil {
+			t.Fatal(err)
+		}
+	})
+	token := loginToken(t, s, h)
+	a, b := addSong(t, s, drive, "a1", "flac", 900_000, "fLaC a"+pad), addSong(t, s, drive, "b1", "flac", 900_000, "fLaC b"+pad)
+	get := func(path string) (int, string) {
+		rec := do(t, h, "GET", path, token, nil)
+		return rec.Code, rec.Body.String()
+	}
+	if code, body := get(fmt.Sprintf("/api/v1/stream/%d", a)); code != 200 || body != "fLaC a"+pad {
+		t.Fatalf("a: %d %q", code, body)
+	}
+	if code, body := get(fmt.Sprintf("/api/v1/stream/%d?pre=1", b)); code != 200 || body != "fLaC b"+pad {
+		t.Fatalf("b ahead: %d %q", code, body)
+	}
+	if cur, next := s.cache.Playing(); cur != "d-a1" || next != "d-b1" {
+		t.Fatalf("b loaded ahead: playing %q, next %q", cur, next)
+	}
+	if code, body := get(fmt.Sprintf("/api/v1/stream/%d?q=%s&pre=1", b, lite.Quality)); code != 200 || body != "OggS lite of fLaC b" {
+		t.Fatalf("b ahead in lite mode: %d %q", code, body)
+	}
+	if cur, _ := s.cache.Playing(); cur != "d-a1" {
+		t.Fatalf("b loaded ahead in lite mode: playing %q", cur)
+	}
+	if rec := do(t, h, "POST", fmt.Sprintf("/api/v1/stream/%d/play", b), token, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("play: %d", rec.Code)
+	}
+	if cur, _ := s.cache.Playing(); cur != "d-b1" {
+		t.Fatalf("b played: playing %q", cur)
+	}
+	if rec := do(t, h, "POST", "/api/v1/stream/999999/play", token, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("play of no song: %d", rec.Code)
+	}
+}
+
 func TestStreamLite(t *testing.T) {
 	drive := &memDrive{files: map[string][]byte{}, down: map[string]bool{}}
 	s, h := newTestServer(t, func(d *Deps) {

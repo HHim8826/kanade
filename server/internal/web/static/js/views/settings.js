@@ -298,13 +298,13 @@ function StorageSettings({ conf, status }) {
 }
 
 // Playback: the play mode (the player bar's own), what shuffle draws from, keeping on after the
-// queue, where a chosen song starts and preloading (reviews #72, #73, #78); kept in this browser and
-// applied at once without stopping the song playing.
+// queue, where a chosen song starts, preloading (reviews #72, #73, #78) and gapless playback; kept
+// in this browser and applied at once without stopping the song playing.
 function PlaybackSettings() {
   // One value each: a fresh object would re-render this four times a second while a song plays.
   const s = {
     mode: useStore(player, (p) => p.mode), scope: useStore(player, (p) => p.scope), autoContinue: useStore(player, (p) => p.autoContinue),
-    preload: useStore(player, (p) => p.preload), resume: useStore(player, (p) => p.resume),
+    preload: useStore(player, (p) => p.preload), gapless: useStore(player, (p) => p.gapless), resume: useStore(player, (p) => p.resume),
     lite: useStore(player, (p) => p.lite), liteServer: useStore(player, (p) => p.liteServer),
   };
   useEffect(askLite, []);
@@ -325,6 +325,8 @@ function PlaybackSettings() {
       <p class="hint tight">首頁的「繼續播放／繼續收聽」一定從記錄的位置開始；單曲與列表循環再播一次時一定從頭開始。</p>
       <${Toggle} label="預先載入下一首" sub="播放時先讓伺服器從 Google Drive 或雲端儲存讀好下一首的開頭，切歌較快；網路流量有限時可以關閉。"
         checked=${s.preload} onChange=${(on) => setPrefs({ preload: on })} />
+      <${Toggle} label="無縫播放" sub="每首歌最後半分鐘先載入下一首，在結束的瞬間接上，現場錄音、組曲這類連續的專輯中間不會斷。單曲循環、睡眠定時「這首播完停」、從上次停下的地方繼續的歌，照一般方式換歌。"
+        checked=${s.gapless} onChange=${(on) => setPrefs({ gapless: on })} />
       <${Toggle} label="省流模式" sub=${`歌曲轉成 Opus 128k 串流，每小時約 58 MB（FLAC 約 350 MB），一般聆聽很難聽出差別。從下一首開始生效；128k 這類較小的 MP3 照原檔播放。也可以在播放頁的「⋯」選單切換。${
           !canOpus ? '這個瀏覽器不能播放 Opus，開了也會播放原檔。' : s.liteServer === false ? '伺服器的 FFmpeg 不支援 Opus，開了也會播放原檔。' : ''}`}
         checked=${s.lite} onChange=${(on) => setPrefs({ lite: on })} />

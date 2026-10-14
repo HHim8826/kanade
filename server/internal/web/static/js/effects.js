@@ -90,21 +90,51 @@ const wanted = () => {
   return eq && !flat(gains) && !unsupported;
 };
 
-let element = null, reapply = () => {}, around = () => [], renew = null;
-// want is the volume last asked for (output's), which a new graph starts at (review #140).
-let want = { level: 1, muted: false, gain: 1 };
-const level = () => (want.muted ? 0 : want.level * want.gain);
-// The graph, while the equalizer has a curve: source → master (volume) → pre → bands → speakers.
-let ctx = null, master = null, pre = null, filters = [];
+// element is the player's element playing; elements, every element it has: that one, and the one the
+// next song loads in ahead (gapless playback), each with a volume of its own.
+let element = null, elements = () => [], reapply = () => {}, around = () => [], renew = null;
+// wants holds the volume last asked for each element (output's), which a new graph starts it at
+// (review #140).
+const wants = new WeakMap();
+const level = (el) => {
+  const w = wants.get(el) || wants.get(element) || { level: 1, muted: false, gain: 1 };
+  return w.muted ? 0 : w.level * w.gain;
+};
+// The graph, while the equalizer has a curve: each element's source → its gain (volume) → pre →
+// bands → speakers.
+let ctx = null, pre = null, filters = [];
+const feeds = new Map(); // element -> its gain in the graph
 
-// attach gives the player's audio element, how to apply its volume again (once the graph takes the
-// volume over, or gives it back, or a song's loudness is known), the queue's songs around the one
-// playing, and how to go on with a fresh element.
-export function attach(audio, apply, near, fresh) {
+// attach gives the player's audio element playing, all its elements, how to apply its volume again
+// (once the graph takes the volume over, or gives it back, or a song's loudness is known), the
+// queue's songs around the one playing, and how to go on with fresh elements.
+export function attach(audio, all, apply, near, fresh) {
   element = audio;
+  elements = all;
   reapply = apply;
   around = near;
   renew = fresh;
+  if (ctx) {
+    try {
+      for (const el of elements()) feed(ctx, el);
+    } catch (e) { // an element that would not join it plays without the effects: start again fresh
+      console.warn('sound effects unavailable', e);
+      effects.set({ unsupported: true });
+      teardown();
+    }
+  }
+}
+
+// feed sends an element's sound through the graph c, at its volume from the first sample.
+function feed(c, el) {
+  if (feeds.has(el)) return;
+  const src = c.createMediaElementSource(el);
+  const g = c.createGain();
+  g.gain.value = level(el);
+  src.connect(g).connect(pre);
+  feeds.set(el, g);
+  el.volume = 1;
+  el.muted = false;
 }
 
 function build() {
@@ -117,9 +147,6 @@ function build() {
   let c;
   try {
     c = new AC({ latencyHint: 'playback' });
-    const src = c.createMediaElementSource(element);
-    master = c.createGain();
-    master.gain.value = level(); // from the first sample, not from 1 down to it
     pre = c.createGain();
     filters = BANDS.map((f) => {
       const b = c.createBiquadFilter();
@@ -128,13 +155,17 @@ function build() {
       b.Q.value = Q;
       return b;
     });
-    [src, master, pre, ...filters, c.destination].reduce((a, b) => (a.connect(b), b));
+    [pre, ...filters, c.destination].reduce((a, b) => (a.connect(b), b));
+    for (const el of elements()) feed(c, el);
   } catch (e) {
     console.warn('sound effects unavailable', e);
+    const fed = feeds.size > 0; // an element that joined it cannot leave: the player starts again fresh
+    feeds.clear();
     if (c) c.close().catch(() => {});
-    master = pre = null;
+    pre = null;
     filters = [];
     effects.set({ unsupported: true });
+    if (fed && renew) renew();
     return false;
   }
   ctx = c;
@@ -149,8 +180,9 @@ function build() {
 function teardown() {
   if (!ctx) return;
   const c = ctx;
-  ctx = master = pre = null;
+  ctx = pre = null;
   filters = [];
+  feeds.clear();
   effects.set({ suspended: false });
   if (renew) renew(); // applies the volume there, on the element again
   c.close().catch(() => {});
@@ -212,19 +244,21 @@ export function wake() {
   if (ctx && ctx.state !== 'running') ctx.resume().catch(() => {});
 }
 
-// output applies the volume: level (the volume chosen, faded by the sleep timer), muted, and gain
-// (the balance, linear; it can raise the level only through the graph, else up to the element's 1).
-export function output(volume, muted, gain = 1) {
-  want = { level: volume, muted, gain };
-  if (!element) return;
-  if (!ctx) {
-    element.volume = clamp(volume * Math.min(gain, 1), 0, 1);
-    element.muted = muted;
+// output applies the volume to an element (the one playing unless said): level (the volume chosen,
+// faded by the sleep timer), muted, and gain (the balance, linear; it can raise the level only
+// through the graph, else up to the element's 1).
+export function output(volume, muted, gain = 1, el = element) {
+  if (!el) return;
+  wants.set(el, { level: volume, muted, gain });
+  const g = feeds.get(el);
+  if (!g) {
+    el.volume = clamp(volume * Math.min(gain, 1), 0, 1);
+    el.muted = muted;
     return;
   }
-  element.volume = 1;
-  element.muted = false;
-  master.gain.setTargetAtTime(level(), ctx.currentTime, 0.015);
+  el.volume = 1;
+  el.muted = false;
+  g.gain.setTargetAtTime(level(el), ctx.currentTime, 0.015);
 }
 
 // A graph the browser stopped while something plays is started again by the next tap or key.
@@ -294,19 +328,32 @@ export function learn(items) {
 // halfway (review #143).
 let held = null; // { item, gain }
 export function balanceGain(item) {
-  const { balance, target } = effects.get();
+  const { balance } = effects.get();
   if (balance === 'off' || !item) return 1;
   if (held && held.item === item) return held.gain;
+  const { gain, measured } = gainOf(item);
+  held = measured ? { item, gain } : null; // a guess (the median) gives way to the measurement
+  return gain;
+}
+
+// nextGain is the gain of a song loaded ahead to play next (gapless playback): the song playing
+// keeps its own held.
+export function nextGain(item) {
+  const { balance } = effects.get();
+  if (balance === 'off' || !item) return 1;
+  return held && held.item === item ? held.gain : gainOf(item).gain;
+}
+
+function gainOf(item) {
+  const { balance, target } = effects.get();
   const album = balance === 'album' && item.albumId ? known.albums.get(item.albumId) : null;
   const own = known.assets.get(item.assetId);
   const l = (album && album.v) || (own && own.v);
   const lufs = l ? l.lufs : known.median;
-  if (lufs === null || lufs === undefined) return 1;
+  if (lufs === null || lufs === undefined) return { gain: 1, measured: false };
   let db = target - lufs;
   if (l) db = Math.min(db, -1 - l.peak); // its peaks stay under −1 dBFS
-  const gain = 10 ** (db / 20);
-  held = l ? { item, gain } : null; // a guess (the median) gives way to the measurement
-  return gain;
+  return { gain: 10 ** (db / 20), measured: !!l };
 }
 
 // The balance was on before this page: the server measures the library by itself.

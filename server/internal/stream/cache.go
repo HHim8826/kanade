@@ -637,9 +637,20 @@ func parseRange(h string, size int64) (start, end int64, partial bool, err error
 	return start, end, true, nil
 }
 
-// Serve answers a GET or HEAD for a remote file of the given size.
+// Serve answers a GET or HEAD for a remote file of the given size: the file played.
 // etag identifies the content version (the asset's SHA-256), as the cached copy does.
 func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size int64, contentType, etag string) {
+	c.serve(w, r, id, size, contentType, etag, false)
+}
+
+// ServeAhead answers for the file a player loads ahead, to start it the moment the one playing ends
+// (gapless playback): it is the file preloaded, and the one played keeps its download, until Play
+// says it is played.
+func (c *Cache) ServeAhead(w http.ResponseWriter, r *http.Request, id string, size int64, contentType, etag string) {
+	c.serve(w, r, id, size, contentType, etag, true)
+}
+
+func (c *Cache) serve(w http.ResponseWriter, r *http.Request, id string, size int64, contentType, etag string, ahead bool) {
 	h := w.Header()
 	h.Set("Accept-Ranges", "bytes")
 	h.Set("Content-Type", contentType)
@@ -660,7 +671,9 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 	}
 	h.Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 	if f, ok, err := c.localFile(r.Context(), id, size); ok {
-		c.Play(id)
+		if !ahead {
+			c.Play(id)
+		}
 		if err != nil {
 			c.log.Warn("stream", "file", id, "err", err)
 			c.Unavailable(w, err)
@@ -692,7 +705,11 @@ func (c *Cache) Serve(w http.ResponseWriter, r *http.Request, id string, size in
 	}
 	defer c.release(cf)
 	c.mu.Lock()
-	c.current = id
+	if ahead {
+		c.next = id // goes on downloading after the request, as a preload does
+	} else {
+		c.current = id
+	}
 	c.settleLocked()
 	c.mu.Unlock()
 	// The answer waits for its first bytes (review #167): Drive failing is a 503 that says why,

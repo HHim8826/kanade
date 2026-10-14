@@ -258,6 +258,33 @@ func TestSkippedSongStops(t *testing.T) {
 	}
 }
 
+// A song a player loads ahead (gapless playback) is the one preloaded: the song played goes on being
+// made until the one ahead is played.
+func TestLoadedAheadIsNotPlayed(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	a, b := src.add("a", []byte("song a")), src.add("b", []byte("song b"))
+	src.gate("a")
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { _, err := s.Get(ctx, a, 0); done <- err }()
+	eventually(t, "a started", func() bool { return src.copies.Load() == 1 })
+	cancel() // the request goes; a is still the song played
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatal(err)
+	}
+	f, err := s.GetAhead(context.Background(), b, 0)
+	if g := read(t, f, err); g != "opus:song b" {
+		t.Fatalf("b ahead: %q", g)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if enc.cancelled.Load() != 0 {
+		t.Fatal("a stopped for a song loaded ahead")
+	}
+	s.Played(b.SHA256)
+	eventually(t, "a stopped once b plays", func() bool { return enc.cancelled.Load() == 1 })
+}
+
 func TestPrefetch(t *testing.T) {
 	src, enc := newSource(t), &encoder{}
 	s := store(t, 1<<20, enc, src)

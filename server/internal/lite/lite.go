@@ -149,12 +149,27 @@ func (s *Store) path(sha string) string { return filepath.Join(s.dir, sha+ext) }
 // ErrFailed: it could not be made a short while ago; ErrNotSmaller: it is not worth it; ErrLater:
 // it is made for the next time, sent as it is this time; a *SourceError: the original did not arrive.
 func (s *Store) Get(ctx context.Context, o Song, from int64) (*os.File, error) {
+	return s.get(ctx, o, from, false)
+}
+
+// GetAhead is Get for the song a player loads ahead, to start it the moment the one playing ends
+// (gapless playback): it is the song preloaded, not the one played, until Played says it plays.
+func (s *Store) GetAhead(ctx context.Context, o Song, from int64) (*os.File, error) {
+	return s.get(ctx, o, from, true)
+}
+
+func (s *Store) get(ctx context.Context, o Song, from int64, ahead bool) (*os.File, error) {
 	if !s.Available() {
 		return nil, ErrFailed
 	}
 	key := o.SHA256
 	s.mu.Lock()
-	s.playLocked(key)
+	if ahead {
+		s.next = key
+		s.settleLocked()
+	} else {
+		s.playLocked(key)
+	}
 	if s.later[key] { // every request of one playing gets the same file
 		s.mu.Unlock()
 		return nil, ErrLater

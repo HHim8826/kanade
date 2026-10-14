@@ -1,5 +1,5 @@
 import { api, coverURL, get, post, streamURL } from './api.js';
-import { attach, balanceGain, learn, output, wake } from './effects.js';
+import { attach, balanceGain, learn, nextGain, output, wake } from './effects.js';
 import { driveOnly } from './places.js';
 import { createStore } from './store.js';
 import { toast } from './ui.js';
@@ -27,6 +27,7 @@ export function modeFrom(p) {
 //   autoContinue: when the queue's songs run out, go on with songs from the library (#73);
 //   resume: per kind, whether choosing a song starts it over or where it was left;
 //   preload: warm the next song's stream ahead;
+//   gapless: start the next song the moment this one ends (gapless playback, below);
 //   lite: lite mode, songs re-encoded to use less data (below).
 function loadPrefs() {
   let p = {};
@@ -40,6 +41,7 @@ function loadPrefs() {
     scope: p.scope === 'library' ? 'library' : 'queue',
     autoContinue: !!p.autoContinue,
     preload: p.preload !== false,
+    gapless: p.gapless !== false,
     lite: !!p.lite,
     resume: { music: r.music === 'resume' ? 'resume' : 'start', spoken: r.spoken === 'start' ? 'start' : 'resume' },
   };
@@ -81,14 +83,15 @@ export const clock = createStore({ time: 0 });
 let remote = null;
 export const setRemote = (f) => {
   remote = f;
+  if (f) dropAhead(); // nothing plays here meanwhile
 };
 const routed = (op, args) => remote !== null && remote(op, args);
 export const now = () => clock.get().time;
 
 function savePrefs() {
-  const { volume, muted, mode, scope, autoContinue, preload, lite, resume } = player.get();
+  const { volume, muted, mode, scope, autoContinue, preload, gapless, lite, resume } = player.get();
   try {
-    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, preload, lite, resume }));
+    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, preload, gapless, lite, resume }));
   } catch { /* private mode: the choice lasts for this page */ }
 }
 
@@ -115,18 +118,27 @@ const newAudio = () => {
   return a;
 };
 let audio = newAudio();
+// spare is the other element: the next song loads in it ahead, to start the moment the one playing
+// ends (gapless playback, below), and then the two change places.
+let spare = newAudio();
+const elements = () => [audio, spare];
+let ahead = null; // { item, again, q, armed, timer }: the next song, loaded in spare
+let retiring = null; // the element that played the song before, sounding its last samples
 const listeners = [];
 const on = (type, fn) => {
   listeners.push([type, fn]);
   audio.addEventListener(type, fn);
 };
+const listen = (el) => listeners.forEach(([type, fn]) => el.addEventListener(type, fn));
+const unlisten = (el) => listeners.forEach(([type, fn]) => el.removeEventListener(type, fn));
 const SLEEP_FADE_MS = 20_000;
 // applyVolume sets the volume chosen, faded out over the last seconds of a sleep timer; the fade
-// never touches the setting itself.
+// never touches the setting itself. A song loaded ahead gets its own balance (gapless playback).
 const applyVolume = () => {
   const s = player.get();
   const fade = s.sleep && s.sleep.until ? Math.min(1, Math.max(0, (s.sleep.until - Date.now()) / SLEEP_FADE_MS)) : 1;
   output(s.volume * fade, s.muted, balanceGain(s.queue[s.index])); // through the sound effects' graph once there is one
+  if (ahead) output(s.volume * fade, s.muted, nextGain(ahead.item), spare);
 };
 // near are the songs around the one playing: the volume balance learns how loud they are ahead.
 const near = () => {
@@ -134,15 +146,19 @@ const near = () => {
   return s.queue.slice(Math.max(s.index - 1, 0), s.index + 4);
 };
 // fresh goes on with a new element where the old one was: same song, same place, playing or not.
+// The spare is new too (the next song loads ahead again in it).
 function fresh() {
   const old = audio, src = old.getAttribute('src'), t = old.currentTime, wasPlaying = !old.paused;
-  for (const [type, fn] of listeners) old.removeEventListener(type, fn); // its teardown is no event of ours
+  unlisten(old); // its teardown is no event of ours
   old.pause();
   old.removeAttribute('src');
   old.load();
+  quietSpare();
+  spare = newAudio();
+  unlocked = !iOS;
   audio = newAudio();
-  for (const [type, fn] of listeners) audio.addEventListener(type, fn);
-  attach(audio, applyVolume, near, fresh);
+  listen(audio);
+  attach(audio, elements, applyVolume, near, fresh);
   applyVolume();
   if (!src) return audio;
   if (session) session.last = null; // the jump back to the place is not heard time
@@ -156,7 +172,7 @@ function fresh() {
   }
   return audio;
 }
-attach(audio, applyVolume, near, fresh);
+attach(audio, elements, applyVolume, near, fresh);
 applyVolume();
 
 // The song changing with the phone locked: Chrome on Android ends the page's media session the
@@ -175,9 +191,11 @@ function keep(on) {
     if (!keeper.paused) keeper.pause();
     return;
   }
-  if (!keeper.getAttribute('src')) keeper.src = silence();
+  if (!keeper.getAttribute('src')) keeper.src = silentURL();
   if (keeper.paused) keeper.play().catch(() => {});
 }
+let silent = '';
+const silentURL = () => silent || (silent = silence());
 // silence makes a WAV file of 6 s without sound (8 kHz, one channel, 8-bit, where 128 is the middle).
 function silence() {
   const rate = 8000, n = rate * 6, b = new Uint8Array(44 + n).fill(128, 44), v = new DataView(b.buffer);
@@ -203,12 +221,32 @@ let deferred = null;
 // play starts the element, the sound effects ready first (a play asked for lets the browser start them).
 const play = () => {
   wake();
+  unlockSpare();
   if (deferred) {
     audio.src = deferred;
     deferred = null;
   }
   return audio.play();
 };
+// Safari on iPhones and iPads lets an element play by itself only once it played on a tap: the spare
+// plays a moment of silence with the play that was asked for, so it can start the next song later
+// (gapless playback). Where that play was not on a tap, it is tried again with the next one.
+const iOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let unlocked = !iOS;
+function unlockSpare() {
+  if (unlocked || ahead || retiring) return;
+  unlocked = true;
+  const el = spare;
+  el.src = silentURL();
+  el.play().then(() => {
+    if (spare !== el || ahead || retiring) return; // in use since
+    el.pause();
+    el.removeAttribute('src');
+    el.load();
+  }, () => {
+    if (spare === el) unlocked = false;
+  });
+}
 // refused: a play the browser turned down, or cut short by another song (which, playing, keeps the
 // silent sound).
 const refused = (e) => {
@@ -296,8 +334,10 @@ let seeks = 0; // counts places asked for (seek, a bookmark): resuming found lat
 
 // load plays the queue item at index. again is a loop coming round (repeat one, or the queue
 // starting over): that plays from the start, never from where it was resumed (review #42). lazy,
-// with autoplay off, leaves the stream unasked for until the song is played (review #154).
-function load(index, autoplay = true, again = false, lazy = false) {
+// with autoplay off, leaves the stream unasked for until the song is played (review #154). ready is
+// the song loaded ahead and started already in the element playing now (gapless playback): only
+// what goes with a new song is done.
+function load(index, autoplay = true, again = false, lazy = false, ready = null) {
   const s = player.get();
   const item = s.queue[index];
   if (!item) return;
@@ -307,9 +347,11 @@ function load(index, autoplay = true, again = false, lazy = false) {
   probe = null;
   endCut();
   told = null; // the next one is preloaded again for this one, once it plays
+  aheadFailed = null;
   tries = 0;
   warm = null;
-  session = { id: uuid(), item, heard: 0, last: null, played: false };
+  // A song loaded ahead starts at its start, heard from there: no update says so first.
+  session = { id: uuid(), item, heard: 0, last: ready ? 0 : null, played: false };
   // A resume point ("continue" on the home page, a bookmark) is for the play it was asked for only;
   // 0 is a place too, the start, which the settings' resuming does not override (review #106).
   pendingSeek = again ? null : item.resumeMs ?? null;
@@ -323,24 +365,27 @@ function load(index, autoplay = true, again = false, lazy = false) {
       if (loads === loaded && seeks === sought && r.position_ms && audio.currentTime < 5) seekWhenReady(r.position_ms);
     }, () => {});
   }
-  const q = liteQ();
+  const q = ready ? ready.q : liteQ();
   if (q) askLite();
   loadedURL = streamURL(item.assetId, q);
-  player.set({ index, scrub: null, duration: (item.durationMs || 0) / 1000, buffering: autoplay, liteLoaded: !!q, liteGot: null,
-    liteLater: false });
+  const d = ready && isFinite(audio.duration) ? audio.duration : (item.durationMs || 0) / 1000;
+  player.set({ index, scrub: null, duration: d, buffering: autoplay && !ready, liteLoaded: !!q, liteGot: null, liteLater: false });
   clock.set({ time: (pendingSeek || 0) / 1000 });
   applyVolume(); // this song's balance
   learn(near());
   deferred = null;
-  if (lazy && !autoplay) {
+  if (ready) {
+    waitLite(); // still being made, perhaps
+    askGot(); // its stream answered before it was the one playing
+  } else if (lazy && !autoplay) {
     audio.removeAttribute('src');
     audio.load();
     deferred = loadedURL;
   } else {
     audio.src = loadedURL;
   }
-  if (autoplay) play().catch(refused);
-  else keep(false); // a song that ended, followed by one that waits
+  if (autoplay && !ready) play().catch(refused);
+  else if (!autoplay) keep(false); // a song that ended, followed by one that waits
   updateMediaSession(item);
   savePlace();
 }
@@ -363,15 +408,17 @@ on('loadedmetadata', () => {
 
 // A song asked for re-encoded waits for it to be made, a few seconds (lite mode, review #226): past a
 // moment without an answer, the player says so rather than show a song playing from 0:00.
+// A song loaded ahead that has not answered yet when it starts is waited for the same way.
 let liteWaitTimer = 0;
-on('loadstart', () => {
+on('loadstart', waitLite);
+function waitLite() {
   liteAnswered();
   const s = player.get(), item = s.queue[s.index];
-  if (!s.liteLoaded || !item || !shrinks(item.asset)) return;
+  if (!s.liteLoaded || !item || !shrinks(item.asset) || audio.readyState >= 1) return;
   liteWaitTimer = setTimeout(() => {
     if (audio.readyState < 1 && !audio.error) player.set({ liteWait: true });
   }, 800);
-});
+}
 function liteAnswered() {
   clearTimeout(liteWaitTimer);
   if (player.get().liteWait) player.set({ liteWait: false });
@@ -386,11 +433,13 @@ function askGot() {
     if (loads === loaded) player.set({ liteGot: !!r.lite, liteLater: !!r.later });
   }, () => {});
 }
-on('timeupdate', () => {
-  if (!session || audio.paused) return;
-  const t = audio.currentTime;
+// heard adds the time played since the last update, up to t (the song's place).
+function heard(t) {
   if (session.last !== null && t > session.last && t - session.last < 2) session.heard += (t - session.last) * 1000;
   session.last = t;
+}
+on('timeupdate', () => {
+  if (session && !audio.paused) heard(audio.currentTime);
 });
 on('seeking', () => session && (session.last = null));
 on('playing', () => { // the home page shows the latest playback from its start
@@ -904,6 +953,7 @@ export function resetPlayer(withReport = true, signOut = false) {
   probe = null;
   endCut();
   keep(false);
+  quietSpare();
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
@@ -978,6 +1028,7 @@ export async function next() {
   if (!routed('next')) return advance();
 }
 async function advance() {
+  if (ahead && handoff(!audio.ended)) return; // the next song loaded ahead: at once (gapless playback)
   const s = player.get();
   if (s.index + 1 < s.queue.length) return load(s.index + 1);
   if (!s.queue.length) return;
@@ -1021,7 +1072,8 @@ export function prev() {
   else load(s.index > 0 ? s.index - 1 : s.queue.length - 1);
 }
 
-export const playAt = (i) => load(i);
+// The song after this one, loaded ahead, plays at once (gapless playback).
+export const playAt = (i) => (i === player.get().index + 1 && ahead && handoff(true)) || load(i);
 
 // seek jumps there and shows it at once. Dragging the seek bar only previews (scrubTo) and seeks
 // once on release, so a drag is one jump, not one per pointer move (review #41).
@@ -1344,6 +1396,173 @@ async function streamProblem(item) {
     return 'network';
   }
 }
+
+// ---- gapless playback ----
+// While the song playing has its last half minute to go, the next one loads in the spare element:
+// its stream asked for as loaded ahead (pre=1), so the server keeps the song playing as the one
+// played until told the next one plays. It starts the moment this one ends, early by as long as a
+// start takes here (lead, learned from each change), so songs that run into each other (a live
+// album, a suite, an image cut by its CUE sheet) go on without a gap; the element that played the
+// song before sounds its last samples, then is the spare. Not for a song looping, the sleep timer
+// stopping at this song's end, a song that would not start at its start (resumed), a shuffled queue
+// starting a new round (shuffled again), while this tab controls another device, or with the
+// setting off: the next song then loads as before, once this one ended.
+const AHEAD_S = 30;
+let lead = 0.01; // seconds a start takes here, learned
+let aheadFailed = null; // the queue item whose loading ahead failed while this song plays: not tried again
+
+// wantAhead is the song to load ahead, and whether it is the queue starting over; null for none.
+function wantAhead() {
+  const s = player.get(), cur = s.queue[s.index];
+  if (!s.gapless || remote !== null || !cur || cur.qid !== warm || onward !== null || probe || cut || deferred) return null;
+  if (s.repeat === 'one' || (s.sleep && s.sleep.endOfTrack)) return null;
+  let item = s.queue[s.index + 1], again = false;
+  if (!item && s.mode === 'all' && !s.radio) [item, again] = [s.queue[0], true];
+  if (!item || item.resumeMs != null || (!again && s.resume[kindOf(item)] === 'resume')) return null;
+  return { item, again };
+}
+const still = (a, w) => !!w && a.item.qid === w.item.qid && a.again === w.again && a.q === liteQ();
+
+// considerAhead loads the next song ahead once the one playing is near its end, and lets go of one
+// no longer next (the queue, the modes or lite mode changed).
+function considerAhead() {
+  const w = wantAhead();
+  if (ahead && !still(ahead, w)) dropAhead();
+  if (!w || ahead || retiring || audio.paused || w.item.qid === aheadFailed || !(audio.duration - audio.currentTime <= AHEAD_S)) return;
+  const q = liteQ();
+  const a = ahead = { item: w.item, again: w.again, q, armed: false, timer: 0 };
+  spare.oncanplay = () => ahead === a && arm();
+  spare.onerror = () => { // it loads once this one ended, as before
+    if (ahead !== a) return;
+    aheadFailed = a.item.qid;
+    dropAhead();
+  };
+  applyVolume(); // its own balance
+  spare.src = streamURL(w.item.assetId, q) + (q ? '&' : '?') + 'pre=1';
+  if (q) askLite();
+}
+
+// arm sets the start of the song loaded ahead, once it can play and this one has less than a second
+// and a half to go: a timer wakes a moment before the end, reads where the song is again, and starts
+// the next one lead early.
+function arm() {
+  const a = ahead;
+  if (!a || a.armed || spare.readyState < 3 || audio.paused) return;
+  const left = audio.duration - audio.currentTime;
+  if (!(left < 1.5)) return;
+  a.armed = true;
+  a.timer = setTimeout(() => {
+    if (ahead !== a || audio.paused) return;
+    const rest = audio.duration - audio.currentTime;
+    a.timer = setTimeout(() => ahead === a && !audio.paused && handoff(false, true), Math.max(0, (rest - lead) * 1000));
+  }, Math.max(0, (left - 0.3) * 1000));
+}
+// disarm: paused, or sought, the start is set again as the song goes on.
+function disarm() {
+  if (!ahead || !ahead.armed) return;
+  clearTimeout(ahead.timer);
+  ahead.armed = false;
+}
+
+// handoff makes the song loaded ahead the one playing: started, the elements change places, and
+// what goes with a new song is done (load). cut: the song playing stops now (a skip), rather than
+// sounding its last samples; timed: started by the timer, a start lead is learned from. It is false
+// when the song loaded ahead is not the one next any more.
+function handoff(cut = false, timed = false) {
+  const a = ahead, w = wantAhead();
+  if (!a) return false;
+  if (!still(a, w)) {
+    dropAhead();
+    return false;
+  }
+  ahead = null;
+  clearTimeout(a.timer);
+  const old = audio, next = spare;
+  const endAt = performance.now() + Math.max(0, old.duration - old.currentTime) * 1000;
+  wake();
+  next.play().catch(refused);
+  // The song leaving: at its end, or skipped. Its last moments are heard time too, as the updates
+  // up to its end would have counted them.
+  if (session && !old.paused) heard(cut ? old.currentTime : old.duration);
+  report(!cut);
+  session = null;
+  next.oncanplay = next.onerror = null;
+  unlisten(old);
+  listen(next);
+  audio = next;
+  spare = old;
+  attach(audio, elements, applyVolume, near, fresh);
+  retire(old, cut);
+  load(w.again ? 0 : player.get().index + 1, true, w.again, false, a);
+  post(`/stream/${a.item.assetId}/play`).catch(() => {});
+  if (timed) learnLead(next, endAt);
+  return true;
+}
+
+// learnLead learns how long a start takes here from one just made, which the song before ended at
+// endAt: where the new song is a moment after it started says when it started.
+function learnLead(el, endAt) {
+  let seen = 0;
+  const check = () => {
+    if (++seen < 2) return; // the first update comes as it starts
+    el.removeEventListener('timeupdate', check);
+    if (audio !== el || el.paused || el.currentTime > 2) return;
+    const late = (performance.now() - el.currentTime * 1000 - endAt) / 1000; // > 0: a gap, < 0: both sounded
+    lead = Math.min(Math.max(lead + late / 2, 0), 0.2);
+  };
+  el.addEventListener('timeupdate', check);
+}
+
+// retire lets the element that played the song before sound its last samples (or stops it: cut),
+// then empties it for the next song to load ahead in.
+function retire(el, cut) {
+  retiring = el;
+  let timer = 0;
+  const done = () => {
+    clearTimeout(timer);
+    el.onended = null;
+    if (retiring !== el) return;
+    retiring = null;
+    el.pause();
+    el.removeAttribute('src');
+    el.load();
+    considerAhead();
+  };
+  if (cut || el.paused || el.ended) return done();
+  el.onended = done;
+  timer = setTimeout(done, Math.max(0, el.duration - el.currentTime) * 1000 + 1000);
+}
+
+// dropAhead lets go of the song loaded ahead: its download stops.
+function dropAhead() {
+  const a = ahead;
+  if (!a) return;
+  ahead = null;
+  clearTimeout(a.timer);
+  spare.oncanplay = spare.onerror = null;
+  spare.removeAttribute('src');
+  spare.load();
+}
+
+// quietSpare stops what the spare element does: a song loaded ahead, or the last samples of the one before.
+function quietSpare() {
+  dropAhead();
+  const el = retiring;
+  if (!el) return;
+  retiring = null;
+  el.onended = null;
+  el.pause();
+  el.removeAttribute('src');
+  el.load();
+}
+
+on('timeupdate', () => {
+  considerAhead();
+  arm();
+});
+on('seeking', disarm);
+on('pause', disarm);
+player.subscribe(considerAhead);
 
 // Lock screen, notification and headset controls.
 function updateMediaSession(item) {
