@@ -63,6 +63,10 @@ type Song struct {
 	Format   string // flac, mp3, m4a, ogg, opus
 	Channels int
 	Duration int64 // ms; 0 when not known
+	// Play names one playback of it: a player's load of the song (?play=). The original sent to one
+	// of its requests is sent to them all, whatever other players or tabs play meanwhile, so that its
+	// ranges are always of the same file (review #242). "": the song played last decides (Later).
+	Play string
 }
 
 // Source reads originals: the stream cache.
@@ -111,9 +115,22 @@ type Store struct {
 	bad           map[string]time.Time // songs that could not be made -> until when they are sent as they are
 	plain         map[string]bool      // songs not smaller re-encoded: sent as they are until a restart
 	later         map[string]bool      // the song played, sent as it is while it is (ErrLater)
+	plays         map[string]playPin   // playbacks sent the original (Song.Play/checksum)
 	current, next string               // the song played last and the one preloaded last (checksums)
 	used          int64                // bytes in dir; -1 until counted
 }
+
+// playPin is a playback sent the original, and why (ErrLater, ErrNotSmaller, ...).
+type playPin struct {
+	at  time.Time
+	err error
+}
+
+// A playback is remembered a day (a long song paused overnight), at most maxPlays of them.
+const (
+	playFor  = 24 * time.Hour
+	maxPlays = 10_000
+)
 
 type call struct {
 	done    chan struct{}
@@ -129,7 +146,7 @@ func New(dir string, budget int64, enc Encoder, src Source, log *slog.Logger) (*
 		return nil, err
 	}
 	s := &Store{dir: dir, budget: budget, enc: enc, src: src, log: log, turns: make(chan struct{}, workers),
-		calls: map[string]*call{}, bad: map[string]time.Time{}, plain: map[string]bool{}, later: map[string]bool{}, used: -1}
+		calls: map[string]*call{}, bad: map[string]time.Time{}, plain: map[string]bool{}, later: map[string]bool{}, plays: map[string]playPin{}, used: -1}
 	for _, e := range s.list() {
 		if !strings.HasSuffix(e.path, ext) || e.size == 0 {
 			os.Remove(e.path)
@@ -163,6 +180,10 @@ func (s *Store) get(ctx context.Context, o Song, from int64, ahead bool) (*os.Fi
 		return nil, ErrFailed
 	}
 	key := o.SHA256
+	pin := ""
+	if o.Play != "" {
+		pin = o.Play + "/" + key
+	}
 	s.mu.Lock()
 	if ahead {
 		s.next = key
@@ -170,7 +191,13 @@ func (s *Store) get(ctx context.Context, o Song, from int64, ahead bool) (*os.Fi
 	} else {
 		s.playLocked(key)
 	}
-	if s.later[key] { // every request of one playing gets the same file
+	// Every request of one playing gets the same file: a playback sent the original once is sent it
+	// again (review #242); with none named, the song played last is.
+	if p, ok := s.plays[pin]; ok && pin != "" {
+		s.mu.Unlock()
+		return nil, p.err
+	}
+	if pin == "" && s.later[key] {
 		s.mu.Unlock()
 		return nil, ErrLater
 	}
@@ -180,20 +207,22 @@ func (s *Store) get(ctx context.Context, o Song, from int64, ahead bool) (*os.Fi
 	}
 	if s.plain[key] {
 		s.mu.Unlock()
-		return nil, ErrNotSmaller
+		return nil, s.pinLocked(pin, ErrNotSmaller)
 	}
 	if until, ok := s.bad[key]; ok {
 		if time.Now().Before(until) {
 			s.mu.Unlock()
-			return nil, ErrFailed
+			return nil, s.pinLocked(pin, ErrFailed)
 		}
 		delete(s.bad, key)
 	}
 	c := s.startLocked(o)
 	if c.waiting == 0 && (o.Duration >= longMS || from > 0) { // no request of this playing waits for it
-		s.later[key] = true
+		if pin == "" {
+			s.later[key] = true
+		}
 		s.mu.Unlock()
-		return nil, ErrLater
+		return nil, s.pinLocked(pin, ErrLater)
 	}
 	c.waiting++
 	s.mu.Unlock()
@@ -209,9 +238,53 @@ func (s *Store) get(ctx context.Context, o Song, from int64, ahead bool) (*os.Fi
 		return nil, err
 	}
 	if c.err != nil {
+		if se := (*SourceError)(nil); !errors.As(c.err, &se) { // sent as it is
+			s.pinLocked(pin, c.err)
+		}
 		return nil, c.err
 	}
 	return s.openLocked(key)
+}
+
+// pinLocked records that playback pin (Song.Play/checksum) is sent the original, err saying why, and
+// returns err. Those of more than a day ago are forgotten as others come, the oldest first past
+// maxPlays.
+func (s *Store) pinLocked(pin string, err error) error {
+	if pin == "" {
+		return err
+	}
+	now := time.Now()
+	if len(s.plays) >= maxPlays {
+		for _, age := range []time.Duration{playFor, time.Hour, 0} {
+			for k, p := range s.plays {
+				if now.Sub(p.at) >= age {
+					delete(s.plays, k)
+				}
+			}
+			if len(s.plays) < maxPlays {
+				break
+			}
+		}
+	}
+	s.plays[pin] = playPin{at: now, err: err}
+	return err
+}
+
+// How says how playback play of song sha gets it (play "": the song played last): re-encoded, its
+// lite file here and the original not sent to it; or as it is while it is made for the next time
+// (ErrLater).
+func (s *Store) How(sha, play string) (lite, later bool) {
+	if !s.Available() {
+		return false, false
+	}
+	if play == "" {
+		return s.Has(sha), s.Later(sha)
+	}
+	s.mu.Lock()
+	p, sent := s.plays[play+"/"+sha]
+	s.mu.Unlock()
+	_, err := os.Stat(s.path(sha))
+	return err == nil && !sent, sent && errors.Is(p.err, ErrLater)
 }
 
 // Played tells the store that song sha (a checksum) is played as it is: lite mode is off, or sends

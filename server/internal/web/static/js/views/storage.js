@@ -114,6 +114,9 @@ function StoreRow({ st, isDefault, onChange }) {
     },
   });
   const inUse = st.mode === 'managed' && st.use.songs + st.use.others > 0;
+  // A move takes files there: it stays (and keeps its folder) until the move is over or canceled.
+  const movingIn = st.moving_in > 0;
+  const keep = inUse ? '曲庫還有檔案存在這裡：先用「搬移到…」把它們搬到別處' : movingIn ? '有搬移正把檔案搬到這裡：等它完成，或在「任務」取消它' : '';
   const scanned = !!st.scan;
   const od = st.kind === 'onedrive';
   const ready = odReady(st);
@@ -153,11 +156,12 @@ function StoreRow({ st, isDefault, onChange }) {
       ${st.kind === 's3' && html`<button class="btn text" onClick=${() => changeKeys(st, onChange)}>更新金鑰</button>`}
       ${od && st.signed_in && html`<button class="btn text" onClick=${connect}>重新連線</button>`}
       ${st.mode === 'managed' && hasFiles && html`<button class="btn tonal" onClick=${() => moveFiles({ origin: String(st.id), title: st.name, onDone: onChange })}><${Icon} name="move" />搬移到…</button>`}
-      ${od && st.signed_in && odConfig(st).folder && html`<button class="btn text" disabled=${hasFiles || st.running} title=${hasFiles ? '曲庫還有檔案在這個資料夾：先用「搬移到…」把它們搬到別處' : ''} onClick=${pickFolder}>更換資料夾</button>`}
+      ${od && st.signed_in && odConfig(st).folder && html`<button class="btn text" disabled=${hasFiles || movingIn || st.running} title=${hasFiles ? '曲庫還有檔案在這個資料夾：先用「搬移到…」把它們搬到別處' : keep} onClick=${pickFolder}>更換資料夾</button>`}
       ${od && html`<button class="btn text" onClick=${() => changeClientSecret(st, onChange)}>更新用戶端密碼</button>`}
       <button class="btn text" onClick=${rename}>重新命名</button>
-      <button class="btn text danger-text" disabled=${inUse || st.running} title=${inUse ? '曲庫還有檔案存在這裡：先用「搬移到…」把它們搬到別處' : ''} onClick=${remove}>移除</button>
+      <button class="btn text danger-text" disabled=${inUse || movingIn || st.running} title=${keep} onClick=${remove}>移除</button>
     </div>
+    ${movingIn && !inUse && html`<p class="hint tight">有搬移正把檔案搬到這裡，所以現在不能移除；等它完成，或在「任務」取消它之後就可以。</p>`}
     ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面、附屬檔或內頁圖` : ''}存在這裡，所以不能移除；用「搬移到…」把它們搬到別處之後就可以${st.use.missing ? `（${st.use.missing} 首遺失的歌沒辦法搬，要先刪除或找回）` : ''}。</p>`}`}
   </div>`;
 }

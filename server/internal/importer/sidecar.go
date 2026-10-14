@@ -64,6 +64,7 @@ func (im *Importer) processSidecar(ctx context.Context, it *item) (outcome, erro
 	}
 	dir := HomeDir("sidecar", album.AlbumArtist, album.Title, "")
 	name := filepath.Base(it.path)
+	kind := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
 	var ref string
 	switch df, ok := im.df(); {
 	case it.ref != "": // in a source (#99): kept where it is
@@ -78,12 +79,16 @@ func (im *Importer) processSidecar(ctx context.Context, it *item) (outcome, erro
 		}
 		ref = it.driveID
 	default:
-		if ref, err = im.put(ctx, 0, storage.PutFile{Path: it.path, Dir: dir, Name: name, MIME: "text/plain",
-			Size: st.Size(), SHA256: out.sha, Sessions: &memSessions{}}); err != nil {
+		if err := im.keep(ctx, 0, storage.PutFile{Path: it.path, Dir: dir, Name: name, MIME: "text/plain",
+			Size: st.Size(), SHA256: out.sha, Sessions: &memSessions{}}, func(ref string, since int64) error {
+			_, err := im.lib.KeepSidecar(ctx, albumID, name, kind, out.sha, st.Size(), ref, since)
+			return err
+		}); err != nil {
 			return out, err
 		}
+		out.state = StatePublished
+		return out, nil
 	}
-	kind := strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), ".")
 	if _, err := im.lib.AddSidecar(ctx, albumID, name, kind, out.sha, st.Size(), ref); err != nil {
 		return out, err
 	}

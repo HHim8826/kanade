@@ -113,6 +113,17 @@ func (s *Store) MarkVerified(ctx context.Context, assetID int64, driveFileID str
 	return tx.Commit()
 }
 
+// KeepAsset is MarkVerified for a file just kept at ref by a Put that began at since (keepableTx):
+// its store removed meanwhile is ErrStoreGone, and a copy found there that went to the trash
+// meanwhile is ErrInTrash.
+func (s *Store) KeepAsset(ctx context.Context, assetID int64, ref string, since int64) error {
+	return s.keep(ctx, ref, since, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE assets SET state = ?, file_ref = ?, verified_at = ? WHERE id = ?`,
+			AssetVerified, ref, db.Now(), assetID)
+		return err
+	})
+}
+
 // Normalize prepares text for the search index and for queries (P2-2): NFKC folds full-width
 // letters and half-width katakana, lowercasing makes Latin case-insensitive, katakana is folded
 // to hiragana, and spaces, punctuation and symbols are dropped, so 「ハレ晴レ ユカイ」 finds
@@ -465,12 +476,26 @@ func (s *Store) CoverBySHA(ctx context.Context, sha string) (int64, string, erro
 }
 
 func (s *Store) AddCover(ctx context.Context, sha, mime, driveFileID string) (int64, error) {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO covers (sha256, mime, file_ref, created_at) VALUES (?, ?, ?, ?)
-		ON CONFLICT (sha256) DO UPDATE SET file_ref = excluded.file_ref`, sha, mime, driveFileID, db.Now())
-	if err != nil {
+	return addCover(ctx, s.db, sha, mime, driveFileID)
+}
+
+// KeepCover is AddCover for a picture just kept at ref by a Put that began at since (keepableTx).
+func (s *Store) KeepCover(ctx context.Context, sha, mime, ref string, since int64) (int64, error) {
+	var id int64
+	err := s.keep(ctx, ref, since, func(tx *sql.Tx) (err error) {
+		id, err = addCover(ctx, tx, sha, mime, ref)
+		return err
+	})
+	return id, err
+}
+
+func addCover(ctx context.Context, q querier, sha, mime, ref string) (int64, error) {
+	if _, err := q.ExecContext(ctx, `INSERT INTO covers (sha256, mime, file_ref, created_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (sha256) DO UPDATE SET file_ref = excluded.file_ref`, sha, mime, ref, db.Now()); err != nil {
 		return 0, err
 	}
-	id, _, err := s.CoverBySHA(ctx, sha)
+	var id int64
+	err := q.QueryRowContext(ctx, `SELECT id FROM covers WHERE sha256 = ?`, sha).Scan(&id)
 	return id, err
 }
 

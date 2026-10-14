@@ -8,13 +8,22 @@ import (
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/staging"
+	"github.com/HHim8826/kanade/server/internal/storage/storagetest"
 	"golang.org/x/image/tiff"
 )
 
@@ -202,5 +211,156 @@ func TestAlbumGallery(t *testing.T) {
 	}
 	if got := names(gallery()); got != "back.tif:booklet:0" {
 		t.Fatal(got)
+	}
+}
+
+// A picture taken out and uploaded again while its file is going to the trash is back with a file:
+// the copy the upload found there, gone meanwhile, is kept again (review #241).
+func TestGalleryUploadDuringTrash(t *testing.T) {
+	for _, kind := range []string{"local", "s3"} {
+		t.Run(kind, func(t *testing.T) {
+			s, h, token := storageServer(t)
+			ctx := context.Background()
+			var watch atomic.Bool
+			found := make(chan struct{})
+			var once sync.Once
+			body := map[string]any{"kind": "local", "name": "Library", "mode": "managed", "config": map[string]string{"root": t.TempDir()}}
+			if kind == "s3" {
+				fake := storagetest.NewS3(t)
+				fake.Fail = func(r *http.Request) int {
+					if watch.Load() && r.Method == "HEAD" && strings.Contains(r.URL.Path, "booklet") {
+						once.Do(func() { close(found) })
+					}
+					return 0
+				}
+				body = map[string]any{"kind": "s3", "name": "R2", "mode": "managed", "config": map[string]string{"endpoint": fake.URL, "bucket": fake.Bucket},
+					"secret": map[string]string{"access_key_id": fake.AccessKey, "secret_access_key": fake.SecretKey}}
+			}
+			if rec := do(t, h, "POST", "/api/v1/storage", token, body); rec.Code != http.StatusCreated {
+				t.Fatalf("add: %d %s", rec.Code, rec.Body)
+			}
+			if rec := do(t, h, "PUT", "/api/v1/storage/default", token, map[string]any{"id": "1"}); rec.Code >= 300 {
+				t.Fatalf("default: %d %s", rec.Code, rec.Body)
+			}
+			a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "c1", Size: 1, Format: "flac", Codec: "flac"})
+			s.lib.MarkVerified(ctx, a.ID, "d-c1")
+			pub, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: "A", AlbumArtist: "y"})
+			var album int64
+			s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub.EntryID).Scan(&album)
+			upload := func(data []byte) *httptest.ResponseRecorder {
+				req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/albums/%d/images?name=booklet.jpg", album), bytes.NewReader(data))
+				req.Header.Set("Authorization", "Bearer "+token)
+				req.Header.Set("Content-Type", "application/octet-stream")
+				rec := httptest.NewRecorder()
+				h.ServeHTTP(rec, req)
+				return rec
+			}
+			type added struct {
+				Image library.AlbumImage
+				Added bool
+			}
+			pic := pictureData(t, "jpeg", 64, 64)
+			first := decode[added](t, upload(pic).Body)
+			var ref string
+			s.db.QueryRow(`SELECT file_ref FROM album_images WHERE id = ?`, first.Image.ID).Scan(&ref)
+			if rec := do(t, h, "DELETE", fmt.Sprintf("/api/v1/images/%d", first.Image.ID), token, nil); rec.Code != 200 {
+				t.Fatalf("take out: %d %s", rec.Code, rec.Body)
+			}
+			// Its file goes to the trash slowly; the upload finds it there meanwhile.
+			trashing, release, trashed := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(trashed)
+				if n, err := s.lib.TrashFile(ctx, ref, func(ctx context.Context, ref string) error {
+					close(trashing)
+					<-release
+					return s.files.Trash(ctx, ref)
+				}); n != library.Trashed {
+					t.Errorf("trash: %d %v", n, err)
+				}
+			}()
+			<-trashing
+			watch.Store(true)
+			uploaded := make(chan *httptest.ResponseRecorder, 1)
+			go func() { uploaded <- upload(pic) }()
+			if kind == "s3" {
+				<-found
+			} else {
+				time.Sleep(100 * time.Millisecond)
+			}
+			close(release)
+			<-trashed
+			rec := <-uploaded
+			if again := decode[added](t, rec.Body); rec.Code != 200 || !again.Added || again.Image.ID != first.Image.ID {
+				t.Fatalf("uploaded again: %d %+v", rec.Code, again)
+			}
+			if rec := do(t, h, "GET", fmt.Sprintf("/api/v1/images/%d/file", first.Image.ID), token, nil); rec.Code != 200 || !bytes.Equal(rec.Body.Bytes(), pic) {
+				t.Fatalf("its file: %d %s", rec.Code, rec.Body)
+			}
+		})
+	}
+}
+
+// probeReader calls f before each read.
+type probeReader struct {
+	r io.Reader
+	f func()
+}
+
+func (p *probeReader) Read(b []byte) (int, error) {
+	p.f()
+	return p.r.Read(b)
+}
+
+// A picture uploaded is received under the staging budget: refused without room (its length told
+// or not), nothing written; held while it is received, and let go after (review #239).
+func TestGalleryUploadHoldsStaging(t *testing.T) {
+	s, h, token := storageServer(t)
+	ctx := context.Background()
+	cfg, _ := json.Marshal(map[string]string{"root": t.TempDir()})
+	if rec := do(t, h, "POST", "/api/v1/storage", token, map[string]any{"kind": "local", "name": "Library", "mode": "managed", "config": json.RawMessage(cfg)}); rec.Code != http.StatusCreated {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	do(t, h, "PUT", "/api/v1/storage/default", token, map[string]any{"id": "1"})
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "c1", Size: 1, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "d-c1")
+	pub, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: "A", AlbumArtist: "y"})
+	var album int64
+	s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub.EntryID).Scan(&album)
+	budget := &staging.Budget{Limit: 1, Reserve: 1, Free: func(string) int64 { return 0 }}
+	s.staging = budget
+	upload := func(body io.Reader) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/albums/%d/images?name=booklet.jpg", album), body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	pic := pictureData(t, "jpeg", 64, 64)
+	var written int64
+	look := func() {
+		files, _ := filepath.Glob(filepath.Join(s.cfg.Path(config.DirStaging), "image-*"))
+		for _, f := range files {
+			if st, err := os.Stat(f); err == nil {
+				written = max(written, st.Size())
+			}
+		}
+	}
+	for _, body := range []io.Reader{bytes.NewReader(pic), &probeReader{bytes.NewReader(pic), look}} {
+		if rec := upload(body); rec.Code != http.StatusInsufficientStorage {
+			t.Fatalf("without room: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if written > 0 || budget.Used(ctx) != 0 {
+		t.Fatalf("without room: %d bytes written, %d held", written, budget.Used(ctx))
+	}
+	budget.SetLimits(64<<20, 0)
+	budget.Free = nil // room on the disk now
+	var peak int64
+	if rec := upload(&probeReader{bytes.NewReader(pic), func() { peak = max(peak, budget.Used(ctx)) }}); rec.Code != http.StatusOK {
+		t.Fatalf("with room: %d %s", rec.Code, rec.Body)
+	}
+	if peak < int64(len(pic)) || budget.Used(ctx) != 0 {
+		t.Fatalf("held %d while received (%d bytes), %d after", peak, len(pic), budget.Used(ctx))
 	}
 }

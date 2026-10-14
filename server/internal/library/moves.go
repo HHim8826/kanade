@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"path"
-	"strings"
 	"time"
 
 	"github.com/HHim8826/kanade/server/internal/db"
@@ -35,7 +34,7 @@ func filesSQL(cond func(col string) string) string {
 		UNION ALL SELECT c.file_ref, 0, c.sha256, c.mime, 'cover', coalesce((SELECT al.title FROM albums al WHERE al.cover_id = c.id ORDER BY al.id LIMIT 1), ''),
 			2, c.id FROM covers c WHERE ` + cond("c.file_ref") + `
 		UNION ALL SELECT s.file_ref, s.size, s.sha256, 'text/plain', 'sidecar', s.name, 3, s.id FROM sidecars s WHERE ` + cond("s.file_ref") + `
-		UNION ALL SELECT i.file_ref, i.size, i.sha256, i.mime, 'image', i.path, 4, i.id FROM album_images i WHERE i.hidden = 0 AND ` + cond("i.file_ref") + `
+		UNION ALL SELECT i.file_ref, i.size, i.sha256, i.mime, 'image', i.path, 4, i.id FROM album_images i WHERE i.hidden = 0 AND i.missing = 0 AND ` + cond("i.file_ref") + `
 	) GROUP BY file_ref ORDER BY min(rank), min(n)`
 }
 
@@ -82,7 +81,7 @@ func (s *Store) AlbumFiles(ctx context.Context, ids []int64) ([]FileToMove, erro
 			return col + ` IN (SELECT a.file_ref FROM album_entries e JOIN assets a ON a.id = e.asset_id WHERE e.album_id IN (SELECT id FROM family)
 				UNION SELECT c.file_ref FROM albums al JOIN covers c ON c.id = al.cover_id WHERE al.id IN (SELECT id FROM family)
 				UNION SELECT file_ref FROM sidecars WHERE album_id IN (SELECT id FROM family)
-				UNION SELECT file_ref FROM album_images WHERE hidden = 0 AND album_id IN (SELECT id FROM family))`
+				UNION SELECT file_ref FROM album_images WHERE hidden = 0 AND missing = 0 AND album_id IN (SELECT id FROM family))`
 		}), id)
 		if err != nil {
 			return nil, err
@@ -124,13 +123,13 @@ func (s *Store) FileUsed(ctx context.Context, ref string) (bool, error) {
 }
 
 // Relocate has the library read what it had at from at to instead: a copy of the same bytes, kept
-// and checked there. The file at from is owed to its location's trash after a while (streams
-// reading it finish first); none of the library using from any more (deleted, or moved by another
-// meanwhile), the copy at to is owed to the trash instead, and Relocate reports false. A copy at to
-// that was owed to the trash (the same file moved away and back) is the library's again. A Drive
-// file that went to the trash a moment ago is ErrInTrash: it has to be kept again (a new one gets
-// another ID). A store's key that went to the trash is free again, and was just written anew.
-func (s *Store) Relocate(ctx context.Context, from, to string, trashFromAfter time.Duration) (bool, error) {
+// and checked there by a Put that began at since. The file at from is owed to its location's trash
+// after a while (streams reading it finish first); none of the library using from any more (deleted,
+// or moved by another meanwhile), the copy at to is owed to the trash instead, and Relocate reports
+// false. A copy at to that was owed to the trash (the same file moved away and back) is the
+// library's again; one that went to the trash after the Put found it is ErrInTrash, and a store
+// removed meanwhile ErrStoreGone (keepableTx): the library still reads from, and nothing is owed.
+func (s *Store) Relocate(ctx context.Context, from, to string, since int64, trashFromAfter time.Duration) (bool, error) {
 	if err := lockTrash(ctx, to); err != nil {
 		return false, err
 	}
@@ -140,17 +139,8 @@ func (s *Store) Relocate(ctx context.Context, from, to string, trashFromAfter ti
 		return false, err
 	}
 	defer tx.Rollback()
-	var done int64
-	switch err := tx.QueryRowContext(ctx, `SELECT done_at FROM file_trash WHERE file_id = ?`, to).Scan(&done); {
-	case errors.Is(err, sql.ErrNoRows):
-	case err != nil:
+	if err := keepableTx(ctx, tx, to, since); err != nil {
 		return false, err
-	case done > db.Now()-trashMemory.Milliseconds() && !strings.Contains(to, ":"):
-		return false, ErrInTrash
-	default:
-		if _, err := tx.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, to); err != nil {
-			return false, err
-		}
 	}
 	var moved int64
 	for _, q := range []string{

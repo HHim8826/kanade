@@ -122,7 +122,7 @@ let audio = newAudio();
 // ends (gapless playback, below), and then the two change places.
 let spare = newAudio();
 const elements = () => [audio, spare];
-let ahead = null; // { item, again, q, armed, timer }: the next song, loaded in spare
+let ahead = null; // { item, again, q, play, armed, timer }: the next song, loaded in spare
 let retiring = null; // the element that played the song before, sounding its last samples
 const listeners = [];
 const on = (type, fn) => {
@@ -327,6 +327,10 @@ export function askLite() {
   get('/status').then((st) => player.set({ liteServer: !!st.lite }), () => {}).finally(() => { askingLite = false; });
 }
 let loadedURL = ''; // the song loaded's stream as it was asked for, lite or not: asked again the same
+// A song loaded in lite mode names its playback (play): every request of it gets the file its first
+// got, the original or re-encoded, whatever other players play meanwhile (review #242).
+let loadedPlay = '';
+const playURL = (assetId, q, play) => streamURL(assetId, q) + (play ? '&play=' + play : '');
 
 let pendingSeek = null; // ms to jump to once the new track can seek
 let loads = 0; // counts songs loaded: a wait begun for one song controls nothing once another began (review #125)
@@ -367,7 +371,8 @@ function load(index, autoplay = true, again = false, lazy = false, ready = null)
   }
   const q = ready ? ready.q : liteQ();
   if (q) askLite();
-  loadedURL = streamURL(item.assetId, q);
+  loadedPlay = ready ? ready.play : q ? uuid() : '';
+  loadedURL = playURL(item.assetId, q, loadedPlay);
   const d = ready && isFinite(audio.duration) ? audio.duration : (item.durationMs || 0) / 1000;
   player.set({ index, scrub: null, duration: d, buffering: autoplay && !ready, liteLoaded: !!q, liteGot: null, liteLater: false });
   clock.set({ time: (pendingSeek || 0) / 1000 });
@@ -429,7 +434,7 @@ function askGot() {
   const s = player.get(), item = s.queue[s.index];
   if (!s.liteLoaded || s.liteGot !== null || !item || !shrinks(item.asset)) return;
   const loaded = loads;
-  get(`/stream/${item.assetId}/lite`).then((r) => {
+  get(`/stream/${item.assetId}/lite${loadedPlay ? '?play=' + loadedPlay : ''}`).then((r) => {
     if (loads === loaded) player.set({ liteGot: !!r.lite, liteLater: !!r.later });
   }, () => {});
 }
@@ -934,15 +939,20 @@ function forgetSession() {
 
 // resetPlayer stops playback and forgets the queue (clearing the queue; signOut: logging out,
 // which also forgets what another tab kept). With report, the playback so far is reported first.
+let letGo = null;
+// preloadLetGo is the server told to let go of the preload at sign-out: awaited before signing out.
+export const preloadLetGo = () => letGo;
+
 export function resetPlayer(withReport = true, signOut = false) {
   if (withReport) report(false, true);
   if (owner || signOut) forgetSession();
   owner = false;
   gen++;
   warm = null;
-  if (signOut) { // nothing to let go of: it would be refused
+  if (signOut) { // what the server preloads for this tab is let go of while the login works, if it still does (review #240)
     clearTimeout(retry);
     retry = 0;
+    letGo = told !== '' || ahead ? api('DELETE', '/stream/prefetch', undefined, { allow401: true }).catch(() => {}) : null;
     target = told = '';
     signedIn++;
   }
@@ -1127,6 +1137,9 @@ export const endScrub = (commit) => {
 // One ask is sent at a time, for what is wanted when it is sent: one wanted no more is never sent
 // later. One that fails leaves the server's preload unknown, and is tried again a few times, further
 // and further apart (review #199); a change of what is wanted is sent at once.
+// The song loaded ahead (gapless playback) is the server's preload from the moment its stream is
+// asked for (pre=1), whether preloading is on or not: it is let go of the same way once it is not
+// next any more, or the queue is cleared (review #240).
 let target = ''; // the preload to ask for: its path, re-encoded in lite mode ('': none)
 let told = ''; // what the server was told and took (null: not known)
 let sending = false;
@@ -1139,8 +1152,7 @@ function prefetchNext() {
   const cur = s.queue[s.index];
   if (cur && cur.qid !== warm) return; // another queue, its song not started yet
   const n = !cur || !s.preload || s.repeat === 'one' ? null : s.queue[s.index + 1] || (s.repeat === 'all' && !s.radio ? s.queue[0] : null);
-  const q = liteQ();
-  const want = n ? `/stream/${n.assetId}/prefetch${q ? '?q=' + q : ''}` : '';
+  const want = ahead ? preloadPath(ahead.item, ahead.q) : n ? preloadPath(n, liteQ()) : '';
   if (want !== target) {
     target = want;
     tries = 0;
@@ -1149,6 +1161,7 @@ function prefetchNext() {
   }
   tell();
 }
+const preloadPath = (item, q) => `/stream/${item.assetId}/prefetch${q ? '?q=' + q : ''}`;
 function tell() {
   if (sending || retry || target === told || tries > 4) return;
   const want = target, my = signedIn;
@@ -1430,7 +1443,7 @@ function considerAhead() {
   if (ahead && !still(ahead, w)) dropAhead();
   if (!w || ahead || retiring || audio.paused || w.item.qid === aheadFailed || !(audio.duration - audio.currentTime <= AHEAD_S)) return;
   const q = liteQ();
-  const a = ahead = { item: w.item, again: w.again, q, armed: false, timer: 0 };
+  const a = ahead = { item: w.item, again: w.again, q, play: q ? uuid() : '', armed: false, timer: 0 };
   spare.oncanplay = () => ahead === a && arm();
   spare.onerror = () => { // it loads once this one ended, as before
     if (ahead !== a) return;
@@ -1438,8 +1451,10 @@ function considerAhead() {
     dropAhead();
   };
   applyVolume(); // its own balance
-  spare.src = streamURL(w.item.assetId, q) + (q ? '&' : '?') + 'pre=1';
+  spare.src = playURL(w.item.assetId, q, a.play) + (q ? '&' : '?') + 'pre=1';
   if (q) askLite();
+  told = preloadPath(w.item, q); // its stream made it the server's preload
+  prefetchNext();
 }
 
 // arm sets the start of the song loaded ahead, once it can play and this one has less than a second
@@ -1542,6 +1557,7 @@ function dropAhead() {
   spare.oncanplay = spare.onerror = null;
   spare.removeAttribute('src');
   spare.load();
+  prefetchNext(); // the server lets go of it too, unless it is preloaded anyway
 }
 
 // quietSpare stops what the spare element does: a song loaded ahead, or the last samples of the one before.

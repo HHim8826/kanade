@@ -37,8 +37,22 @@ func (s *Store) FindSidecar(ctx context.Context, albumID int64, sha string, size
 }
 
 func (s *Store) AddSidecar(ctx context.Context, albumID int64, name, kind, sha string, size int64, driveFileID string) (int64, error) {
-	r, err := s.db.ExecContext(ctx, `INSERT INTO sidecars (album_id, name, kind, sha256, size, file_ref, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`, nullID(albumID), name, kind, sha, size, driveFileID, db.Now())
+	return addSidecar(ctx, s.db, albumID, name, kind, sha, size, driveFileID)
+}
+
+// KeepSidecar is AddSidecar for a file just kept at ref by a Put that began at since (keepableTx).
+func (s *Store) KeepSidecar(ctx context.Context, albumID int64, name, kind, sha string, size int64, ref string, since int64) (int64, error) {
+	var id int64
+	err := s.keep(ctx, ref, since, func(tx *sql.Tx) (err error) {
+		id, err = addSidecar(ctx, tx, albumID, name, kind, sha, size, ref)
+		return err
+	})
+	return id, err
+}
+
+func addSidecar(ctx context.Context, q querier, albumID int64, name, kind, sha string, size int64, ref string) (int64, error) {
+	r, err := q.ExecContext(ctx, `INSERT INTO sidecars (album_id, name, kind, sha256, size, file_ref, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, nullID(albumID), name, kind, sha, size, ref, db.Now())
 	if err != nil {
 		return 0, err
 	}
@@ -274,9 +288,68 @@ func lockTrash(ctx context.Context, file string) error {
 	}
 }
 
-// ErrInTrash is a Drive file that went to the trash after it left the library; a re-import that
-// found it just before must upload the file again.
-var ErrInTrash = errors.New("this file in Drive was just moved to the trash; it is uploaded again on retry")
+// ErrInTrash is a file that went to the trash after it left the library; a re-import (or a move)
+// that found it just before must keep the file again.
+var ErrInTrash = errors.New("this file was just moved to the trash; it is uploaded again on retry")
+
+// PastTrash returns once the millisecond in which ErrInTrash was told is over: the move to the
+// trash it told of is recorded in it or before, and a Put begun now began after it.
+func PastTrash() {
+	for t := db.Now(); db.Now() <= t; {
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// keep has the library take up a file just kept at ref, by a Put that began at since, with publish,
+// in one transaction under the trash lock (keepableTx).
+func (s *Store) keep(ctx context.Context, ref string, since int64, publish func(tx *sql.Tx) error) error {
+	if err := lockTrash(ctx, ref); err != nil {
+		return err
+	}
+	defer trashMu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := keepableTx(ctx, tx, ref, since); err != nil {
+		return err
+	}
+	if err := publish(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// keepableTx checks, in tx with the trash lock held, that a file just kept at ref by a Put that
+// began at since can be taken up, and drops what was owed to the trash for it. Its store must be
+// there still: one removed meanwhile is ErrStoreGone (review #236). A Put finds a copy there with
+// the same bytes rather than writing it again, one owed to the trash too: one that went to the
+// trash after since may be that copy, and is ErrInTrash, to be kept again (reviews #241, #243); one
+// that went before was written anew. A Drive file that went to the trash a short while ago is
+// ErrInTrash whenever it went (a new one has another ID); since 0 is a Put not known to be later.
+func keepableTx(ctx context.Context, tx *sql.Tx, ref string, since int64) error {
+	if store, ok := refStore(ref); ok {
+		var there int
+		switch err := tx.QueryRowContext(ctx, `SELECT 1 FROM stores WHERE id = ?`, store).Scan(&there); {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrStoreGone
+		case err != nil:
+			return err
+		}
+	}
+	var done int64
+	switch err := tx.QueryRowContext(ctx, `SELECT done_at FROM file_trash WHERE file_id = ?`, ref).Scan(&done); {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil
+	case err != nil:
+		return err
+	case done > db.Now()-trashMemory.Milliseconds() && (done >= since || !strings.Contains(ref, ":")):
+		return ErrInTrash
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, ref)
+	return err
+}
 
 // trashMemory is how long a file moved to the trash is remembered: long enough for a re-import
 // that found it just before, short enough that a file the user restored from the trash later can

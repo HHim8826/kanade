@@ -4,7 +4,7 @@ import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { EffectsPanel } from './effects.js';
 import { confirmDialog, textDialog } from './organize.js';
 import { showShortcuts } from '../shortcuts.js';
-import { askLite, canOpus, player, resetPlayer, setMode, setPrefs } from '../player.js';
+import { askLite, canOpus, player, preloadLetGo, resetPlayer, setMode, setPrefs } from '../player.js';
 import { fromAgent } from '../presence.js';
 import { DiscordSettings } from './discord.js';
 import { DevicesSettings } from './remote.js';
@@ -789,6 +789,7 @@ function SettingsPage({ first, onLogout, section }) {
   }, [section]);
   const logout = async () => {
     resetPlayer(true, true); // stop and report the playback while the login still works (review #14)
+    await preloadLetGo(); // and let go of what the server preloads for it (review #240)
     await post('/logout').catch(() => {});
     onLogout();
   };

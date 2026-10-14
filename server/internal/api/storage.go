@@ -13,6 +13,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/mover"
 	"github.com/HHim8826/kanade/server/internal/storage"
 	"github.com/HHim8826/kanade/server/internal/storesync"
 )
@@ -24,9 +25,10 @@ import (
 type storeInfo struct {
 	storage.Store
 	Use      library.StoreUse `json:"use"`
-	Running  bool             `json:"running,omitempty"` // a scan or check now
-	Location string           `json:"location"`          // where it is, for people
-	SignedIn bool             `json:"signed_in"`         // a OneDrive's sign-in is kept (true for others)
+	Running  bool             `json:"running,omitempty"`   // a scan or check now
+	Location string           `json:"location"`            // where it is, for people
+	SignedIn bool             `json:"signed_in"`           // a OneDrive's sign-in is kept (true for others)
+	MovingIn int              `json:"moving_in,omitempty"` // moves not over whose files go there: it stays
 }
 
 // location says where a store is: its folder, bucket or OneDrive folder.
@@ -58,7 +60,11 @@ func (s *Server) storeInfo(ctx context.Context, st storage.Store) (storeInfo, er
 		}
 	}
 	use, err := s.lib.StoreUse(ctx, st.Kind, st.ID)
-	return storeInfo{Store: st, Use: use, Location: location(st), SignedIn: st.SignedIn(), Running: running}, err
+	if err != nil {
+		return storeInfo{}, err
+	}
+	moving, err := mover.Heading(ctx, s.db, strconv.FormatInt(st.ID, 10))
+	return storeInfo{Store: st, Use: use, Location: location(st), SignedIn: st.SignedIn(), Running: running, MovingIn: moving}, err
 }
 
 func (s *Server) storageInfo(w http.ResponseWriter, r *http.Request) {
@@ -106,7 +112,7 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, storage.ErrNoStore):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, storage.ErrReadOnly), errors.Is(err, library.ErrStoreInUse), errors.Is(err, importer.ErrScanning),
-		errors.Is(err, storesync.ErrRunning):
+		errors.Is(err, storesync.ErrRunning), errors.Is(err, mover.ErrDestination):
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, storage.ErrOffline), errors.Is(err, storage.ErrAuth):
 		writeError(w, http.StatusServiceUnavailable, err)
@@ -216,8 +222,8 @@ func (s *Server) changeStore(w http.ResponseWriter, r *http.Request) {
 }
 
 // removeStore removes a store. A source's songs leave the library with it (its files stay where
-// they are); a managed store must hold none of the library's files: moving them elsewhere is a
-// feature of its own.
+// they are); a managed store must hold none of the library's files (moving them elsewhere is a
+// feature of its own), nor be where a move takes them.
 func (s *Server) removeStore(w http.ResponseWriter, r *http.Request) {
 	st, ok := s.store(w, r)
 	if !ok {
@@ -230,16 +236,32 @@ func (s *Server) removeStore(w http.ResponseWriter, r *http.Request) {
 	}
 	songs := 0
 	if st.Mode == storage.Managed {
-		use, err := s.lib.StoreUse(ctx, st.Kind, st.ID)
+		// What it holds, and the moves to it, are read in the transaction that removes it: a file
+		// kept there meanwhile is taken up first, and keeps it, or finds it gone (review #236).
+		err := func() error {
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback()
+			use, err := s.lib.StoreUseTx(ctx, tx, st.Kind, st.ID)
+			if err != nil {
+				return err
+			}
+			if use.Songs+use.Others > 0 {
+				return fmt.Errorf("%w: %d songs and %d covers or sidecars", library.ErrStoreInUse, use.Songs, use.Others)
+			}
+			if n, err := mover.Heading(ctx, tx, strconv.FormatInt(st.ID, 10)); err != nil {
+				return err
+			} else if n > 0 {
+				return mover.ErrDestination
+			}
+			if err := s.files.RemoveTx(ctx, tx, st.ID); err != nil {
+				return err
+			}
+			return tx.Commit()
+		}()
 		if err != nil {
-			s.internal(w, r, err)
-			return
-		}
-		if use.Songs+use.Others > 0 {
-			s.storeError(w, r, fmt.Errorf("%w: %d songs and %d covers or sidecars", library.ErrStoreInUse, use.Songs, use.Others))
-			return
-		}
-		if err := s.files.Remove(ctx, st.ID); err != nil {
 			s.storeError(w, r, err)
 			return
 		}

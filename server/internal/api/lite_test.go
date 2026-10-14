@@ -451,3 +451,67 @@ func TestStreamLiteLongSong(t *testing.T) {
 		t.Fatalf("from the middle: %d %q", res.StatusCode, body)
 	}
 }
+
+// A playback named by its stream (?play=) keeps what its first request got: the original of a long
+// song, its ranges of the same file, after another player played another song once the song was
+// made; another playback gets it re-encoded (review #242).
+func TestStreamLitePlaybackKept(t *testing.T) {
+	drive := &memDrive{files: map[string][]byte{}, down: map[string]bool{}}
+	var dir string
+	s, h := newTestServer(t, func(d *Deps) {
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		cache, err := stream.NewCache(drive, d.Config.Path(config.DirCache), 64<<20, log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Cache = cache
+		dir = d.Config.Path(config.DirLite)
+		if d.Lite, err = lite.New(dir, LiteBudget, prefixer{}, cache, log); err != nil {
+			t.Fatal(err)
+		}
+	})
+	token := loginToken(t, s, h)
+	long, other := addSong(t, s, drive, "l1", "flac", 900_000, "fLaC drama"+pad), addSong(t, s, drive, "o1", "flac", 900_000, "fLaC other"+pad)
+	s.db.Exec(`UPDATE assets SET duration_ms = 1800000 WHERE sha256 = 'l1'`)
+	get := func(path, rng string) (*http.Response, string) {
+		req, _ := http.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		if rng != "" {
+			req.Header.Set("Range", rng)
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		body, _ := io.ReadAll(rec.Result().Body)
+		return rec.Result(), string(body)
+	}
+	stream := func(id int64, play, rng string) (*http.Response, string) {
+		return get(fmt.Sprintf("/api/v1/stream/%d?q=%s&play=%s", id, lite.Quality, play), rng)
+	}
+	if res, body := stream(long, "A", "bytes=0-"); res.Header.Get("Content-Type") != "audio/flac" || body != "fLaC drama"+pad {
+		t.Fatalf("a long song: %q %v", body, res.Header)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dir, "l1.opus.ogg")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("not made meanwhile")
+		}
+	}
+	if _, body := stream(other, "B", ""); body != "OggS lite of fLaC other" { // another player
+		t.Fatalf("another player: %q", body)
+	}
+	res, body := stream(long, "A", "bytes=5-")
+	if res.StatusCode != 206 || res.Header.Get("Content-Type") != "audio/flac" || body != "drama"+pad {
+		t.Fatalf("the first playback sought: %d %q %v", res.StatusCode, body, res.Header)
+	}
+	if _, said := get(fmt.Sprintf("/api/v1/stream/%d/lite?play=A", long), ""); strings.TrimSpace(said) != `{"later":true,"lite":false}` {
+		t.Fatalf("the first playback said %s", said)
+	}
+	if _, body := stream(long, "C", "bytes=0-"); body != "OggS lite of fLaC drama" {
+		t.Fatalf("another playback: %q", body)
+	}
+	if _, said := get(fmt.Sprintf("/api/v1/stream/%d/lite?play=C", long), ""); strings.TrimSpace(said) != `{"later":false,"lite":true}` {
+		t.Fatalf("another playback said %s", said)
+	}
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/staging"
 	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
 
@@ -60,10 +61,16 @@ func (s *Server) arrangeImages(w http.ResponseWriter, r *http.Request) {
 }
 
 // addAlbumImage keeps a picture uploaded for an album's gallery: the request's body, named by name.
+// It is received in staging, which the staging budget holds room for until it is gone: all of it
+// first when its length is told, or as it comes (review #239).
 func (s *Server) addAlbumImage(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if r.ContentLength > maxImageUpload {
+		writeError(w, http.StatusRequestEntityTooLarge, importer.ErrNotImage)
 		return
 	}
 	f, err := os.CreateTemp(s.cfg.Path(config.DirStaging), "image-*")
@@ -71,10 +78,20 @@ func (s *Server) addAlbumImage(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
+	held := &heldWriter{ctx: r.Context(), budget: s.staging, w: f}
+	defer held.release() // after the file is gone
 	defer os.Remove(f.Name())
-	n, err := io.Copy(f, io.LimitReader(r.Body, maxImageUpload+1))
+	err = held.hold(r.ContentLength)
+	var n int64
+	if err == nil {
+		n, err = io.Copy(held, io.LimitReader(r.Body, maxImageUpload+1))
+	}
 	if cerr := f.Close(); err == nil {
 		err = cerr
+	}
+	if errors.Is(err, staging.ErrOverBudget) || errors.Is(err, staging.ErrReserve) {
+		writeError(w, http.StatusInsufficientStorage, err)
+		return
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -98,6 +115,48 @@ func (s *Server) addAlbumImage(w http.ResponseWriter, r *http.Request) {
 }
 
 const maxImageUpload = 128 << 20
+
+// heldWriter writes to w what the staging budget holds room for: what was held for it (hold), and
+// more as it comes, a step at a time. The room is held until release.
+type heldWriter struct {
+	ctx     context.Context
+	budget  *staging.Budget // nil: not limited
+	w       io.Writer
+	held, n int64
+	frees   []func()
+}
+
+const heldStep = 8 << 20
+
+func (h *heldWriter) hold(n int64) error {
+	if h.budget == nil || n <= 0 {
+		return nil
+	}
+	free, err := h.budget.Hold(h.ctx, n)
+	if err != nil {
+		return err
+	}
+	h.frees = append(h.frees, free)
+	h.held += n
+	return nil
+}
+
+func (h *heldWriter) Write(p []byte) (int, error) {
+	if more := h.n + int64(len(p)) - h.held; h.budget != nil && more > 0 {
+		if err := h.hold(max(more, heldStep)); err != nil {
+			return 0, err
+		}
+	}
+	n, err := h.w.Write(p)
+	h.n += int64(n)
+	return n, err
+}
+
+func (h *heldWriter) release() {
+	for _, free := range h.frees {
+		free()
+	}
+}
 
 // hideImage takes a picture out of its gallery.
 func (s *Server) hideImage(w http.ResponseWriter, r *http.Request) {

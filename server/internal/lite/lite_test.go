@@ -704,3 +704,44 @@ func TestTimeUpIsAFailure(t *testing.T) {
 		t.Fatalf("after its time was up: %v, made %d times", err, enc.runs.Load())
 	}
 }
+
+// A playback named (Song.Play) sent the original is sent it for all its requests, whatever another
+// player plays meanwhile; another playback of the song gets it re-encoded once made (review #242).
+func TestPlaybackKeepsWhatItGot(t *testing.T) {
+	src, enc := newSource(t), &encoder{}
+	s := store(t, 1<<20, enc, src)
+	ctx := context.Background()
+	long := src.add("long", []byte("an hour of drama"))
+	long.Duration = 60 * 60 * 1000
+	a := long
+	a.Play = "a"
+	if _, err := s.Get(ctx, a, 0); !errors.Is(err, ErrLater) {
+		t.Fatalf("a long song: %v", err)
+	}
+	eventually(t, "made meanwhile", func() bool { _, err := os.Stat(s.path(long.SHA256)); return err == nil })
+	// Another player plays another song: this playback goes on as it began.
+	other := src.add("other", []byte("another song"))
+	other.Play = "b"
+	if g := got(t, s, ctx, other); g != "opus:another song" {
+		t.Fatalf("the other player: %q", g)
+	}
+	s.Played(src.add("plain", []byte("one played as it is")).SHA256)
+	if _, err := s.Get(ctx, a, 1<<10); !errors.Is(err, ErrLater) {
+		t.Fatalf("the same playback, sought after another played: %v", err)
+	}
+	if lite, later := s.How(long.SHA256, "a"); lite || !later {
+		t.Fatalf("this playback said lite %v, later %v", lite, later)
+	}
+	// Another playback of it, here or on another player: re-encoded.
+	c := long
+	c.Play = "c"
+	if g := got(t, s, ctx, c); g != "opus:an hour of drama" {
+		t.Fatalf("another playback: %q", g)
+	}
+	if lite, later := s.How(long.SHA256, "c"); !lite || later {
+		t.Fatalf("another playback said lite %v, later %v", lite, later)
+	}
+	if _, err := s.Get(ctx, a, 2<<10); !errors.Is(err, ErrLater) {
+		t.Fatalf("the first playback, after another: %v", err)
+	}
+}

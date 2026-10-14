@@ -55,7 +55,105 @@ func (s *Store) FindImage(ctx context.Context, albumID int64, sha string, size i
 
 // AddImage keeps a picture with an album.
 func (s *Store) AddImage(ctx context.Context, m AlbumImage) (int64, error) {
-	r, err := s.db.ExecContext(ctx, `INSERT INTO album_images (album_id, path, kind, disc, sha256, size, mime, width, height, file_ref, created_at)
+	return addImage(ctx, s.db, m)
+}
+
+// KeepImage is AddImage for a picture just kept at m.Ref by a Put that began at since (keepableTx).
+func (s *Store) KeepImage(ctx context.Context, m AlbumImage, since int64) (int64, error) {
+	var id int64
+	err := s.keep(ctx, m.Ref, since, func(tx *sql.Tx) (err error) {
+		id, err = addImage(ctx, tx, m)
+		return err
+	})
+	return id, err
+}
+
+// PlaceImage takes a picture in a source into its album's gallery where it is (m.Ref), read just
+// now as m (review #238). The pictures that were there with other bytes are no longer: they go,
+// and m takes the place of the album's one in its gallery (what it is, its disc and order; taken
+// out, it stays out). The album having m already, it is read from here if it was missing, and one
+// taken out stays out. It reports whether the gallery has a picture more, or back.
+func (s *Store) PlaceImage(ctx context.Context, m AlbumImage) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	// The store is there still, in the same transaction as its removal would be (review #222).
+	if store, ok := refStore(m.Ref); ok {
+		var there int
+		switch err := tx.QueryRowContext(ctx, `SELECT 1 FROM stores WHERE id = ?`, store).Scan(&there); {
+		case errors.Is(err, sql.ErrNoRows):
+			return false, ErrStoreGone
+		case err != nil:
+			return false, err
+		}
+	}
+	// What was there before, the album's own first.
+	var old struct {
+		id, position int64
+		kind         string
+		disc         int
+		hidden       bool
+	}
+	err = tx.QueryRowContext(ctx, mergedFrom+` SELECT id, kind, disc, position, hidden FROM album_images
+		WHERE file_ref = ?2 AND NOT (sha256 = ?3 AND size = ?4) ORDER BY album_id IN (SELECT id FROM family) DESC, id LIMIT 1`,
+		m.AlbumID, m.Ref, m.SHA256, m.Size).Scan(&old.id, &old.kind, &old.disc, &old.position, &old.hidden)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM album_images WHERE file_ref = ? AND NOT (sha256 = ? AND size = ?)`, m.Ref, m.SHA256, m.Size); err != nil {
+		return false, err
+	}
+	var have int64
+	var missing bool
+	switch err := tx.QueryRowContext(ctx, mergedFrom+` SELECT id, missing FROM album_images WHERE sha256 = ?2 AND size = ?3
+		AND album_id IN (SELECT id FROM family) ORDER BY missing, id LIMIT 1`, m.AlbumID, m.SHA256, m.Size).Scan(&have, &missing); {
+	case err == nil:
+		if !missing {
+			return false, tx.Commit()
+		}
+		var hidden bool
+		if err := tx.QueryRowContext(ctx, `UPDATE album_images SET file_ref = ?, missing = 0 WHERE id = ? RETURNING hidden`, m.Ref, have).Scan(&hidden); err != nil {
+			return false, err
+		}
+		return !hidden, tx.Commit()
+	case !errors.Is(err, sql.ErrNoRows):
+		return false, err
+	}
+	if old.id != 0 {
+		m.Kind, m.Disc = old.kind, old.disc
+	}
+	id, err := addImage(ctx, tx, m)
+	if err != nil {
+		return false, err
+	}
+	if old.id != 0 {
+		if _, err := tx.ExecContext(ctx, `UPDATE album_images SET position = ?, hidden = ? WHERE id = ?`, old.position, old.hidden, id); err != nil {
+			return false, err
+		}
+	}
+	return !old.hidden, tx.Commit()
+}
+
+// SetImagesMissing says the pictures at refs, files in a source, are gone (or have other bytes now,
+// to be read again), or back as they were (review #238).
+func (s *Store) SetImagesMissing(ctx context.Context, refs []string, missing bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, ref := range refs {
+		if _, err := tx.ExecContext(ctx, `UPDATE album_images SET missing = ? WHERE file_ref = ?`, missing, ref); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func addImage(ctx context.Context, q querier, m AlbumImage) (int64, error) {
+	r, err := q.ExecContext(ctx, `INSERT INTO album_images (album_id, path, kind, disc, sha256, size, mime, width, height, file_ref, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, nullID(m.AlbumID), m.Path, m.Kind, m.Disc, m.SHA256, m.Size, m.MIME, m.Width, m.Height,
 		m.Ref, db.Now())
 	if err != nil {
@@ -64,11 +162,12 @@ func (s *Store) AddImage(ctx context.Context, m AlbumImage) (int64, error) {
 	return r.LastInsertId()
 }
 
-// Image is one picture, and whether it was taken out of its gallery.
+// Image is one picture, and whether it is out of its gallery: taken out, or its file in a source
+// gone or changed (review #238).
 func (s *Store) Image(ctx context.Context, id int64) (*AlbumImage, bool, error) {
 	var m AlbumImage
 	var hidden bool
-	err := s.db.QueryRowContext(ctx, `SELECT `+imageCols+`, hidden FROM album_images WHERE id = ?`, id).Scan(&m.ID, &m.AlbumID, &m.Path,
+	err := s.db.QueryRowContext(ctx, `SELECT `+imageCols+`, hidden OR missing FROM album_images WHERE id = ?`, id).Scan(&m.ID, &m.AlbumID, &m.Path,
 		&m.Kind, &m.Disc, &m.position, &m.SHA256, &m.Size, &m.MIME, &m.Width, &m.Height, &m.Ref, &hidden)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
@@ -82,7 +181,7 @@ func (s *Store) Image(ctx context.Context, id int64) (*AlbumImage, bool, error) 
 // rest by their paths in natural order.
 func (s *Store) AlbumImages(ctx context.Context, albumID int64) ([]AlbumImage, error) {
 	rows, err := s.db.QueryContext(ctx, mergedFrom+` SELECT `+imageCols+` FROM album_images
-		WHERE id IN (SELECT min(id) FROM album_images WHERE album_id IN (SELECT id FROM family) AND hidden = 0 GROUP BY sha256, size)`, albumID)
+		WHERE id IN (SELECT min(id) FROM album_images WHERE album_id IN (SELECT id FROM family) AND hidden = 0 AND missing = 0 GROUP BY sha256, size)`, albumID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +219,7 @@ func sortImages(list []AlbumImage) {
 func (s *Store) albumImageCount(ctx context.Context, albumID int64) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, mergedFrom+` SELECT count(DISTINCT sha256 || '/' || size) FROM album_images
-		WHERE album_id IN (SELECT id FROM family) AND hidden = 0`, albumID).Scan(&n)
+		WHERE album_id IN (SELECT id FROM family) AND hidden = 0 AND missing = 0`, albumID).Scan(&n)
 	return n, err
 }
 
@@ -250,10 +349,14 @@ func refUsedTx(ctx context.Context, q querier, ref string) (bool, error) {
 	return used == 1, err
 }
 
-// ShowImage puts a picture taken out of its gallery back, its file at ref now (uploaded again).
-func (s *Store) ShowImage(ctx context.Context, id int64, ref string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE album_images SET hidden = 0, file_ref = ? WHERE id = ?`, ref, id)
-	return err
+// ShowImage puts a picture out of its gallery (taken out, or its source's file gone) back, its file
+// just kept at ref (uploaded again) by a Put that began at since (keepableTx): the copy it found there may have gone to the
+// trash meanwhile (review #241).
+func (s *Store) ShowImage(ctx context.Context, id int64, ref string, since int64) error {
+	return s.keep(ctx, ref, since, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE album_images SET hidden = 0, missing = 0, file_ref = ? WHERE id = ?`, ref, id)
+		return err
+	})
 }
 
 // ImageCover is the cover a picture of a gallery (a JPEG or PNG) makes: one with its content kept

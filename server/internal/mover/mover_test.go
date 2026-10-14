@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -377,5 +378,126 @@ func TestMoveTries(t *testing.T) {
 	}
 	if v.State != Done || v.Failed != 1 || v.Moved != 3 || v.Failures[0].Reason != ReasonError {
 		t.Fatalf("%+v", v)
+	}
+}
+
+// Canceled after it was chosen and before its files began to move, a move moves none (review #237).
+func TestMoveCanceledBeforeRun(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t)
+	a := f.album("One")
+	v, err := f.m.Start(ctx, Request{Dest: "2", Albums: []int64{a.id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.m.Cancel(ctx, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.m.run(ctx, v.ID); err != nil { // as work does with the move it chose before
+		t.Fatal(err)
+	}
+	if v = f.get(v.ID); v.State != Canceled || v.Moved != 0 {
+		t.Fatalf("%+v", v)
+	}
+	for kind, ref := range f.refs(a) {
+		if ref != a.refs[kind] {
+			t.Fatalf("%s at %s", kind, ref)
+		}
+	}
+	for _, name := range f.fake.Names() {
+		if strings.Contains(name, "Band") {
+			t.Fatalf("in the bucket: %s", name)
+		}
+	}
+}
+
+// The destination removed while a file is being kept there: the library still reads it where it
+// was, nothing is owed to the trash, and the move stops (review #236).
+func TestMoveDestRemoved(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t)
+	a := f.album("One")
+	held, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.fake.Fail = func(r *http.Request) int {
+		if r.Method == "PUT" && strings.Contains(r.URL.Path, "Song") {
+			once.Do(func() { close(held); <-release })
+		}
+		return 0
+	}
+	v, err := f.m.Start(ctx, Request{Dest: "2", Albums: []int64{a.id}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { f.work(); close(done) }()
+	<-held
+	if err := f.set.Remove(ctx, f.bucket.ID); err != nil { // as it is removed at this moment
+		t.Fatal(err)
+	}
+	close(release)
+	<-done
+	if v = f.get(v.ID); v.State != Canceled || v.Reason != ReasonDestGone || v.Moved != 0 {
+		t.Fatalf("%+v", v)
+	}
+	if now := f.refs(a); now["song"] != a.refs["song"] {
+		t.Fatalf("the song at %s", now["song"])
+	}
+	if owed, _ := f.owed(a.refs["song"]); owed {
+		t.Fatal("the song not moved is owed to the trash")
+	}
+}
+
+// A copy that a Put finds at the destination, owed to the trash and going there meanwhile, is kept
+// again before the library reads it there (review #243).
+func TestMoveOntoTrashed(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t)
+	a := f.album("One")
+	// To the bucket and back: the bucket's copies are owed to its trash.
+	v, _ := f.m.Start(ctx, Request{Dest: "2", Albums: []int64{a.id}})
+	f.work()
+	inBucket := f.refs(a)
+	v, _ = f.m.Start(ctx, Request{Dest: "1", Albums: []int64{a.id}})
+	f.work()
+	if v = f.get(v.ID); v.State != Done || f.refs(a)["song"] != a.refs["song"] {
+		t.Fatalf("back %+v", v)
+	}
+	song := inBucket["song"]
+	if owed, _ := f.owed(song); !owed {
+		t.Fatal("the bucket's copy is not owed to the trash")
+	}
+	// The bucket's copy of the song goes to the trash slowly: the next move's Put finds it there.
+	trashing, found, trashed := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	f.fake.Fail = func(r *http.Request) int {
+		if r.Method == "HEAD" && strings.Contains(r.URL.Path, "Song") {
+			once.Do(func() { close(found) })
+		}
+		return 0
+	}
+	go func() {
+		defer close(trashed)
+		if n, err := f.lib.TrashFile(ctx, song, func(ctx context.Context, ref string) error {
+			close(trashing)
+			<-found
+			return f.set.Trash(ctx, ref)
+		}); n != library.Trashed {
+			t.Errorf("trash: %d %v", n, err)
+		}
+	}()
+	<-trashing
+	v, _ = f.m.Start(ctx, Request{Dest: "2", Albums: []int64{a.id}})
+	f.work()
+	<-trashed
+	if v = f.get(v.ID); v.State != Done || v.Moved != 4 {
+		t.Fatalf("%+v", v)
+	}
+	now := f.refs(a)
+	if now["song"] != song || !bytes.Equal(f.read(song), a.song) {
+		t.Fatalf("the song at %s, was at %s", now["song"], song)
+	}
+	if owed, _ := f.owed(song); owed {
+		t.Fatal("the library's copy is owed to the trash")
 	}
 }

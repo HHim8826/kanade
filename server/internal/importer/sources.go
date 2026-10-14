@@ -233,6 +233,9 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		if res.Gone, err = im.lib.MarkRefsMissing(ctx, refs); err != nil {
 			return res, err
 		}
+		if err := im.lib.SetImagesMissing(ctx, refs, true); err != nil { // gallery pictures too (review #238)
+			return res, err
+		}
 		if err := im.setGone(ctx, id, gone, db.Now()); err != nil {
 			return res, err
 		}
@@ -250,18 +253,25 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		if res.Back, err = im.lib.RestoreRefs(ctx, refs); err != nil {
 			return res, err
 		}
+		if err := im.lib.SetImagesMissing(ctx, refs, false); err != nil {
+			return res, err
+		}
 		if err := im.setGone(ctx, id, back, 0); err != nil {
 			return res, err
 		}
 	}
 	// Changed: the song there has other bytes now; it is missing until the new ones are imported
-	// (the same song again when only the time changed).
+	// (the same song again when only the time changed). A gallery's picture alike: the new bytes
+	// take its place in the gallery as another picture (review #238).
 	if len(changed) > 0 {
 		refs := make([]string, len(changed))
 		for i, o := range changed {
 			refs[i] = ref(o.Key)
 		}
 		if _, err := im.lib.MarkRefsMissing(ctx, refs); err != nil {
+			return res, err
+		}
+		if err := im.lib.SetImagesMissing(ctx, refs, true); err != nil {
 			return res, err
 		}
 		res.Changed = len(changed)

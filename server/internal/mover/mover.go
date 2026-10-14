@@ -133,6 +133,20 @@ var (
 	ErrBusy     = errors.New("the move is still going on")
 )
 
+// ErrDestination is a store files are being moved to: it is not removed, nor its folder changed,
+// before the move is over or canceled (review #236).
+var ErrDestination = errors.New("files are being moved to this storage location: wait for the move to end, or cancel it")
+
+// Heading counts the moves not over whose destination is dest (a store's ID); in the transaction
+// that removes it.
+func Heading(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, dest string) (int, error) {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT count(*) FROM moves WHERE dest = ? AND state IN (?, ?)`, dest, Running, Waiting).Scan(&n)
+	return n, err
+}
+
 // Plan says what moving r would do.
 func (m *Mover) Plan(ctx context.Context, r Request) (*Plan, error) {
 	if r.Dest == "" {
@@ -567,10 +581,8 @@ type item struct {
 func (m *Mover) run(ctx context.Context, id int64) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var dest, state string
-	if err := m.DB.QueryRowContext(ctx, `SELECT dest, state FROM moves WHERE id = ?`, id).Scan(&dest, &state); err != nil {
-		return err
-	}
+	// Cancel stops what it finds here: a cancel after the state is read below ends ctx, one before
+	// is read there (review #237).
 	m.mu.Lock()
 	m.curMove, m.stop, m.cur = id, cancel, Current{}
 	m.mu.Unlock()
@@ -579,10 +591,22 @@ func (m *Mover) run(ctx context.Context, id int64) error {
 		m.curMove, m.stop, m.cur = 0, nil, Current{}
 		m.mu.Unlock()
 	}()
-	if state == Waiting {
-		if _, err := m.DB.ExecContext(ctx, `UPDATE moves SET state = ?, reason = '', error = '' WHERE id = ? AND state = ?`, Running, id, Waiting); err != nil {
+	var dest, state string
+	if err := m.DB.QueryRowContext(ctx, `SELECT dest, state FROM moves WHERE id = ?`, id).Scan(&dest, &state); err != nil {
+		return err
+	}
+	switch state {
+	case Running:
+	case Waiting:
+		res, err := m.DB.ExecContext(ctx, `UPDATE moves SET state = ?, reason = '', error = '' WHERE id = ? AND state = ?`, Running, id, Waiting)
+		if err != nil {
 			return err
 		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil
+		}
+	default: // canceled since it was chosen
+		return nil
 	}
 	for {
 		var it item
@@ -683,7 +707,9 @@ func (m *Mover) moveItem(ctx context.Context, destID string, it item) result {
 		return r
 	}
 	defer release()
+	var since int64
 	put := func() (string, error) {
+		since = db.Now()
 		return dest.Put(ctx, storage.PutFile{Path: p, Dir: importer.HomeDir(it.kind, artist, album, sub), Name: name, MIME: it.mime,
 			Size: size, SHA256: it.sha, Sessions: &sessions{m, it.id}, Progress: m.progress})
 	}
@@ -693,12 +719,16 @@ func (m *Mover) moveItem(ctx context.Context, destID string, it item) result {
 	}
 	// Kept there: the library reads it from there now, even if the move is canceled at this moment
 	// (the copy would be left there, of nothing).
-	moved, err := m.Lib.Relocate(context.WithoutCancel(ctx), it.ref, ref, m.TrashAfter)
-	if errors.Is(err, library.ErrInTrash) { // the copy found there went to the trash meanwhile: another one
+	moved, err := m.Lib.Relocate(context.WithoutCancel(ctx), it.ref, ref, since, m.TrashAfter)
+	if errors.Is(err, library.ErrInTrash) { // the copy found there went to the trash meanwhile: kept again (review #243)
+		library.PastTrash()
 		if ref, err = put(); err != nil {
 			return destFailed(err)
 		}
-		moved, err = m.Lib.Relocate(context.WithoutCancel(ctx), it.ref, ref, m.TrashAfter)
+		moved, err = m.Lib.Relocate(context.WithoutCancel(ctx), it.ref, ref, since, m.TrashAfter)
+	}
+	if errors.Is(err, library.ErrStoreGone) { // removed while the file was kept there (review #236)
+		return destFailed(storage.ErrNoStore)
 	}
 	if err != nil {
 		return retry(err)

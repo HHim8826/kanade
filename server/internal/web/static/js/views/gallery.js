@@ -121,7 +121,8 @@ async function sendImages(album, files) {
       if (r.added) added++;
       else had++;
     } catch (e) {
-      failed.push(`「${f.name}」${e.status === 400 ? '不是 JPEG、PNG、WebP、TIFF 或 BMP 圖片' : '：' + e.message}`);
+      failed.push(`「${f.name}」${e.status === 400 ? '不是 JPEG、PNG、WebP、TIFF 或 BMP 圖片'
+        : e.status === 507 ? '：伺服器的暫存空間不夠（下載或匯入正在用），稍後再試' : '：' + e.message}`);
     }
   }
   if (added) changed();

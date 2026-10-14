@@ -147,16 +147,25 @@ type StoreUse struct {
 }
 
 func (s *Store) StoreUse(ctx context.Context, kind string, id int64) (StoreUse, error) {
+	return storeUse(ctx, s.db, kind, id)
+}
+
+// StoreUseTx is StoreUse in tx: with the store's removal (review #236).
+func (s *Store) StoreUseTx(ctx context.Context, tx *sql.Tx, kind string, id int64) (StoreUse, error) {
+	return storeUse(ctx, tx, kind, id)
+}
+
+func storeUse(ctx context.Context, q querier, kind string, id int64) (StoreUse, error) {
 	var u StoreUse
 	from, to := refRange(kind, id)
-	err := s.db.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0), coalesce(sum(state = ?3), 0) FROM assets
+	err := q.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0), coalesce(sum(state = ?3), 0) FROM assets
 		WHERE `+likeRefs("file_ref"), from, to, AssetMissing).Scan(&u.Songs, &u.Bytes, &u.Missing)
 	if err != nil {
 		return u, err
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM covers WHERE `+likeRefs("file_ref")+`)
+	err = q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM covers WHERE `+likeRefs("file_ref")+`)
 		+ (SELECT count(*) FROM sidecars WHERE `+likeRefs("file_ref")+`)
-		+ (SELECT count(*) FROM album_images WHERE hidden = 0 AND `+likeRefs("file_ref")+`)`, from, to).Scan(&u.Others)
+		+ (SELECT count(*) FROM album_images WHERE hidden = 0 AND missing = 0 AND `+likeRefs("file_ref")+`)`, from, to).Scan(&u.Others)
 	return u, err
 }
 

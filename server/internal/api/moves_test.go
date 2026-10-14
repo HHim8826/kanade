@@ -89,3 +89,48 @@ func TestMoves(t *testing.T) {
 		t.Fatal("still there")
 	}
 }
+
+// A location files are being moved to is not removed before the move is over or canceled (review #236).
+func TestMoveKeepsDestination(t *testing.T) {
+	s, h, token := storageServer(t)
+	ctx := context.Background()
+	roots := []string{t.TempDir(), t.TempDir()}
+	for i, root := range roots {
+		cfg, _ := json.Marshal(map[string]string{"root": root})
+		if rec := do(t, h, "POST", "/api/v1/storage", token, map[string]any{"kind": "local", "name": fmt.Sprint("Disk ", i+1), "mode": "managed",
+			"config": json.RawMessage(cfg)}); rec.Code != http.StatusCreated {
+			t.Fatalf("add: %d %s", rec.Code, rec.Body)
+		}
+	}
+	data := []byte("the song's bytes")
+	sum := sha256.Sum256(data)
+	os.MkdirAll(filepath.Join(roots[0], "library"), 0o755)
+	os.WriteFile(filepath.Join(roots[0], "library", "t.flac"), data, 0o644)
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: hex.EncodeToString(sum[:]), Size: int64(len(data)), Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "local:1:library/t.flac")
+	s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: "A", AlbumArtist: "y"})
+	rec := do(t, h, "POST", "/api/v1/moves", token, map[string]any{"dest": "2", "origin": "1"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("start: %d %s", rec.Code, rec.Body)
+	}
+	id := decode[mover.Move](t, rec.Body).ID
+	if rec := do(t, h, "DELETE", "/api/v1/storage/2", token, nil); rec.Code != http.StatusConflict {
+		t.Fatalf("removed the destination of a move: %d %s", rec.Code, rec.Body)
+	}
+	type stores struct {
+		Stores []struct {
+			ID       int64 `json:"id"`
+			MovingIn int   `json:"moving_in"`
+		}
+	}
+	info := decode[stores](t, do(t, h, "GET", "/api/v1/storage", token, nil).Body)
+	if len(info.Stores) != 2 || info.Stores[0].MovingIn != 0 || info.Stores[1].MovingIn != 1 {
+		t.Fatalf("stores %+v", info.Stores)
+	}
+	if rec := do(t, h, "POST", fmt.Sprintf("/api/v1/moves/%d/cancel", id), token, nil); rec.Code != http.StatusOK {
+		t.Fatalf("cancel: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "DELETE", "/api/v1/storage/2", token, nil); rec.Code != http.StatusOK {
+		t.Fatalf("remove once canceled: %d %s", rec.Code, rec.Body)
+	}
+}

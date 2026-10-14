@@ -252,7 +252,8 @@ func (s *Server) playingStream(w http.ResponseWriter, r *http.Request) {
 
 // streamLite tells a player in lite mode how song id came, asked once its stream answered (review
 // #209): re-encoded when its lite file is here, as it is otherwise (lossy at a low bitrate, not
-// smaller re-encoded, not made, or a server without lite mode).
+// smaller re-encoded, not made, or a server without lite mode). ?play= is the playback asked about,
+// as its stream named it (review #242).
 func (s *Server) streamLite(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -268,8 +269,9 @@ func (s *Server) streamLite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, errors.New("no such asset"))
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"lite": lite.Shrinks(a.Format, a.Bitrate) && s.lite.Has(a.SHA256),
-		"later": lite.Shrinks(a.Format, a.Bitrate) && s.lite.Later(a.SHA256)})
+	got, later := s.lite.How(a.SHA256, r.URL.Query().Get("play"))
+	shrinks := lite.Shrinks(a.Format, a.Bitrate)
+	writeJSON(w, http.StatusOK, map[string]bool{"lite": shrinks && got, "later": shrinks && later})
 }
 
 // wantsLite reports whether a player in lite mode (?q=opus128) gets the song re-encoded: when the
@@ -299,7 +301,9 @@ func (s *Server) serveLite(w http.ResponseWriter, r *http.Request, a *library.As
 	if ahead {
 		get = s.lite.GetAhead
 	}
-	f, err := get(r.Context(), liteSong(a), from)
+	o := liteSong(a)
+	o.Play = r.URL.Query().Get("play") // its requests all get what the first got (review #242)
+	f, err := get(r.Context(), o, from)
 	var se *lite.SourceError
 	switch {
 	case err == nil:

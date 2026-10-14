@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/image/bmp"
 	"golang.org/x/image/tiff"
@@ -390,5 +391,103 @@ func TestPictureSizes(t *testing.T) {
 		if got := fmt.Sprintf("%dx%d", m.Width, m.Height); err != nil || m.MIME != c.mime || got != c.size || m.Size != int64(len(c.data)) {
 			t.Errorf("%s: %s %s %d %v", name, m.MIME, got, m.Size, err)
 		}
+	}
+}
+
+// A source's picture follows its file (review #238): other bytes there are another picture (a new
+// ID), in its place in the gallery, arranged as it was, the old one gone; a picture whose file is
+// gone is not listed nor read until it is back as it was; one taken out stays out.
+func TestSourcePicturesFollowScans(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "Band/Album/01.mp3"), map[string]string{"TIT2": "One", "TPE1": "Band", "TALB": "Album", "TRCK": "1"})
+	scan := filepath.Join(src, "Band/Album/Scans/01.jpg")
+	put(t, scan, pictureIn(t, "jpeg", 64, 64, color.RGBA{200, 0, 0, 255}))
+	st := addFolder(t, set, src, storage.Source)
+	ref := storage.Ref(storage.KindLocal, st.ID, "Band/Album/Scans/01.jpg")
+	at := time.Now().Add(-time.Hour)
+	rescan := func(data []byte) {
+		t.Helper()
+		if data != nil {
+			put(t, scan, data)
+			at = at.Add(time.Minute) // another version
+			os.Chtimes(scan, at, at)
+		}
+		res, err := im.ScanSource(ctx, set, st.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Batch != 0 {
+			runUntilDone(t, im, res.Batch)
+		}
+	}
+	os.Chtimes(scan, at, at)
+	rescan(nil)
+	album := albumNamed(t, lib, "Album")
+	only := func(what string) library.AlbumImage {
+		t.Helper()
+		list, err := lib.AlbumImages(ctx, album)
+		if err != nil || len(list) != 1 {
+			t.Fatalf("%s: %+v %v", what, list, err)
+		}
+		var n int
+		im.db.QueryRow(`SELECT count(*) FROM album_images WHERE file_ref = ?`, ref).Scan(&n)
+		if n != 1 {
+			t.Fatalf("%s: %d pictures at the file", what, n)
+		}
+		return list[0]
+	}
+	first := only("imported")
+	if err := lib.ArrangeImages(ctx, album, []library.ImagePlace{{ID: first.ID, Kind: "back"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Other bytes, another size: another picture in its place.
+	rescan(pictureIn(t, "jpeg", 128, 64, color.RGBA{0, 200, 0, 255}))
+	second := only("changed")
+	if second.ID == first.ID || second.Width != 128 || second.SHA256 == first.SHA256 || second.Kind != "back" {
+		t.Fatalf("changed: %+v, was %+v", second, first)
+	}
+	if m, _, _ := lib.Image(ctx, first.ID); m != nil {
+		t.Fatalf("the old picture is still there: %+v", m)
+	}
+	// The same size, other bytes.
+	rescan(pictureIn(t, "jpeg", 128, 64, color.RGBA{0, 0, 200, 255}))
+	third := only("changed again")
+	if third.ID == second.ID || third.SHA256 == second.SHA256 || third.Width != 128 {
+		t.Fatalf("changed again: %+v", third)
+	}
+	data, _ := os.ReadFile(scan)
+
+	// Gone: not listed, not read; back as it was: there again.
+	os.Remove(scan)
+	rescan(nil)
+	if list, _ := lib.AlbumImages(ctx, album); len(list) != 0 {
+		t.Fatalf("gone, still listed: %+v", list)
+	}
+	if _, out, _ := lib.Image(ctx, third.ID); !out {
+		t.Fatal("gone, still read")
+	}
+	put(t, scan, data)
+	os.Chtimes(scan, at, at)
+	rescan(nil)
+	if back := only("back"); back.ID != third.ID {
+		t.Fatalf("back as %+v", back)
+	}
+
+	// Taken out, then other bytes there: still out.
+	if _, err := lib.HideImage(ctx, third.ID); err != nil {
+		t.Fatal(err)
+	}
+	rescan(pictureIn(t, "jpeg", 32, 32, color.RGBA{9, 9, 9, 255}))
+	if list, _ := lib.AlbumImages(ctx, album); len(list) != 0 {
+		t.Fatalf("taken out, then changed: listed %+v", list)
+	}
+	var hidden, n int
+	im.db.QueryRow(`SELECT count(*), coalesce(sum(hidden), 0) FROM album_images WHERE file_ref = ?`, ref).Scan(&n, &hidden)
+	if n != 1 || hidden != 1 {
+		t.Fatalf("taken out, then changed: %d pictures at the file, %d out", n, hidden)
 	}
 }

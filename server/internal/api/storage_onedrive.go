@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"html"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/gdrive"
 	"github.com/HHim8826/kanade/server/internal/library"
+	"github.com/HHim8826/kanade/server/internal/mover"
 	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
@@ -155,6 +157,10 @@ func (s *Server) setStoreFolder(w http.ResponseWriter, r *http.Request, st *stor
 	}
 	if use.Songs+use.Others > 0 {
 		s.storeError(w, r, fmt.Errorf("%w: %d songs and %d covers or sidecars are in the folder chosen before", library.ErrStoreInUse, use.Songs, use.Others))
+		return false
+	}
+	if n, err := mover.Heading(ctx, s.db, strconv.FormatInt(st.ID, 10)); err != nil || n > 0 {
+		s.storeError(w, r, cmp.Or(err, mover.ErrDestination))
 		return false
 	}
 	if _, err := s.files.SetFolder(ctx, st.ID, folder); err != nil {

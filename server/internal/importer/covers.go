@@ -243,12 +243,13 @@ func (im *Importer) uploadCover(ctx context.Context, data []byte, sha, mime, ext
 		return 0, err
 	}
 	defer os.Remove(tmp)
-	ref, err := im.put(ctx, 0, storage.PutFile{Path: tmp, Dir: "covers", Name: sha + ext, MIME: mime,
-		Size: int64(len(data)), SHA256: sha, Sessions: &memSessions{}})
-	if err != nil {
-		return 0, err
-	}
-	return im.lib.AddCover(ctx, sha, mime, ref)
+	var id int64
+	err := im.keep(ctx, 0, storage.PutFile{Path: tmp, Dir: "covers", Name: sha + ext, MIME: mime,
+		Size: int64(len(data)), SHA256: sha, Sessions: &memSessions{}}, func(ref string, since int64) (err error) {
+		id, err = im.lib.KeepCover(ctx, sha, mime, ref, since)
+		return err
+	})
+	return id, err
 }
 
 // memSessions keeps a session only for the life of one small upload.

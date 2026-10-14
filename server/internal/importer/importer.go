@@ -133,6 +133,33 @@ func (im *Importer) put(ctx context.Context, assetID int64, f storage.PutFile) (
 	return dest.Put(ctx, f)
 }
 
+// keep puts f where imports go, and has publish take it up (one of the library's Keep*, told when
+// the Put began): a copy found there that went to the trash meanwhile is put there again, once
+// (reviews #241, #243).
+func (im *Importer) keep(ctx context.Context, assetID int64, f storage.PutFile, publish func(ref string, since int64) error) error {
+	for again := false; ; again = true {
+		since := db.Now()
+		ref, err := im.put(ctx, assetID, f)
+		if err != nil {
+			return &putError{err}
+		}
+		err = publish(ref, since)
+		if errors.Is(err, library.ErrStoreGone) { // removed meanwhile: the file fails, to be tried again elsewhere
+			return fmt.Errorf("the storage location it was kept in was removed meanwhile: %w", storage.ErrNoStore)
+		}
+		if !errors.Is(err, library.ErrInTrash) || again {
+			return err
+		}
+		library.PastTrash()
+	}
+}
+
+// putError is a file that could not be kept where imports go.
+type putError struct{ err error }
+
+func (e *putError) Error() string { return "upload: " + e.err.Error() }
+func (e *putError) Unwrap() error { return e.err }
+
 func (im *Importer) destination(ctx context.Context, assetID int64) (storage.Dest, error) {
 	if im.Stores == nil {
 		return driveDest{im.drive}, nil
@@ -971,7 +998,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 		}
 	} else if asset.State != library.AssetVerified {
 		im.setState(ctx, it.id, StateUploading)
-		ref, err := im.put(ctx, asset.ID, storage.PutFile{
+		if err := im.keep(ctx, asset.ID, storage.PutFile{
 			Path: it.path, Dir: libraryDir(in), Name: filepath.Base(it.path), MIME: mimeOf(info),
 			Size: st.Size(), SHA256: out.sha,
 			Progress: func(sent, total int64) {
@@ -979,11 +1006,7 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 				im.progress[it.id] = [2]int64{sent, total}
 				im.mu.Unlock()
 			},
-		})
-		if err != nil {
-			return out, fmt.Errorf("upload: %w", err)
-		}
-		if err := im.lib.MarkVerified(ctx, asset.ID, ref); err != nil {
+		}, func(ref string, since int64) error { return im.lib.KeepAsset(ctx, asset.ID, ref, since) }); err != nil {
 			return out, err
 		}
 	}

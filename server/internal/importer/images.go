@@ -131,18 +131,24 @@ func (im *Importer) processImage(ctx context.Context, it *item) (outcome, error)
 		out.state, out.msg = StateSkipped, "no album was imported from this folder"
 		return out, nil
 	}
-	if have, err := im.lib.FindImage(ctx, albumID, m.SHA256, m.Size); err != nil || have != nil {
-		out.state = StateDuplicate // taken out of the gallery too: it stays out
-		return out, err
-	}
 	m.AlbumID, m.Path = albumID, it.rel
 	if folder != "." {
 		m.Path = strings.TrimPrefix(it.rel, folder+"/")
 	}
 	m.Kind, m.Disc = imageKind(m.Path), imageDisc(m.Path)
-	switch df, ok := im.df(); {
-	case it.ref != "": // in a source (#99): kept where it is
+	if it.ref != "" { // in a source (#99): kept where it is, in place of what was there (review #238)
 		m.Ref = it.ref
+		added, err := im.lib.PlaceImage(ctx, m)
+		if out.state = StatePublished; !added {
+			out.state = StateDuplicate // taken out of the gallery too: it stays out
+		}
+		return out, err
+	}
+	if have, err := im.lib.FindImage(ctx, albumID, m.SHA256, m.Size); err != nil || have != nil {
+		out.state = StateDuplicate // taken out of the gallery too: it stays out
+		return out, err
+	}
+	switch df, ok := im.df(); {
 	case ok && it.driveID != "": // from the Drive inbox: move it, do not upload a copy
 		dir, err := im.imageDir(ctx, m)
 		if err != nil {
@@ -157,9 +163,11 @@ func (im *Importer) processImage(ctx context.Context, it *item) (outcome, error)
 		}
 		m.Ref = it.driveID
 	default:
-		if m.Ref, err = im.putImage(ctx, m, it.path); err != nil {
+		if _, err := im.keepImage(ctx, m, it.path); err != nil {
 			return out, err
 		}
+		out.state = StatePublished
+		return out, nil
 	}
 	if _, err := im.lib.AddImage(ctx, m); err != nil {
 		return out, err
@@ -318,17 +326,32 @@ func HomeDir(kind, albumArtist, album, sub string) string {
 	return dir
 }
 
-// putImage uploads the picture at p to the managed store, where imageDir says.
-func (im *Importer) putImage(ctx context.Context, m library.AlbumImage, p string) (string, error) {
+// imageFile is the picture at p as it is kept in the managed store, where imageDir says.
+func (im *Importer) imageFile(ctx context.Context, m library.AlbumImage, p string) (storage.PutFile, error) {
 	dir, err := im.imageDir(ctx, m)
 	if err != nil {
-		return "", err
+		return storage.PutFile{}, err
 	}
 	name := strings.TrimSpace(unsafeChars.Replace(path.Base(m.Path)))
 	if name == "" || name == "." || name == ".." {
 		name = m.SHA256[:16] + mimeExt[m.MIME]
 	}
-	return im.put(ctx, 0, storage.PutFile{Path: p, Dir: dir, Name: name, MIME: m.MIME, Size: m.Size, SHA256: m.SHA256, Sessions: &memSessions{}})
+	return storage.PutFile{Path: p, Dir: dir, Name: name, MIME: m.MIME, Size: m.Size, SHA256: m.SHA256, Sessions: &memSessions{}}, nil
+}
+
+// keepImage uploads the picture at p to the managed store and adds it to its album's gallery: m
+// with its ID and file.
+func (im *Importer) keepImage(ctx context.Context, m library.AlbumImage, p string) (library.AlbumImage, error) {
+	f, err := im.imageFile(ctx, m, p)
+	if err != nil {
+		return m, err
+	}
+	err = im.keep(ctx, 0, f, func(ref string, since int64) (err error) {
+		m.Ref = ref
+		m.ID, err = im.lib.KeepImage(ctx, m, since)
+		return err
+	})
+	return m, err
 }
 
 // AddAlbumImage keeps a picture uploaded for album albumID's gallery, named name, from the file at
@@ -363,20 +386,19 @@ func (im *Importer) AddAlbumImage(ctx context.Context, albumID int64, name, p st
 		if _, hidden, err := im.lib.Image(ctx, have.ID); err != nil || !hidden {
 			return have, false, err
 		}
-		ref, err := im.putImage(ctx, *have, p)
+		f, err := im.imageFile(ctx, *have, p)
 		if err != nil {
 			return nil, false, err
 		}
-		if err := im.lib.ShowImage(ctx, have.ID, ref); err != nil {
+		if err := im.keep(ctx, 0, f, func(ref string, since int64) error {
+			have.Ref = ref
+			return im.lib.ShowImage(ctx, have.ID, ref, since)
+		}); err != nil {
 			return nil, false, err
 		}
-		have.Ref = ref
 		return have, true, nil
 	}
-	if m.Ref, err = im.putImage(ctx, m, p); err != nil {
-		return nil, false, err
-	}
-	if m.ID, err = im.lib.AddImage(ctx, m); err != nil {
+	if m, err = im.keepImage(ctx, m, p); err != nil {
 		return nil, false, err
 	}
 	return &m, true, nil
