@@ -63,11 +63,11 @@ type sourceRow struct {
 	size, goneAt                   int64
 }
 
-// importable is what a scan tracks: what an import takes (pictures and lyrics are read next to
-// the music, and are not imports of their own).
+// importable is what a scan tracks: what an import takes (lyrics are read next to the music, and
+// are not imports of their own; pictures are both: an album's cover and its gallery).
 func importable(p string) bool {
 	ext := strings.ToLower(path.Ext(p))
-	return audioExt[ext] || sidecarExt[ext] || ext == ".zip"
+	return audioExt[ext] || sidecarExt[ext] || bookletExt[ext] || ext == ".zip"
 }
 
 func roleFor(p string) string {
@@ -75,6 +75,8 @@ func roleFor(p string) string {
 	switch {
 	case sidecarExt[ext]:
 		return RoleSidecar
+	case bookletExt[ext]:
+		return RoleImage
 	case ext == ".zip":
 		return RoleZip
 	}
@@ -134,7 +136,9 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 	err = b.Walk(ctx, func(o storage.Object) error {
 		if importable(o.Path) {
 			walked[o.Key] = o
-			return nil
+			if !isImage(o.Path) {
+				return nil
+			}
 		}
 		if imageExt[strings.ToLower(path.Ext(o.Path))] && o.Size <= maxCoverFile {
 			pictures[o.Key] = o
@@ -389,9 +393,12 @@ func (im *Importer) queueSource(ctx context.Context, st *storage.Store, root str
 	batchID, _ := r.LastInsertId()
 	for _, o := range files {
 		local, fetch := "", ""
-		if root != "" {
+		switch {
+		case root != "":
 			local = filepath.Join(root, filepath.FromSlash(o.Key))
-		} else {
+		case isImage(o.Path):
+			fetch = besides{}.fetchFor(o) // a picture alone, without what is beside it
+		default:
 			fetch = beside.fetchFor(o)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, ref, drive_size, fetch, updated_at)

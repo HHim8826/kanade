@@ -155,7 +155,7 @@ func TestSourceScans(t *testing.T) {
 		return res
 	}
 	res := scan()
-	if res.Files != 2 || res.New != 2 || res.Batch == 0 {
+	if res.Files != 3 || res.New != 3 || res.Batch == 0 { // the songs, and folder.jpg for the gallery (#134)
 		t.Fatalf("first scan %+v", res)
 	}
 	refs := assetRefs(t, im)

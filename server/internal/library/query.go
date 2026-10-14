@@ -139,6 +139,7 @@ type AlbumDetail struct {
 	Original   bool      `json:"original"`              // made by an import, so its tags can be restored
 	Aliases    []string  `json:"aliases"`
 	Sidecars   []Sidecar `json:"sidecars"` // CUE sheets and rip logs kept with the album
+	Images     int       `json:"images"`   // pictures in its gallery (#134)
 	Entries    []Entry   `json:"entries"`
 	// Sections are the names of its discs that have one (review #82).
 	Sections map[int]string `json:"sections"`
@@ -166,6 +167,9 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 		return nil, err
 	}
 	if d.Sidecars, err = s.albumSidecars(ctx, id); err != nil {
+		return nil, err
+	}
+	if d.Images, err = s.albumImageCount(ctx, id); err != nil {
 		return nil, err
 	}
 	if d.Categories, err = s.AlbumCategories(ctx, id); err != nil {

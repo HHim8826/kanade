@@ -357,8 +357,10 @@ func (s *Store) owedTrash(ctx context.Context, fileID string) (int, error) {
 	if done > 0 {
 		return TrashSkipped, nil
 	}
-	var used int
-	if s.db.QueryRowContext(ctx, `SELECT 1 FROM assets WHERE file_ref = ? LIMIT 1`, fileID).Scan(&used) == nil {
+	// A song, a cover, a sidecar or a gallery's picture (#134) of the library uses it.
+	if used, err := refUsedTx(ctx, s.db, fileID); err != nil {
+		return TrashSkipped, err
+	} else if used {
 		_, err := s.db.ExecContext(ctx, `DELETE FROM file_trash WHERE file_id = ?`, fileID)
 		return TrashReused, err
 	}

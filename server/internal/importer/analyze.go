@@ -242,8 +242,10 @@ func (im *Importer) expandZips(ctx context.Context, batchID int64, kind string) 
 			switch {
 			case sidecarExt[ext]:
 				role = RoleSidecar
+			case bookletExt[ext]:
+				role = RoleImage // read next to the audio for its cover too
 			case !audioExt[ext]:
-				continue // lyrics and pictures are read next to the audio
+				continue // lyrics are read next to the audio
 			}
 			p := filepath.Join(dir, filepath.FromSlash(f))
 			e, ok := before[p]

@@ -286,6 +286,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	mb.Log = log
 	feeds := rss.New(d, downloads, strings.TrimRight(cfg.PublicURL, "/")+"/", log)
 	covers := thumbs.New(cfg.Path(config.DirThumbs), api.ThumbsBudget, log)
+	if imp.FFmpeg != nil {
+		covers.SetPictures(imp.FFmpeg.Picture) // a gallery's scans to look at (#134)
+	}
 	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace,
 		Cache: trimmed{cache, covers, lites}, DL: downloads, UL: ups, Log: log}
 	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget, Trash: files.Trash}

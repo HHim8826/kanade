@@ -84,6 +84,7 @@ type Importer struct {
 	mu           sync.Mutex
 	progress     map[int64][2]int64       // item ID -> bytes sent, total
 	covers       map[coverKey]int64       // a batch's folders -> their cover ID
+	folderAlbums map[coverKey]int64       // a batch's folders -> the album imported from there (its pictures go with it)
 	driveDirs    map[string][]gdrive.File // inbox folder -> its files, for the current batch
 	inboxWaiting atomic.Int64             // new inbox files the last scan left for later
 	settle       atomic.Int64             // SetInboxSettle's wait (ns); 0: the default; -1: none
@@ -153,7 +154,7 @@ func (im *Importer) destination(ctx context.Context, assetID int64) (storage.Des
 
 func New(d *sql.DB, lib *library.Store, drive Drive, stagingDir string, log *slog.Logger) *Importer {
 	return &Importer{db: d, lib: lib, drive: drive, staging: stagingDir, log: log,
-		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[coverKey]int64{}, albumArtists: map[string]string{},
+		wake: make(chan struct{}, 1), progress: map[int64][2]int64{}, covers: map[coverKey]int64{}, folderAlbums: map[coverKey]int64{}, albumArtists: map[string]string{},
 		driveDirs: map[string][]gdrive.File{}, scanning: map[int64]bool{},
 		removing: map[int64]bool{}, stopItem: map[int64]func(){}}
 }
@@ -164,8 +165,8 @@ var audioExt = map[string]bool{
 	".dsf": true, ".dff": true, ".wma": true,
 }
 
-// CreateBatch queues every audio file, CUE or LOG sidecar and ZIP archive under dir (recursively)
-// and wakes the worker. With preview the batch waits for the user after analysis.
+// CreateBatch queues every audio file, CUE or LOG sidecar, picture and ZIP archive under dir
+// (recursively) and wakes the worker. With preview the batch waits for the user after analysis.
 func (im *Importer) CreateBatch(ctx context.Context, kind, source, dir string, preview bool) (int64, int, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
@@ -190,7 +191,7 @@ func (im *Importer) CreateBatch(ctx context.Context, kind, source, dir string, p
 // ErrNothingToImport is a batch with no audio file or archive among its files.
 var ErrNothingToImport = errors.New("no audio files found")
 
-// CreateBatchFiles queues the audio files, sidecars and archives among paths (for example the files
+// CreateBatchFiles queues the audio files, sidecars, pictures and archives among paths (for example the files
 // chosen in a torrent). root is the folder that relative paths and folder structure are taken from.
 // The count returned is of audio files and archives.
 func (im *Importer) CreateBatchFiles(ctx context.Context, kind, source, root string, paths []string, preview bool) (int64, int, error) {
@@ -212,6 +213,8 @@ func (im *Importer) CreateBatchLinked(ctx context.Context, kind, source, root st
 			role = RoleAudio
 		case sidecarExt[ext]:
 			role = RoleSidecar
+		case bookletExt[ext]:
+			role = RoleImage
 		case ext == ".zip":
 			role = RoleZip
 		default:
@@ -221,7 +224,7 @@ func (im *Importer) CreateBatchLinked(ctx context.Context, kind, source, root st
 			continue
 		}
 		files = append(files, file{p, role})
-		if role != RoleSidecar {
+		if role == RoleAudio || role == RoleZip {
 			count++
 		}
 	}
@@ -438,7 +441,7 @@ func (im *Importer) Retry(ctx context.Context, batchID int64) (RetryResult, erro
 		return res, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE import_items SET state = 'pending', error = '', updated_at = ?
-		WHERE batch_id = ? AND role = ? AND state = ?`, now, batchID, RoleSidecar, StateSkipped); err != nil {
+		WHERE batch_id = ? AND role IN (?, ?) AND state = ?`, now, batchID, RoleSidecar, RoleImage, StateSkipped); err != nil {
 		return res, err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE import_batches SET state = ?, finished_at = NULL,
@@ -526,6 +529,10 @@ func (im *Importer) savedElsewhere(ctx context.Context, f lostFile) (bool, error
 		err = im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i WHERE i.local_path = ? AND i.id != ?
 			AND i.state IN ('published', 'duplicate') AND i.sha256 != ''
 			AND EXISTS (SELECT 1 FROM sidecars s WHERE s.sha256 = i.sha256 AND s.album_id IS NOT NULL)`, f.path, f.id).Scan(&n)
+	case f.role == RoleImage:
+		err = im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i WHERE i.local_path = ? AND i.id != ?
+			AND i.state IN ('published', 'duplicate') AND i.sha256 != ''
+			AND EXISTS (SELECT 1 FROM album_images m WHERE m.sha256 = i.sha256 AND m.album_id IS NOT NULL)`, f.path, f.id).Scan(&n)
 	default:
 		err = im.db.QueryRowContext(ctx, `SELECT count(*) FROM import_items i JOIN assets a ON a.id = i.asset_id
 			WHERE i.local_path = ? AND i.id != ? AND i.state IN ('published', 'duplicate') AND a.state = ?
@@ -637,16 +644,16 @@ type item struct {
 	ref, fetch string
 }
 
-// next is the oldest waiting item of a running batch; a batch's sidecars wait for its audio, so
-// they can join the album it made.
+// next is the oldest waiting item of a running batch; a batch's sidecars and pictures wait for its
+// audio, so they can join the album it made.
 func (im *Importer) next(ctx context.Context) (*item, error) {
 	var it item
 	var plan string
 	err := im.db.QueryRowContext(ctx, `SELECT i.id, i.batch_id, i.local_path, i.rel_path, b.kind, i.role, coalesce(i.plan, ''), i.temp,
 		i.source_path, i.source_kind, i.source_sha256, i.source_size, i.source_piece, i.source_cut, i.drive_id, i.drive_parent, i.sha256, i.drive_size, i.ref, i.fetch
 		FROM import_items i JOIN import_batches b ON b.id = i.batch_id
-		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?) ORDER BY i.batch_id, i.role = ?, i.id LIMIT 1`,
-		BatchRunning, RoleAudio, RoleSidecar, RoleSidecar).
+		WHERE i.state = 'pending' AND b.state = ? AND i.role IN (?, ?, ?) ORDER BY i.batch_id, i.role != ?, i.id LIMIT 1`,
+		BatchRunning, RoleAudio, RoleSidecar, RoleImage, RoleAudio).
 		Scan(&it.id, &it.batchID, &it.path, &it.rel, &it.kind, &it.role, &plan, &it.temp,
 			&it.sourcePath, &it.sourceKind, &it.sourceSHA, &it.sourceSize, &it.sourcePiece, &it.sourceCut, &it.driveID, &it.driveParent, &it.sha, &it.driveSize, &it.ref, &it.fetch)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -880,6 +887,9 @@ func (im *Importer) setState(ctx context.Context, id int64, state string) {
 }
 
 func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
+	if it.role == RoleImage {
+		return im.processImage(ctx, it) // a picture is read where it is (#134)
+	}
 	if it.ref != "" && it.path == "" { // in a cloud source: fetched now
 		p, err := im.fetchRef(ctx, it.batchID, it.id, it.ref, it.rel, it.driveSize, it.fetch)
 		if err != nil {

@@ -54,7 +54,7 @@ func TestCloudSource(t *testing.T) {
 	}
 	names := strings.Join(fake.Names(), ",")
 	res, err := im.ScanSource(ctx, set, st.ID, false)
-	if err != nil || res.Files != 1 || res.New != 1 {
+	if err != nil || res.Files != 2 || res.New != 2 { // the song, and its folder's picture for the gallery (#134)
 		t.Fatalf("scan %+v %v", res, err)
 	}
 	v := runUntilDone(t, im, res.Batch)
@@ -138,8 +138,13 @@ func TestCloudSourceExtrasHoldStaging(t *testing.T) {
 	im.Budget = &staging.Budget{Limit: int64(max(len(one), len(two))) + 64<<10}
 	im.Budget.Use(staging.OnDisk(im.WorkCommitted))
 	var fetched atomic.Pointer[string]
+	var pictureReads atomic.Int32
 	fake.Fail = func(r *http.Request) int {
-		if name := path.Base(r.URL.Path); r.Method == http.MethodGet && (name == "folder.jpg" || name == "02%20Two.lrc" || name == "02 Two.lrc") {
+		switch name := path.Base(r.URL.Path); {
+		case r.Method != http.MethodGet:
+		case name == "folder.jpg":
+			pictureReads.Add(1)
+		case name == "02%20Two.lrc" || name == "02 Two.lrc":
 			fetched.Store(&name)
 		}
 		return 0
@@ -158,7 +163,7 @@ func TestCloudSourceExtrasHoldStaging(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, err := im.ScanSource(ctx, set, st.ID, false)
-	if err != nil || res.New != 2 {
+	if err != nil || res.New != 3 { // the songs, and the picture for the gallery (#134)
 		t.Fatalf("scan %+v %v", res, err)
 	}
 	v := runUntilDone(t, im, res.Batch)
@@ -167,6 +172,10 @@ func TestCloudSourceExtrasHoldStaging(t *testing.T) {
 	}
 	if got := fetched.Load(); got != nil {
 		t.Fatalf("fetched past the budget or the lyrics limit: %v", *got)
+	}
+	// The picture is read once, for the gallery: streamed, never fetched to staging beside a song.
+	if n := pictureReads.Load(); n != 1 {
+		t.Fatalf("the picture was read %d times", n)
 	}
 	if limit, _ := im.Budget.Limits(); peak.Load() > limit {
 		t.Fatalf("the work folder held %d bytes, the budget %d", peak.Load(), limit)
@@ -360,7 +369,7 @@ func TestOneDriveSourceImport(t *testing.T) {
 	}
 	g.Damage = func(id string) bool { return id == twoID }
 	res, err := im.ScanSource(ctx, set, st.ID, false)
-	if err != nil || res.Files != 2 || res.New != 2 {
+	if err != nil || res.Files != 3 || res.New != 3 { // the songs, and the cover for the gallery (#134)
 		t.Fatalf("scan %+v %v", res, err)
 	}
 	v := runUntilDone(t, im, res.Batch)

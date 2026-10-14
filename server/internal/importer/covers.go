@@ -92,13 +92,18 @@ func (im *Importer) coverFound(batchID int64, folder string, id int64) {
 	im.covers[coverKey{batchID, folder}] = id
 }
 
-// forgetCovers drops a finished batch's folder art.
+// forgetCovers drops a finished batch's folder art, and the albums of its folders.
 func (im *Importer) forgetCovers(batchID int64) {
 	im.mu.Lock()
 	defer im.mu.Unlock()
 	for k := range im.covers {
 		if k.batch == batchID {
 			delete(im.covers, k)
+		}
+	}
+	for k := range im.folderAlbums {
+		if k.batch == batchID {
+			delete(im.folderAlbums, k)
 		}
 	}
 }

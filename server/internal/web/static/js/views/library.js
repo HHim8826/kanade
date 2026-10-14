@@ -14,6 +14,7 @@ import { SubjectRow } from './bangumi.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
 import { viewCover } from './coverview.js';
+import { AlbumGallery, openGallery, uploadImages } from './gallery.js';
 import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
   restoreAlbum, splitAlbum, useLibRev, vgmdbAlbum } from './organize.js';
 
@@ -284,6 +285,8 @@ export function Album({ id }) {
     { icon: 'identify', label: '從 VGMdb 匯入…', onClick: () => vgmdbAlbum(a) },
     a.cover_id && { icon: 'image', label: '檢視封面', onClick: () => viewCover(a.cover_id, a.title) },
     { icon: 'image', label: a.cover_id ? '更換封面…' : '加上封面…', onClick: () => changeCover(a) },
+    a.images > 0 && { icon: 'image', label: `檢視內頁圖（${a.images} 張）`, onClick: () => openGallery(a) },
+    { icon: 'upload', label: '上傳內頁圖…', onClick: () => uploadImages(a) },
     { icon: 'merge', label: '合併到其他專輯…', onClick: () => mergeAlbum(a) },
     a.entries.length > 1 && { icon: 'split', label: '拆分…', onClick: () => splitAlbum(a) },
     { icon: 'order', label: '區段名稱…', onClick: () => editSections(a) },
@@ -334,6 +337,7 @@ export function Album({ id }) {
     <${SelectBar} sel=${sel} noun="首" loaded=${items.map((i) => i.entryId)} items=${items}>
       <${SongActions} sel=${sel} album=${a} />
     <//>
+    <${AlbumGallery} album=${a} />
     ${a.sidecars.length > 0 && html`<h2 class="section-title">附屬檔案</h2>
       <ul class="items">${a.sidecars.map((c) => html`<li key=${c.id}>
         <span class="grow path">${c.name}</span>

@@ -5,7 +5,8 @@
 // original to its last resize, so originals wait for their turn unread (decoding a large scan takes
 // about 100 MB; review #176), and one nobody waits for any more stops; the folder is held to a
 // budget, the oldest files going first; and an image that cannot be decoded is not fetched again
-// for a while.
+// for a while. A gallery's pictures (#134) are kept the same way, with a viewing copy of a scan a
+// browser cannot show or one too large to (ViewSize), made by FFmpeg one at a time.
 package thumbs
 
 import (
@@ -15,7 +16,7 @@ import (
 	"fmt"
 	"image"
 	"image/jpeg"
-	_ "image/png" // covers are JPEG or PNG
+	_ "image/png" // covers are JPEG or PNG; a gallery's pictures may be these too
 	"io"
 	"log/slog"
 	"os"
@@ -25,7 +26,10 @@ import (
 	"sync"
 	"time"
 
+	_ "golang.org/x/image/bmp"
 	"golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 // Sizes are the sizes made (the longest side, in pixels); 0 is the original.
@@ -48,7 +52,15 @@ func Size(n int) int {
 	return Sizes[len(Sizes)-1]
 }
 
+// ViewSize is the longest side of a gallery picture's viewing copy, a JPEG: Get at this size makes
+// it with the PictureFunc set (FFmpeg), from an original of at most 128 MB.
+const ViewSize = 4096
+
+// PictureFunc makes a JPEG of the picture at src at dst, at most longest pixels on its longest side.
+type PictureFunc func(ctx context.Context, src, dst string, longest int) error
+
 const (
+	maxPicture  = 128 << 20
 	maxOriginal = 32 << 20
 	maxPixels   = 25_000_000 // refuse to decode huge scans on a 1.5 GB VPS (plan §5)
 	badFor      = 10 * time.Minute
@@ -62,9 +74,11 @@ type Store struct {
 	budget int64
 	log    *slog.Logger
 
-	jobs    chan struct{} // covers resized at once, from reading the original to the end
-	fetches chan struct{} // originals read from Drive at once
-	decodes chan struct{} // images decoded at once
+	jobs     chan struct{} // covers resized at once, from reading the original to the end
+	fetches  chan struct{} // originals read from Drive at once
+	decodes  chan struct{} // images decoded at once
+	views    chan struct{} // viewing copies made at once
+	pictures PictureFunc   // nil: viewing copies are decoded here, of what is small enough
 
 	mu    sync.Mutex
 	calls map[string]*call
@@ -84,21 +98,34 @@ type call struct {
 // version wrote empty, goes.
 func New(dir string, budget int64, log *slog.Logger) *Store {
 	s := &Store{dir: dir, budget: budget, log: log, jobs: make(chan struct{}, 3), fetches: make(chan struct{}, 6), decodes: make(chan struct{}, 2),
-		calls: map[string]*call{}, bad: map[string]time.Time{}, used: -1}
+		views: make(chan struct{}, 1), calls: map[string]*call{}, bad: map[string]time.Time{}, used: -1}
 	for _, e := range s.list() {
 		if e.size == 0 || strings.HasPrefix(filepath.Base(e.path), ".new-") {
 			os.Remove(e.path)
 		}
 	}
+	if des, err := os.ReadDir(dir); err == nil {
+		for _, de := range des {
+			if de.IsDir() && strings.HasPrefix(de.Name(), ".view-") { // a viewing copy a stop left half made
+				os.RemoveAll(filepath.Join(dir, de.Name()))
+			}
+		}
+	}
 	return s
 }
+
+// SetPictures has viewing copies made by f (FFmpeg's Picture).
+func (s *Store) SetPictures(f PictureFunc) { s.pictures = f }
 
 // Get is cover sha (an image of type mime) at size (a Size), from the folder or made from the
 // original that open reads.
 func (s *Store) Get(ctx context.Context, sha string, size int, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
 	name := fmt.Sprintf("%s-%d.jpg", sha, size)
-	if size == 0 {
+	switch size {
+	case 0:
 		name = sha + "-orig"
+	case ViewSize:
+		name = sha + "-view.jpg"
 	}
 	path := filepath.Join(s.dir, name)
 	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
@@ -165,6 +192,21 @@ func take(ctx context.Context, sem chan struct{}) (func(), error) {
 func (s *Store) make(ctx context.Context, sha string, size int, path string, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	if size == ViewSize {
+		data, err := s.view(ctx, open)
+		if errors.Is(err, ErrUndecodable) {
+			s.mu.Lock()
+			s.bad[sha] = time.Now().Add(badFor)
+			s.mu.Unlock()
+		}
+		if err != nil {
+			return nil, err
+		}
+		if err := s.keep(path, data); err != nil {
+			s.log.Warn("keep a viewing copy", "file", filepath.Base(path), "err", err) // served all the same
+		}
+		return data, nil
+	}
 	if size != 0 {
 		// Its turn first: the original is read only when it can be resized soon after.
 		done, err := take(ctx, s.jobs)
@@ -192,6 +234,68 @@ func (s *Store) make(ctx context.Context, sha string, size int, path string, ope
 		s.log.Warn("keep cover", "file", filepath.Base(path), "err", err) // served all the same
 	}
 	return data, nil
+}
+
+// view makes a picture's viewing copy: the original copied aside, made a JPEG of by FFmpeg, one at a
+// time (a large scan takes some hundred MB to decode); without FFmpeg, decoded and resized here.
+func (s *Store) view(ctx context.Context, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
+	done, err := take(ctx, s.views)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	if s.pictures == nil {
+		orig, err := s.original(ctx, open)
+		if err != nil {
+			return nil, err
+		}
+		return s.resize(ctx, orig, ViewSize)
+	}
+	dir, err := os.MkdirTemp(s.dir, ".view-")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(dir)
+	src, dst := filepath.Join(dir, "original"), filepath.Join(dir, "view.jpg")
+	if err := s.copyOriginal(ctx, open, src); err != nil {
+		return nil, err
+	}
+	if err := s.pictures(ctx, src, dst, ViewSize); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("%w: %v", ErrUndecodable, err)
+	}
+	return os.ReadFile(dst)
+}
+
+// copyOriginal copies what open reads to the file at dst, at most maxPicture bytes.
+func (s *Store) copyOriginal(ctx context.Context, open func(context.Context) (io.ReadCloser, error), dst string) error {
+	done, err := take(ctx, s.fetches)
+	if err != nil {
+		return err
+	}
+	defer done()
+	rc, err := open(ctx)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	f, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	n, err := io.Copy(f, io.LimitReader(rc, maxPicture+1))
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	if n > maxPicture {
+		return fmt.Errorf("%w: larger than %d MB", ErrUndecodable, maxPicture>>20)
+	}
+	return nil
 }
 
 func (s *Store) original(ctx context.Context, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {

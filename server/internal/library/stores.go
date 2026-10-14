@@ -100,6 +100,7 @@ func (s *Store) MoveRef(ctx context.Context, from, to string) error {
 		`UPDATE assets SET file_ref = ?1, state = '` + AssetVerified + `' WHERE file_ref = ?2`,
 		`UPDATE covers SET file_ref = ?1 WHERE file_ref = ?2`,
 		`UPDATE sidecars SET file_ref = ?1 WHERE file_ref = ?2`,
+		`UPDATE album_images SET file_ref = ?1 WHERE file_ref = ?2`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, to, from); err != nil {
 			return err
@@ -112,15 +113,16 @@ func (s *Store) MoveRef(ctx context.Context, from, to string) error {
 type RefUse struct {
 	Ref   string
 	Size  int64
-	State string // an asset's: verified | missing; "" for covers and sidecars
+	State string // an asset's: verified | missing; "" for covers, sidecars and pictures
 }
 
-// StoreRefs lists the library's files in a store: songs, covers and sidecars.
+// StoreRefs lists the library's files in a store: songs, covers, sidecars and the galleries' pictures.
 func (s *Store) StoreRefs(ctx context.Context, kind string, id int64) ([]RefUse, error) {
 	from, to := refRange(kind, id)
 	rows, err := s.db.QueryContext(ctx, `SELECT file_ref, size, state FROM assets WHERE `+likeRefs("file_ref")+`
 		UNION ALL SELECT file_ref, 0, '' FROM covers WHERE `+likeRefs("file_ref")+`
-		UNION ALL SELECT file_ref, size, '' FROM sidecars WHERE `+likeRefs("file_ref"), from, to)
+		UNION ALL SELECT file_ref, size, '' FROM sidecars WHERE `+likeRefs("file_ref")+`
+		UNION ALL SELECT file_ref, size, '' FROM album_images WHERE hidden = 0 AND `+likeRefs("file_ref"), from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +143,7 @@ type StoreUse struct {
 	Songs   int   `json:"songs"`
 	Bytes   int64 `json:"bytes"`
 	Missing int   `json:"missing"`
-	Others  int   `json:"others"` // covers and sidecars
+	Others  int   `json:"others"` // covers, sidecars and the galleries' pictures
 }
 
 func (s *Store) StoreUse(ctx context.Context, kind string, id int64) (StoreUse, error) {
@@ -153,7 +155,8 @@ func (s *Store) StoreUse(ctx context.Context, kind string, id int64) (StoreUse, 
 		return u, err
 	}
 	err = s.db.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM covers WHERE `+likeRefs("file_ref")+`)
-		+ (SELECT count(*) FROM sidecars WHERE `+likeRefs("file_ref")+`)`, from, to).Scan(&u.Others)
+		+ (SELECT count(*) FROM sidecars WHERE `+likeRefs("file_ref")+`)
+		+ (SELECT count(*) FROM album_images WHERE hidden = 0 AND `+likeRefs("file_ref")+`)`, from, to).Scan(&u.Others)
 	return u, err
 }
 
@@ -163,7 +166,7 @@ var ErrStoreInUse = errors.New("the library still keeps files in this storage lo
 // ForgetStore lets go of what the library has from a source being removed, in tx (with the store's
 // removal, review #222): songs whose every file is there leave the library (as deleting them does:
 // plays, favorites and playlist items with them); a file of a song that has others there too is
-// missing; covers there are dropped from their albums and sidecars from theirs. The files themselves
+// missing; covers there are dropped from their albums, and sidecars and pictures from theirs. The files themselves
 // are not touched. The edit log says it once, by the store's name (review #229). It returns how many
 // songs left.
 func (s *Store) ForgetStore(ctx context.Context, tx *sql.Tx, kind string, id int64, name string) (int, error) {
@@ -182,6 +185,7 @@ func (s *Store) ForgetStore(ctx context.Context, tx *sql.Tx, kind string, id int
 		`UPDATE albums SET cover_id = NULL WHERE cover_id IN (SELECT id FROM covers WHERE ` + likeRefs("file_ref") + `)`,
 		`DELETE FROM covers WHERE ` + likeRefs("file_ref") + ` AND id NOT IN (SELECT cover_id FROM albums WHERE cover_id IS NOT NULL)`,
 		`DELETE FROM sidecars WHERE ` + likeRefs("file_ref"),
+		`DELETE FROM album_images WHERE ` + likeRefs("file_ref"),
 		`DELETE FROM file_trash WHERE ` + likeRefs("file_id"),
 	} {
 		if _, err := tx.ExecContext(ctx, q, from, to); err != nil {

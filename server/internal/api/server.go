@@ -144,6 +144,9 @@ func New(d Deps) *Server {
 	proxy, _ := clientip.Parse(d.Config.TrustedProxy)
 	if d.Thumbs == nil {
 		d.Thumbs = thumbs.New(d.Config.Path(config.DirThumbs), ThumbsBudget, d.Log)
+		if d.Importer != nil && d.Importer.FFmpeg != nil {
+			d.Thumbs.SetPictures(d.Importer.FFmpeg.Picture)
+		}
 	}
 	if d.Bangumi == nil {
 		d.Bangumi = bangumi.New(d.Version)
@@ -285,6 +288,13 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/albums/{id}/remove", s.authed(s.removeEntries))
 	mux.Handle("POST /api/v1/albums/{id}/restore", s.authed(s.restoreAlbum))
 	mux.Handle("PUT /api/v1/albums/{id}/sections", s.authed(s.setSections))
+	mux.Handle("GET /api/v1/albums/{id}/images", s.authed(s.albumImages))
+	mux.Handle("PUT /api/v1/albums/{id}/images", s.authed(s.arrangeImages))
+	mux.Handle("POST /api/v1/albums/{id}/images", s.authed(s.addAlbumImage))
+	mux.Handle("GET /api/v1/images/{id}", s.authed(s.image))
+	mux.Handle("GET /api/v1/images/{id}/file", s.authed(s.imageFile))
+	mux.Handle("DELETE /api/v1/images/{id}", s.authed(s.hideImage))
+	mux.Handle("POST /api/v1/images/{id}/cover", s.authed(s.imageCover))
 	mux.Handle("POST /api/v1/albums/merge", s.authed(s.mergeAlbums))
 	mux.Handle("GET /api/v1/bookmarks", s.authed(s.bookmarks))
 	mux.Handle("POST /api/v1/bookmarks", s.authed(s.addBookmark))

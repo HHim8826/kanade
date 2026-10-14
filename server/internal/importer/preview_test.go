@@ -327,12 +327,12 @@ func TestZipAndSidecars(t *testing.T) {
 	im.Start(ctx, batch)
 	waitState(t, im, batch, BatchDone)
 	b, _ := im.Batch(ctx, batch)
-	if b.Counts[StatePublished] != 3 || b.Counts[StateExpanded] != 1 { // two songs and the cue sheet
+	if b.Counts[StatePublished] != 4 || b.Counts[StateExpanded] != 1 { // two songs, the cue sheet and the picture
 		t.Fatalf("counts %+v", b.Counts)
 	}
 	albums, _ := lib.Albums(ctx, 10, 0, false)
 	d, _ := lib.Album(ctx, albums[0].ID)
-	if d.CoverID == 0 || len(d.Sidecars) != 1 || d.Sidecars[0].Name != "album.cue" {
+	if d.CoverID == 0 || len(d.Sidecars) != 1 || d.Sidecars[0].Name != "album.cue" || d.Images != 1 {
 		t.Fatalf("album %+v", d)
 	}
 	if _, ok := fd.files[d.Sidecars[0].Ref]; !ok {

@@ -105,8 +105,8 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 	}
 	// Only files that can be imported and are new count toward the limits, so covers, scans and
 	// files already handled never crowd out the rest; what is over the batch limit waits for the
-	// next scan.
-	var files []found
+	// next scan. Pictures for the albums' galleries (#134) go with the songs of their folder.
+	var files, pictures []found
 	newest := map[string]time.Time{} // per top-level folder, or loose file
 	var walk func(folder, prefix string, depth int) error
 	walk = func(folder, prefix string, depth int) error {
@@ -131,6 +131,8 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 			}
 			if !known[f.ID] && roleOf(rel) != "" && len(files) < inboxScanMax {
 				files = append(files, found{f, rel, folder})
+			} else if !known[f.ID] && isImage(rel) && strings.Contains(rel, "/") && len(pictures) < inboxScanMax {
+				pictures = append(pictures, found{f, rel, folder})
 			}
 		}
 		return nil
@@ -163,10 +165,26 @@ func (im *Importer) ScanInbox(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	batch, _ := r.LastInsertId()
+	tops := map[string]bool{}
 	for _, f := range fresh {
+		if top, _, nested := strings.Cut(f.rel, "/"); nested {
+			tops[top] = true
+		}
+	}
+	queued := fresh
+	for _, f := range pictures {
+		if top, _, _ := strings.Cut(f.rel, "/"); tops[top] {
+			queued = append(queued, f)
+		}
+	}
+	for _, f := range queued {
+		role := roleOf(f.rel)
+		if role == "" {
+			role = RoleImage
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO import_items (batch_id, local_path, rel_path, state, role, sha256, drive_id,
 			drive_parent, drive_size, updated_at) VALUES (?, '', ?, 'pending', ?, ?, ?, ?, ?, ?)`,
-			batch, f.rel, roleOf(f.rel), strings.ToLower(f.f.SHA256Checksum), f.f.ID, f.parent, f.f.SizeBytes(), now); err != nil {
+			batch, f.rel, role, strings.ToLower(f.f.SHA256Checksum), f.f.ID, f.parent, f.f.SizeBytes(), now); err != nil {
 			return 0, err
 		}
 	}
@@ -281,6 +299,8 @@ func (im *Importer) inboxFinished(ctx context.Context, df driveFiles, folder str
 	return true, nil
 }
 
+// roleOf is what an inbox file is imported as, "" for none. A picture is not counted here: it goes
+// with the songs of its folder (ScanInbox), and a folder is finished once they are.
 func roleOf(name string) string {
 	ext := strings.ToLower(path.Ext(name))
 	switch {

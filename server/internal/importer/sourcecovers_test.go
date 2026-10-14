@@ -119,7 +119,9 @@ func followCoverCases(t *testing.T, im *Importer, set *storage.Set, st *storage.
 
 	// The folder renamed: the songs and the picture followed.
 	src.rename("Aimer/Walpurgis", "Aimer/Walpurgis (2024)")
-	if res := scan("renamed"); res.Moved != 2 || res.Covers != 1 || res.New != 0 {
+	// The picture is new to the gallery's tracking (#134): only a JPEG's first bytes, it was no picture
+	// a gallery takes, so it is read again where it is now.
+	if res := scan("renamed"); res.Moved != 2 || res.Covers != 1 || res.New != 1 {
 		t.Fatalf("renamed: %+v", res)
 	}
 	if now := covers(); now["Walpurgis"].id != c["Walpurgis"].id || now["Red Moon"].id != c["Red Moon"].id {
@@ -141,7 +143,7 @@ func followCoverCases(t *testing.T, im *Importer, set *storage.Set, st *storage.
 
 	// Other bytes: Walpurgis gets a cover of its own; Red Moon keeps the old picture, read from its copy.
 	src.put("Aimer/Walpurgis (2024)/cover.jpg", y)
-	if res := scan("other bytes"); res.Covers != 1 || res.Changed != 0 {
+	if res := scan("other bytes"); res.Covers != 1 || res.Changed != 1 { // the picture, read again for the gallery (#134)
 		t.Fatalf("other bytes: %+v", res)
 	}
 	now := covers()
@@ -187,7 +189,7 @@ func followCoverCases(t *testing.T, im *Importer, set *storage.Set, st *storage.
 	im.db.Exec(`UPDATE covers SET file_ref = 'local:99:gone/cover.jpg' WHERE id = ?`, w.id)
 	src.song("Aimer/Walpurgis Live/01.mp3", "Live One", "Walpurgis Live", "Aimer")
 	src.put("Aimer/Walpurgis Live/cover.jpg", y)
-	if res := scan("the same picture, new"); res.New != 1 {
+	if res := scan("the same picture, new"); res.New != 2 { // the song and its picture
 		t.Fatalf("a new album: %+v", res)
 	}
 	if now := covers(); now["Walpurgis Live"].id != w.id || now["Walpurgis"].ref != ref("Aimer/Walpurgis Live/cover.jpg") {

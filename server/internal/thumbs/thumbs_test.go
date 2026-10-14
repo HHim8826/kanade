@@ -227,3 +227,63 @@ func TestOriginalsWaitUnread(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A gallery picture's viewing copy: made by the PictureFunc from the original copied aside, once,
+// and kept; one it cannot make is undecodable, with nothing left aside; without one, decoded here.
+// A copy a stop left half made goes when the folder is opened again.
+func TestViewingCopy(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, 1<<30)
+	orig := pngData(t, 120, 40)
+	var made atomic.Int32
+	s.SetPictures(func(ctx context.Context, src, dst string, longest int) error {
+		made.Add(1)
+		got, err := os.ReadFile(src)
+		if err != nil || !bytes.Equal(got, orig) || longest != ViewSize {
+			return errors.New("not the original")
+		}
+		return os.WriteFile(dst, []byte("view of "+filepath.Base(filepath.Dir(src))[:6]), 0o644)
+	})
+	var opens atomic.Int32
+	for range 2 {
+		data, err := s.Get(ctx, "pic", ViewSize, source(orig, &opens))
+		if err != nil || string(data) != "view of .view-" {
+			t.Fatalf("%q %v", data, err)
+		}
+	}
+	if made.Load() != 1 || opens.Load() != 1 {
+		t.Fatalf("made %d times, %d opens", made.Load(), opens.Load())
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "pic-view.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	s.SetPictures(func(ctx context.Context, src, dst string, longest int) error {
+		return errors.New("ffmpeg: invalid data")
+	})
+	if _, err := s.Get(ctx, "bad", ViewSize, source([]byte("junk"), &opens)); !errors.Is(err, ErrUndecodable) {
+		t.Fatal(err)
+	}
+	des, _ := os.ReadDir(s.dir)
+	for _, de := range des {
+		if de.IsDir() {
+			t.Fatalf("%s left", de.Name())
+		}
+	}
+
+	s.SetPictures(nil)
+	data, err := s.Get(ctx, "wide", ViewSize, source(pngData(t, ViewSize+200, 50), &opens))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || format != "jpeg" || cfg.Width != ViewSize {
+		t.Fatalf("decoded here: %s %d %v", format, cfg.Width, err)
+	}
+
+	os.Mkdir(filepath.Join(s.dir, ".view-123"), 0o700)
+	os.WriteFile(filepath.Join(s.dir, ".view-123", "original"), orig, 0o644)
+	New(s.dir, 1<<30, s.log)
+	if _, err := os.Stat(filepath.Join(s.dir, ".view-123")); !os.IsNotExist(err) {
+		t.Fatal("a half made copy stayed:", err)
+	}
+}

@@ -81,6 +81,14 @@ func (t *Tool) command(ctx context.Context, bin string, args ...string) *exec.Cm
 
 func (t *Tool) run(ctx context.Context, args ...string) error { return t.runIn(ctx, nil, args...) }
 
+// Picture makes a JPEG of the picture at src (a scan as a TIFF, a BMP, or one too large to decode in
+// the server: #134) at dst, at most longest pixels on its longest side and never larger than it is.
+func (t *Tool) Picture(ctx context.Context, src, dst string, longest int) error {
+	return t.run(ctx, "-i", src, "-frames:v", "1", "-vf",
+		fmt.Sprintf("scale=w='min(iw,%[1]d)':h='min(ih,%[1]d)':force_original_aspect_ratio=decrease", longest),
+		"-q:v", "3", "-f", "mjpeg", dst)
+}
+
 // runIn runs FFmpeg reading in as its standard input (pipe:0).
 func (t *Tool) runIn(ctx context.Context, in io.Reader, args ...string) error {
 	var stderr bytes.Buffer

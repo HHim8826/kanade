@@ -3,12 +3,19 @@ package ffmpeg
 import (
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	_ "image/jpeg"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 // tool finds the FFmpeg bundled with the project (server/../tools), or skips.
@@ -131,5 +138,46 @@ func TestLoudness(t *testing.T) {
 		"    Threshold:   -inf LUFS\n\n  Sample peak:\n    Peak:       -inf dBFS\n")
 	if err != nil || l != SilentLUFS || p != SilentPeak {
 		t.Fatalf("silence: %v %v %v", l, p, err)
+	}
+}
+
+// Picture makes a JPEG of a scan a browser cannot show, from a file with no extension (the viewing
+// copy is made from the original copied aside), at most longest pixels on its longest side; a
+// smaller one keeps its size.
+func TestPicture(t *testing.T) {
+	tl := tool(t)
+	ctx := context.Background()
+	dir := t.TempDir()
+	img := image.NewRGBA(image.Rect(0, 0, 300, 100))
+	for x := range 300 {
+		img.Set(x, x%100, color.RGBA{uint8(x), 80, 160, 255})
+	}
+	for name, enc := range map[string]func(io.Writer, image.Image) error{
+		"tiff": func(w io.Writer, m image.Image) error { return tiff.Encode(w, m, nil) },
+		"bmp":  bmp.Encode,
+	} {
+		src := filepath.Join(dir, name+"-original")
+		f, _ := os.Create(src)
+		if err := enc(f, img); err != nil {
+			t.Fatal(err)
+		}
+		f.Close()
+		for longest, want := range map[int]image.Point{60: {60, 20}, 1000: {300, 100}} {
+			dst := filepath.Join(dir, name+"-"+strconv.Itoa(longest)+".jpg")
+			if err := tl.Picture(ctx, src, dst, longest); err != nil {
+				t.Fatal(name, err)
+			}
+			f, _ := os.Open(dst)
+			cfg, format, err := image.DecodeConfig(f)
+			f.Close()
+			if err != nil || format != "jpeg" || cfg.Width != want.X || cfg.Height != want.Y {
+				t.Fatalf("%s at %d: %s %dx%d %v", name, longest, format, cfg.Width, cfg.Height, err)
+			}
+		}
+	}
+	bad := filepath.Join(dir, "bad")
+	os.WriteFile(bad, []byte("not a picture"), 0o644)
+	if err := tl.Picture(ctx, bad, filepath.Join(dir, "bad.jpg"), 60); err == nil {
+		t.Fatal("garbage made a picture")
 	}
 }

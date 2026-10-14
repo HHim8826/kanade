@@ -122,7 +122,7 @@ func TestInboxImportsInPlace(t *testing.T) {
 	f1 := dd.add(album, "01.mp3", one)
 	f2 := dd.add(album, "02.mp3", two)
 	dd.add(album, "02.lrc", []byte("[00:01.00]words"))
-	dd.add(album, "cover.png", cover)
+	pic := dd.add(album, "cover.png", cover)
 	dd.add(album, "notes.txt", []byte("ignored"))
 
 	n, err := im.ScanInbox(ctx)
@@ -136,11 +136,14 @@ func TestInboxImportsInPlace(t *testing.T) {
 	im.db.QueryRow(`SELECT max(id) FROM import_batches WHERE kind = 'inbox'`).Scan(&batch)
 	waitState(t, im, batch, BatchDone)
 	b, _ := im.Batch(ctx, batch)
-	if b.Counts[StatePublished] != 2 {
+	if b.Counts[StatePublished] != 3 { // the songs, and the picture for the gallery (#134)
 		t.Fatalf("batch %+v", b.Items)
 	}
-	if dd.uploads != 1 { // only the cover was uploaded; the songs were moved
+	if dd.uploads != 1 { // only the cover was uploaded; the songs and the gallery's picture were moved
 		t.Fatalf("uploads = %d", dd.uploads)
+	}
+	if p := dd.parentOf(pic); p != "folder:images/A/Inbox Album" {
+		t.Fatalf("the picture moved to %q", p)
 	}
 	if p := dd.parentOf(f1); p != "folder:library/A/Inbox Album" {
 		t.Fatalf("moved to %q", p)

@@ -74,7 +74,7 @@ func TestConvertLosslessToFLAC(t *testing.T) {
 	again, _, _ := im.CreateBatch(ctx, "local", "", src, false)
 	waitState(t, im, again, BatchDone)
 	b, _ = im.Batch(ctx, again)
-	if b.Counts[StateDuplicate] != 3 {
+	if b.Counts[StateDuplicate] != 4 { // the songs, and the picture in the gallery already (#134)
 		t.Fatalf("re-import %+v", b.Counts)
 	}
 }

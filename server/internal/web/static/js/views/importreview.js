@@ -21,6 +21,7 @@ function reason(it) {
   if (it.role === 'sidecar') return it.path.toLowerCase().endsWith('.log') ? '翻錄紀錄，會和專輯一起保存' : 'CUE 檔，會和專輯一起保存';
   if (it.role === 'zip' && it.state === 'expanded') return '壓縮檔已展開';
   const e = it.error || '';
+  if (it.role === 'image') return `內頁圖沒能保存：${e || stateText[it.state] || it.state}`;
   const known = [
     [/^not a recognized audio file/, () => '不是可辨識的音訊檔'],
     [/is not supported: DSD/, () => `${(it.format || '').toUpperCase()} 不支援（DSD 與 MP3、AAC、Vorbis、Opus 以外的有損格式會略過）`],
@@ -154,6 +155,10 @@ export function ImportReview({ id }) {
           ${g.existing && review && html`<label class="pill check"><input type="checkbox" checked=${g.new_album} disabled=${busy}
             onChange=${(e) => op({ op: 'group', group: g.key, new_album: e.target.checked })} />改為另建一張專輯</label>`}
           ${g.new_album && !g.existing && html`<span class="pill">另建（與同批另一組標籤相同）</span>`}
+          ${(g.images || 0) + (g.images_off || 0) > 0 && (review
+            ? html`<label class="pill check" title="專輯資料夾裡的封面、內頁、光碟等掃描圖，匯入後可在專輯頁瀏覽"><input type="checkbox" checked=${g.images > 0}
+                disabled=${busy} onChange=${(e) => op({ op: e.target.checked ? 'images' : 'no_images', group: g.key })} />保存內頁圖（${g.images + g.images_off} 張）</label>`
+            : g.images > 0 && html`<span class="pill">${g.images} 張內頁圖</span>`)}
           ${g.warnings.map((w) => html`<span class="pill warn">${warningText[w] || w}</span>`)}
         </div>
         <${ItemRows} items=${g.items} review=${review} onMenu=${(e, it) => itemMenu(e, it, g)} />

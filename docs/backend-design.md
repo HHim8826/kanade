@@ -854,6 +854,19 @@ DIR/
 - iPhone／iPad：Safari 只讓在點擊中播放過的元素自己開始播放，所以 spare 在第一次點播放時一起播一下無聲音訊（`unlockSpare`）。Android 的無聲音軌照舊。
 - 驗證：同樣的量測，模擬 80 毫秒延遲，連續 8 次換歌落在重疊 0.4～9.2 毫秒、空白 2.5～8.3 毫秒之間（約一個音訊輸出緩衝），均衡器開（重疊 9.1～9.2 毫秒）、音量平衡（每首）、省流模式（Opus，空白 4～18 毫秒）都在這個範圍；兩個元素做不到逐取樣對齊。Go 測試：stream、lite 的 `TestLoadedAheadIsNotPlayed`，api 的 `TestStreamLoadedAhead`（`pre=1` 不改目前播放，`POST /play` 才改；省流路徑同）。Chromium 測試 `t-gapless`：下一首帶 `pre=1` 預載、依序換歌且伺服器各被告知一次、預載的那首不再以一般請求重抓、三筆播放都記為播完且第 2、3 首聽到的時間到結尾（修正前少約 0.25 秒：交棒在最後一次 timeupdate 之後，新元素開頭也沒有位置 0 的更新）、最後半分鐘按下一首立刻換且只有一個元素有聲、插入「下一首播放」後改預載新的那首並接著播、單曲循環不預載、結尾前暫停不會自己換歌、預載被拒（503）只請求一次、播完後照原本方式載入並播放、省流模式下預載帶 `q=opus128&pre=1` 且交棒後顯示伺服器說的格式、預載後關閉省流模式會改以原檔重新預載、設定關閉時照舊（沒有 `pre=1`）、設定頁有開關。既有的 `t-lite`、`t-226` 測的是一般載入路徑（歌曲 30 秒，開著無縫時下一首一開始就預載，測試假伺服器的計數會被預載用掉），改成關閉無縫播放；`t-cut` 維持預設（開），斷網時下一首若已預載一段，網路恢復後從停下的地方接著播（原本的預期是從頭）。實機（手機鎖定螢幕、iPhone）未測。
 
+### 內頁圖庫（2026-10-14，v0.2.18，#134 第二部分，遷移 45：`album_images`）
+
+- 目標：專輯附的掃描圖（封面、封底、內頁、光碟、側標，常在 `Scans/`、`BK/` 這類子資料夾，多為 TIFF／BMP 或很大的 JPEG）跟著專輯保存，在專輯頁以圖庫瀏覽。原圖照原樣保存；瀏覽器不能直接顯示的（TIFF、BMP）或太大的（長邊超過 4096 像素、超過 16 MB）另做 JPEG 檢視用複本。
+- 資料：`album_images`（album_id、資料夾裡的相對路徑、kind：front／back／booklet／disc／obi／other 或空白、disc：屬於哪片，0 是整張專輯、position：排好的順序，0 是依路徑的自然順序、sha256、size、mime、寬高、file_ref、hidden）。同一張專輯（含合併進來的）同樣內容只存一份（`UNIQUE (sha256, size, album_id)`，列出時依合併家族去重）。排序：整張專輯的在前、再依光碟；同一組內排過的依 position，其餘依路徑自然排序。
+- 匯入：專輯資料夾與底下子資料夾裡的 jpg／jpeg／png／webp／tif／tiff／bmp（每張最多 128 MB）成為 `image` 項目，在該批歌曲之後處理，不算進歌曲數。Windows Media Player 留下的 `AlbumArtSmall`、`AlbumArt_{GUID}_Large/Small` 與 macOS 的 `._*` 略過。圖找所屬專輯：往上找最近一個匯入成專輯的資料夾（同一批，或同一來源較早的一批：下載的下一輪、來源之後的掃描）。種類依檔名、再依資料夾名稱猜（back／rear／tray／inlay／裏 → 封底，obi／帯 → 側標，disc／cd／label／盤 → 光碟，front／cover／folder／jacket → 封面，booklet／bk／page／歌詞… → 內頁），光碟依 `Disc 2/` 這類資料夾。存放：存放位置放在 `images/<專輯資料夾>/<子資料夾>/`，只讀來源原位讀取（不複製），Drive 收件匣搬進 `images/`。同一張已經有了就是重複；從圖庫移除過的，再匯入或掃描也不會回來。匯入預覽：每張專輯一個「保存內頁圖（N 張）」開關（預設開；`images`／`no_images` 操作），圖只有失敗時才列在「其他檔案」。
+- 尺寸：TIFF 與 BMP 的寬高從檔頭讀（TIFF 第一個目錄的 256／257 標籤，邊讀邊算 SHA-256，不必把整個檔案放進記憶體；Go 的 TIFF 解碼器不支援 YCbCr、CMYK、內含 JPEG 的 TIFF，也會為了找檔尾的目錄把整個檔案讀進記憶體），所以這些掃描圖照樣保存，由 FFmpeg 做檢視用複本。其他格式用 `image.DecodeConfig`。
+- 顯示：`GET /api/v1/images/{id}?size=view`：JPEG／PNG／WebP 而且不超過 4096 像素與 16 MB 的直接送原圖（immutable 快取）；其他的送檢視用複本：原圖先複製到縮圖資料夾下的暫存目錄（最多 128 MB），FFmpeg 轉成長邊最多 4096 像素的 JPEG（`-q:v 3`），一次只做一張，結果和縮圖一樣放在縮圖資料夾、依預算淘汰；沒有 FFmpeg 時在 Go 裡解碼（解得了的才行）。`size=N` 是縮圖，需要檢視用複本的圖從複本縮。`GET /images/{id}/file` 下載原檔。
+- 編輯：`GET/PUT /api/v1/albums/{id}/images`（PUT 要給完整清單：每張的 id、kind、disc，依給的順序；清單和現況不同就 409，避免用舊的清單排）、`POST /albums/{id}/images?name=`（上傳一張，原始內容；已有的直接回傳，移除過的放回原來的位置）、`DELETE /images/{id}`（從圖庫移除：hidden，連同合併家族裡同內容的；存放位置裡的檔案在沒有歌曲、封面、附屬檔或其他圖用到時移到垃圾桶，來源裡的不動）、`POST /images/{id}/cover`（設為封面：JPEG／PNG 而且不超過 16 MB 的直接用同一個檔案，其他的用檢視用複本存成新封面；進修改紀錄，可撤回）。儲存位置的檢查、使用量、移除與搬移都算進圖。
+- 網頁：專輯頁歌曲下方「內頁圖」一排縮圖（256 像素，下面標種類或光碟），可上傳（可多選）與整理；專輯選單有「檢視內頁圖」「上傳內頁圖…」。檢視器沿用封面檢視器（縮放、拖曳、1:1、背景），加上換頁：左右箭頭按鈕、← → Home End、底部縮圖列、左右滑動（放大時拖曳是移動圖）；先顯示 256 像素的縮圖，大圖解碼好再換上；前後各一張預先載入（省流模式不預載），離開還沒載完的會取消。選單：設為封面、下載原檔、整理內頁圖、從內頁圖移除（在檢視器裡確認）。整理對話框：拖曳或上下移排序，選種類與光碟（只有一片時不顯示），同一片的排在一起。
+- 驗證：Go 測試 `TestImportKeepsAnAlbumsPictures`、`TestPreviewLeavesPicturesOut`、`TestGalleryArrangedAndTakenOut`、`TestSourcePicturesInPlace`、`TestPictureSizes`（YCbCr／CMYK、大端序、目錄在檔尾的 TIFF，RLE、由上而下的 BMP，沒有尺寸或截斷的拒絕）、thumbs 的 `TestViewingCopy`、ffmpeg 的 `TestPicture`（沒有副檔名的 TIFF／BMP 轉 JPEG、縮小與不放大）、api 的 `TestAlbumGallery`（上傳、重複、非圖片 400、不存在的專輯 404、排列與 409、原圖直送、TIFF 的檢視用複本與縮圖、下載、設為封面兩種、移除後檔案進垃圾桶但封面用到的留著、再上傳放回）；importer、library、api、thumbs、ffmpeg 的 `-race` 通過。示範站：FFmpeg 產生的 YCbCr TIFF 原本被拒（「not a … picture」），改從檔頭讀尺寸後可以上傳與顯示。Chromium 測試 `t-gallery`（電腦與手機）：專輯頁一排與張數、檢視器開在點的那張、TIFF 與 5200 像素寬 PNG 顯示檢視用複本、只預載前後各一張、方向鍵連按、Home／End、縮圖列、箭頭、滑鼠與手指滑動換頁、放大時拖曳不換頁、設為封面並從提示撤回、移除先確認、關閉後頁面可捲動、整理（上移、拖曳、改種類）、上傳兩張（一張放回、一張已有）、單張封面檢視不受影響、手機上工具列與整理對話框不超出畫面、匯入預覽的開關送出 `no_images`。
+- 限制：來源裡被刪掉的圖不會標成遺失（仍列在圖庫，開啟時失敗）。一張專輯第一次顯示大量 TIFF 時，每張縮圖都要先做檢視用複本（一次一張），會慢一陣子。
+
+
 ## 使用方式（開發環境）
 
 ```bash

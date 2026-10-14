@@ -54,6 +54,8 @@ type PreviewGroup struct {
 	Folders     []string      `json:"folders"`
 	Existing    *AlbumRef     `json:"existing,omitempty"` // the library album the group will join
 	Warnings    []string      `json:"warnings"`
+	Images      int           `json:"images"`     // pictures for its gallery (#134)
+	ImagesOff   int           `json:"images_off"` // and those left out
 	Items       []PreviewItem `json:"items"`
 }
 
@@ -64,7 +66,7 @@ type Preview struct {
 	Detected   map[string]int `json:"detected"`  // files whose untagged text was guessed, by guess
 	Groups     []PreviewGroup `json:"groups"`
 	Standalone []PreviewItem  `json:"standalone"` // songs without an album
-	Other      []PreviewItem  `json:"other"`      // skipped, failed and left-out files, sidecars, archives
+	Other      []PreviewItem  `json:"other"`      // skipped, failed and left-out files, sidecars, archives, pictures that failed
 }
 
 // Preview describes a batch's plan. It works in any state; the edits need review.
@@ -99,8 +101,16 @@ func (im *Importer) Preview(ctx context.Context, batchID int64) (*Preview, error
 
 	groups := map[string]*PreviewGroup{}
 	legacy := map[string]bool{}
+	var images []batchImage
 	for _, r := range list {
 		it := r.item
+		if it.Role == RoleImage { // counted with their albums below; listed only when they failed
+			images = append(images, batchImage{it.ID, it.Path, it.State})
+			if it.State == StateFailed {
+				p.Other = append(p.Other, it)
+			}
+			continue
+		}
 		var info media.Info
 		if r.info != "" && json.Unmarshal([]byte(r.info), &info) == nil {
 			it.Format, it.DurationMS = info.Format, info.DurationMS
@@ -169,7 +179,24 @@ func (im *Importer) Preview(ctx context.Context, batchID int64) (*Preview, error
 			}
 		}
 		g.Warnings = groupWarnings(g, legacy[k] && opts.Encoding == "")
-		p.Groups = append(p.Groups, *g)
+	}
+	byGroup := map[string][]string{}
+	for k, g := range groups {
+		byGroup[k] = g.Folders
+	}
+	folders := groupFolders(byGroup)
+	for _, m := range images {
+		g := groups[imageGroup(m.rel, folders)]
+		switch {
+		case g == nil:
+		case m.state == "pending":
+			g.Images++
+		case m.state == StateExcluded:
+			g.ImagesOff++
+		}
+	}
+	for _, k := range sortedGroups(keys) {
+		p.Groups = append(p.Groups, *groups[k])
 	}
 	return p, nil
 }
@@ -210,7 +237,7 @@ func groupWarnings(g *PreviewGroup, guessed bool) []string {
 
 // PlanOp is one edit of a batch's plan.
 type PlanOp struct {
-	Op          string  `json:"op"` // group | items | move | standalone | folders | encoding | exclude | include
+	Op          string  `json:"op"` // group | items | move | standalone | folders | encoding | exclude | include | images | no_images
 	Group       string  `json:"group"`
 	Into        string  `json:"into"` // move: a group key, "" for standalone songs, or "new"
 	Items       []int64 `json:"items"`
@@ -264,6 +291,8 @@ func (im *Importer) ApplyOp(ctx context.Context, batchID int64, op PlanOp) error
 			return err
 		}
 		return im.replan(ctx, batchID) // re-reading the tags starts the plan over
+	case "images", "no_images": // the pictures of a group's album kept, or left out (#134)
+		return im.setGroupImages(ctx, batchID, op.Group, op.Op == "images")
 	case "exclude", "include":
 		from, to := "pending", StateExcluded
 		if op.Op == "include" {

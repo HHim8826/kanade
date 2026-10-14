@@ -1,23 +1,32 @@
 import { useEffect, useLayoutEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { coverURL } from '../api.js';
+import { player } from '../player.js';
 import { Icon, IconButton, Spinner, html, showDialog, useLayer } from '../ui.js';
 
-// ---- the cover, whole (review #134) ----
-// An album's cover over everything else, uncropped: fitted to the window first, zoomed and moved by
-// the wheel, a pinch, dragging, a double click or tap, the buttons or the keys (+ - 0 1); the 600 px
-// picture at once, the original once it has loaded. Esc, the close button or going back closes it;
-// the page and the playback under it stay as they were.
+// ---- a picture, whole: an album's cover (review #134), or its gallery's ----
+// Over everything else, uncropped: fitted to the window first, zoomed and moved by the wheel, a
+// pinch, dragging, a double click or tap, the buttons or the keys (+ - 0 1); a small picture at
+// once, the large one once it has loaded. A gallery pages by the arrows, the strip of its pictures,
+// a swipe or the keys (← → Home End), the large pictures beside the one shown loaded ahead (not in
+// lite mode). Esc, the close button or going back closes it; the page and the playback under it
+// stay as they were.
 
 const BG = 'kanade.coverBg';
 const PAD = 16; // room around the fitted picture
 
 export function viewCover(id, title) {
-  if (id) showDialog((close) => html`<${CoverViewer} id=${id} title=${title} close=${close} />`);
+  if (id) {
+    showDialog((close) => html`<${PictureViewer} items=${[{ key: 'c' + id, small: coverURL(id, 600), full: coverURL(id, 0) }]}
+      title=${title} close=${close} />`);
+  }
 }
 
 const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
 
-function CoverViewer({ id, title, close }) {
+// PictureViewer shows items ({ key, small, full, info, alt }: info says what one is, in place of
+// its size) from the one at start. more(e, item, index) opens what can be done to one; notice is
+// shown under the bar.
+export function PictureViewer({ items, start = 0, title, label = '封面', more, notice, close }) {
   const [light, setLight] = useState(() => {
     try {
       return localStorage.getItem(BG) === 'light';
@@ -25,30 +34,75 @@ function CoverViewer({ id, title, close }) {
       return false;
     }
   });
-  const [src, setSrc] = useState(coverURL(id, 600));
-  const [nat, setNat] = useState(null); // the picture shown: { w, h, orig }
-  const [orig, setOrig] = useState('loading'); // the original: loading, ok or failed
-  const [failed, setFailed] = useState(false); // not even the small picture
+  const [index, setIndex] = useState(start);
+  const at = clamp(index, 0, items.length - 1);
+  const item = items[at];
+  // What is known of each picture, by its key: the large one's size once decoded (or 'failed'),
+  // and the small one's, shown till then.
+  const [full, setFull] = useState({});
+  const [small, setSmall] = useState({});
   const [tries, setTries] = useState(0);
   const [stage, setStage] = useState({ w: 0, h: 0 });
   const [view, setView] = useState({ s: 1, x: 0, y: 0 }); // zoom over the fitted size, and the offset from the centre
-  const box = useRef(null), img = useRef(null), closeBtn = useRef(null);
+  const box = useRef(null), img = useRef(null), closeBtn = useRef(null), strip = useRef(null);
+  const got = full[item.key], ok = !!got && got !== 'failed';
+  const orig = ok ? 'ok' : got || 'loading'; // the large picture: loading, ok or failed
+  const src = ok ? item.full : item.small;
+  const nat = ok ? { ...got, orig: true } : small[item.key] && small[item.key] !== 'failed' ? { ...small[item.key], orig: false } : null; // the picture shown
+  const failed = !ok && small[item.key] === 'failed'; // not even the small picture
+  const known = useRef(full);
+  known.current = full;
 
-  // The original, decoded before it takes the small one's place, so nothing flashes.
+  // The large picture, decoded before it takes the small one's place, so nothing flashes; one left
+  // for another before it came is no longer fetched.
   useEffect(() => {
-    let alive = true;
-    setOrig('loading');
+    const had = known.current[item.key];
+    if (had && had !== 'failed') return undefined;
+    let alive = true, done = false;
     const im = new Image();
-    im.src = coverURL(id, 0);
-    im.decode().then(() => {
-      if (!alive) return;
-      setSrc(im.src);
-      setNat({ w: im.naturalWidth, h: im.naturalHeight, orig: true });
-      setOrig('ok');
-      setFailed(false);
-    }, () => alive && setOrig('failed'));
-    return () => { alive = false; };
-  }, [id, tries]);
+    im.src = item.full;
+    im.decode().then(() => alive && setFull((f) => ({ ...f, [item.key]: { w: im.naturalWidth, h: im.naturalHeight } })),
+      () => alive && setFull((f) => ({ ...f, [item.key]: 'failed' }))).finally(() => { done = true; });
+    return () => {
+      alive = false;
+      if (!done) im.src = '';
+    };
+  }, [item.key, item.full, tries]);
+
+  // The pictures either side, loaded ahead: the browser keeps them for when they are shown.
+  const ahead = useRef(new Map());
+  useEffect(() => {
+    if (items.length < 2 || player.get().lite) return;
+    const near = [items[at + 1], items[at - 1]].filter(Boolean);
+    const keep = new Set([item.key, ...near.map((it) => it.key)]);
+    for (const [k, im] of ahead.current) {
+      if (keep.has(k)) continue;
+      if (!im.complete) im.src = '';
+      ahead.current.delete(k);
+    }
+    for (const it of near) {
+      if (ahead.current.has(it.key) || known.current[it.key]) continue;
+      const im = new Image();
+      im.src = it.full;
+      ahead.current.set(it.key, im);
+    }
+  }, [at, items]);
+  useEffect(() => () => ahead.current.forEach((im) => { if (!im.complete) im.src = ''; }), []);
+  useEffect(() => {
+    const el = strip.current, on = el?.querySelector('.on');
+    if (on) el.scrollTo({ left: on.offsetLeft - (el.clientWidth - on.offsetWidth) / 2, behavior: 'smooth' });
+  }, [at]);
+  // page goes to a picture; step(by) from the one shown, so that keys pressed before the page
+  // shows the last go on from there.
+  const page = (to) => {
+    if (to < 0 || to >= items.length) return;
+    setIndex(to);
+    setView({ s: 1, x: 0, y: 0 });
+  };
+  const step = (by) => {
+    setIndex((i) => clamp(clamp(i, 0, items.length - 1) + by, 0, items.length - 1));
+    setView({ s: 1, x: 0, y: 0 });
+  };
 
   useLayoutEffect(() => {
     const el = box.current;
@@ -85,7 +139,9 @@ function CoverViewer({ id, title, close }) {
 
   useLayoutEffect(() => {
     const el = img.current;
-    if (!el || !nat) return;
+    if (!el) return;
+    el.style.visibility = nat ? '' : 'hidden'; // a picture of another size waits for its own
+    if (!nat) return;
     el.style.width = `${bw}px`;
     el.style.height = `${bh}px`;
     el.style.transform = `translate(-50%, -50%) translate(${view2.x}px, ${view2.y}px) scale(${view2.s})`;
@@ -110,6 +166,8 @@ function CoverViewer({ id, title, close }) {
       else if (e.key === '-') zoomAt(view2.s / 1.25);
       else if (e.key === '0') setView({ s: 1, x: 0, y: 0 });
       else if (e.key === '1' && one) zoomAt(one);
+      else if ((e.key === 'ArrowLeft' || e.key === 'ArrowRight') && items.length > 1) step(e.key === 'ArrowLeft' ? -1 : 1);
+      else if ((e.key === 'Home' || e.key === 'End') && items.length > 1) page(e.key === 'Home' ? 0 : items.length - 1);
       else return;
       e.preventDefault();
     };
@@ -122,6 +180,7 @@ function CoverViewer({ id, title, close }) {
   const pinch = useRef(null);
   const lastTap = useRef({ t: 0, x: 0, y: 0 });
   const touched = useRef(false); // the last pointer was a finger: its double tap is ours, not the browser's dblclick
+  const swipe = useRef(null); // where one pointer came down on a picture not zoomed: moved far sideways, it pages
   const [dragging, setDragging] = useState(false);
   const local = (e) => {
     const r = box.current.getBoundingClientRect();
@@ -136,6 +195,7 @@ function CoverViewer({ id, title, close }) {
     pointers.current.set(e.pointerId, local(e));
     touched.current = e.pointerType === 'touch';
     pinch.current = pointers.current.size === 2 ? pinchOf() : null; // a pinch measures from where both fingers came down
+    swipe.current = pointers.current.size === 1 && !zoomed && items.length > 1 ? { x: e.clientX, y: e.clientY } : null;
     setDragging(true);
   };
   const move = (e) => {
@@ -148,6 +208,7 @@ function CoverViewer({ id, title, close }) {
       return;
     }
     if (ps.size !== 2) return;
+    swipe.current = null;
     const { dist, mid } = pinchOf();
     const last = pinch.current;
     pinch.current = { dist, mid };
@@ -164,6 +225,16 @@ function CoverViewer({ id, title, close }) {
     ps.delete(e.pointerId);
     pinch.current = null;
     if (!ps.size) setDragging(false);
+    const sw = swipe.current;
+    swipe.current = null;
+    if (sw && e.type === 'pointerup' && !ps.size) {
+      const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
+      if (Math.abs(dx) > 48 && Math.abs(dx) > 1.5 * Math.abs(dy)) {
+        step(dx < 0 ? 1 : -1);
+        lastTap.current = { t: 0, x: 0, y: 0 };
+        return;
+      }
+    }
     if (e.pointerType !== 'mouse' && e.type === 'pointerup' && !ps.size) {
       const t = performance.now(), l = lastTap.current;
       if (t - l.t < 300 && Math.hypot(p.x - l.x, p.y - l.y) < 30) {
@@ -184,31 +255,48 @@ function CoverViewer({ id, title, close }) {
       localStorage.setItem(BG, light ? 'dark' : 'light');
     } catch { /* this time only */ }
   };
-  const retry = () => { setFailed(false); setSrc(coverURL(id, 600)); setTries((n) => n + 1); };
-  return html`<div class=${'cover-view' + (light ? ' light' : '')} role="dialog" aria-modal="true" aria-label=${`封面：${title || ''}`} ref=${root}>
+  const retry = () => {
+    setSmall((m) => ({ ...m, [item.key]: undefined }));
+    setFull((f) => ({ ...f, [item.key]: undefined }));
+    setTries((n) => n + 1);
+  };
+  const info = item.info ?? (ok ? `${nat.w} × ${nat.h}` : '');
+  const loading = orig === 'loading' && !failed ? '載入原圖…' : '';
+  const many = items.length > 1;
+  const nav = (e) => e.stopPropagation(); // a press on the arrows is not a drag of the picture
+  return html`<div class=${'cover-view' + (light ? ' light' : '')} role="dialog" aria-modal="true" aria-label=${`${label}：${title || ''}`} ref=${root}>
     <div class="cover-bar">
       <div class="cover-title">
         <div class="title">${title}</div>
-        <div class="dims">${orig === 'ok' && nat ? `${nat.w} × ${nat.h}` : orig === 'loading' && !failed ? '載入原圖…' : ''}</div>
+        <div class="dims">${[many && `${at + 1} / ${items.length}`, info, loading].filter(Boolean).join(' · ')}</div>
       </div>
       ${orig === 'failed' && !failed && html`<button class="btn text" onClick=${retry}>原圖載入失敗，重試</button>`}
-      <${IconButton} icon="zoomOut" label="縮小" onClick=${() => zoomAt(view2.s / 1.25)} disabled=${view2.s <= least + 0.001} />
-      <${IconButton} icon="zoomIn" label="放大" onClick=${() => zoomAt(view2.s * 1.25)} disabled=${!nat || view2.s >= most - 0.001} />
+      <${IconButton} icon="zoomOut" label="縮小" className="zoom-btn" onClick=${() => zoomAt(view2.s / 1.25)} disabled=${view2.s <= least + 0.001} />
+      <${IconButton} icon="zoomIn" label="放大" className="zoom-btn" onClick=${() => zoomAt(view2.s * 1.25)} disabled=${!nat || view2.s >= most - 0.001} />
       ${fitted
         ? html`<button class="icon-btn one-to-one" onClick=${() => zoomAt(one)} disabled=${!one} aria-label="原始大小" title="原始大小">1:1</button>`
         : html`<${IconButton} icon="fit" label="適合視窗" onClick=${() => setView({ s: 1, x: 0, y: 0 })} />`}
       <${IconButton} icon="contrast" label=${light ? '深色背景' : '淺色背景'} onClick=${setBg} />
+      ${more && html`<${IconButton} icon="more" label="更多" onClick=${(e) => more(e, item, at)} />`}
       <button class="icon-btn" ref=${closeBtn} onClick=${close} aria-label="關閉" title="關閉"><${Icon} name="close" /></button>
     </div>
+    ${notice}
     <div class=${'cover-stage' + (zoomed ? ' zoomed' : '') + (dragging ? ' dragging' : '')} ref=${box}
       onPointerDown=${down} onPointerMove=${move} onPointerUp=${up} onPointerCancel=${up} onWheel=${wheel}
       onDblClick=${(e) => { if (touched.current) return; const p = local(e); toggle(p.x, p.y); }}>
       ${failed
-        ? html`<div class="cover-msg"><span>無法載入封面。</span><button class="btn tonal" onClick=${retry}>重試</button></div>`
-        : html`<img class="cover-full" ref=${img} src=${src} alt=${title || '封面'} draggable="false"
-            onLoad=${(e) => !nat && setNat({ w: e.target.naturalWidth, h: e.target.naturalHeight, orig: false })}
-            onError=${() => orig !== 'ok' && setFailed(true)} />`}
+        ? html`<div class="cover-msg"><span>無法載入${label}。</span><button class="btn tonal" onClick=${retry}>重試</button></div>`
+        : html`<img key=${item.key + '/' + tries} class="cover-full" ref=${img} src=${src} alt=${item.alt || title || label} draggable="false"
+            onLoad=${(e) => !ok && setSmall((m) => ({ ...m, [item.key]: { w: e.target.naturalWidth, h: e.target.naturalHeight } }))}
+            onError=${() => !ok && setSmall((m) => ({ ...m, [item.key]: 'failed' }))} />`}
       ${!nat && !failed && html`<div class="cover-msg"><${Spinner} /></div>`}
+      ${many && html`<button class="pic-nav prev" onPointerDown=${nav} onDblClick=${nav} onClick=${() => step(-1)} disabled=${at === 0}
+          aria-label="上一張" title="上一張（←）"><${Icon} name="left" /></button>
+        <button class="pic-nav next" onPointerDown=${nav} onDblClick=${nav} onClick=${() => step(1)} disabled=${at === items.length - 1}
+          aria-label="下一張" title="下一張（→）"><${Icon} name="right" /></button>`}
     </div>
+    ${many && html`<div class="pic-strip" ref=${strip}>${items.map((it, i) => html`<button key=${it.key} class=${i === at ? 'on' : ''}
+      aria-current=${i === at ? 'true' : null} aria-label=${`第 ${i + 1} 張${it.alt ? '：' + it.alt : ''}`} title=${it.alt} onClick=${() => page(i)}>
+      <img src=${it.small} alt="" loading="lazy" draggable="false" /></button>`)}</div>`}
   </div>`;
 }

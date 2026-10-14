@@ -40,7 +40,7 @@ function scanLine(st) {
       ${s.held > 0 && html`<span class="sub state-failed">有 ${s.held} 首一次不見太多，看起來不是被刪除而是沒有完整掛載，所以沒有標成遺失。確認來源正常後再掃描一次。</span>`}
       ${s.error && html`<span class="sub state-failed">${s.error}</span>`}`;
   }
-  return html`<span class="sub">上次檢查：${when(s.at)}，這裡有曲庫的 ${s.checked} 首歌${s.missing ? `，${s.missing} 首不見了（標成遺失）` : ''}${s.restored ? `，${s.restored} 首回來了` : ''}${s.lost ? `，${s.lost} 個封面或附屬檔不見了` : ''}</span>
+  return html`<span class="sub">上次檢查：${when(s.at)}，這裡有曲庫的 ${s.checked} 首歌${s.missing ? `，${s.missing} 首不見了（標成遺失）` : ''}${s.restored ? `，${s.restored} 首回來了` : ''}${s.lost ? `，${s.lost} 個封面、附屬檔或內頁圖不見了` : ''}</span>
     ${s.held > 0 && html`<span class="sub state-failed">有 ${s.held} 首一次不見太多，沒有標成遺失；確認位置正常後再檢查一次。</span>`}
     ${s.error && html`<span class="sub state-failed">${s.error}</span>`}`;
 }
@@ -156,7 +156,7 @@ function StoreRow({ st, isDefault, onChange }) {
       <button class="btn text" onClick=${rename}>重新命名</button>
       <button class="btn text danger-text" disabled=${inUse || st.running} title=${inUse ? '曲庫還有檔案存在這裡；搬到別處的功能另外設計，目前要先刪除這些歌曲' : ''} onClick=${remove}>移除</button>
     </div>
-    ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面或附屬檔` : ''}存在這裡，所以不能移除。</p>`}`}
+    ${inUse && html`<p class="hint tight">曲庫還有 ${st.use.songs} 首歌${st.use.others ? `和 ${st.use.others} 個封面、附屬檔或內頁圖` : ''}存在這裡，所以不能移除。</p>`}`}
   </div>`;
 }
 
@@ -294,7 +294,7 @@ function AddStore({ close, dataDir, redirect, paste, onAdded }) {
     });
   };
   const modeHint = mode === 'managed'
-    ? '存放位置：匯入的音樂、封面、CUE 和 LOG 存在這裡的 library／covers／sidecars 資料夾，和存在 Google Drive 時一樣。'
+    ? '存放位置：匯入的音樂、封面、CUE、LOG 和內頁圖存在這裡的 library／covers／sidecars／images 資料夾，和存在 Google Drive 時一樣。'
     : '只讀來源：已經在這裡的音樂原位匯入，播放時直接讀原檔；不會寫入、移動或刪除任何檔案。';
   return html`<${Dialog} title="新增儲存位置" onClose=${close} actions=${html`
       <button class="btn text" onClick=${close}>取消</button>
@@ -527,7 +527,7 @@ function FolderPicker({ st, close, onChange }) {
       ${i === trail.length - 1 ? html`<span class="here">${f.name}</span>`
         : html`<button type="button" onClick=${() => setTrail((t) => t.slice(0, i + 1))}>${f.name}</button>`}`)}</nav>
     <p class="hint tight">${st.mode === 'managed'
-      ? '匯入的音樂、封面、CUE 和 LOG 會存在這個資料夾的 library／covers／sidecars 裡。建議新增一個專用的資料夾，例如 Kanade。'
+      ? '匯入的音樂、封面、CUE、LOG 和內頁圖會存在這個資料夾的 library／covers／sidecars／images 裡。建議新增一個專用的資料夾，例如 Kanade。'
       : '這個資料夾（含子資料夾）裡的音樂會原位匯入曲庫。'}</p>
     <${ErrorBox} error=${error} />
     ${!list && !error && html`<div class="spinner"></div>`}
