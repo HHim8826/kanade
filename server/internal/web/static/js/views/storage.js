@@ -148,14 +148,16 @@ function StoreRow({ st, isDefault, onChange }) {
       ${od && !st.signed_in && html`<button class="btn filled" onClick=${connect}><${Icon} name="cloud" />連線 OneDrive</button>`}
       ${od && st.signed_in && !odConfig(st).folder && html`<button class="btn filled" onClick=${pickFolder}><${Icon} name="folder" />選擇資料夾</button>`}
       ${ready && (st.mode === 'source'
-        ? html`<button class="btn tonal" disabled=${busy || st.running} onClick=${() => scan(false)}><${Icon} name="refresh" />${scanned ? '掃描' : '掃描並匯入'}</button>
+        ? html`${scanned
+            ? html`<button class="btn text" disabled=${busy || st.running} onClick=${() => scan(false)}>掃描</button>`
+            : html`<button class="btn tonal" disabled=${busy || st.running} onClick=${() => scan(false)}><${Icon} name="refresh" />掃描並匯入</button>`}
           <button class="btn text" disabled=${busy || st.running} onClick=${() => scan(true)}>掃描並先預覽</button>`
-        : html`${!isDefault && html`<button class="btn tonal" disabled=${busy || st.state !== 'ok'} onClick=${makeDefault}>設為新匯入的位置</button>`}
+        : html`${!isDefault && html`<button class="btn text" disabled=${busy || st.state !== 'ok'} onClick=${makeDefault}>設為新匯入的位置</button>`}
           <button class="btn text" disabled=${busy || st.running} onClick=${() => scan(false)}>檢查檔案</button>`)}
       ${ready && html`<button class="btn text" disabled=${busy} onClick=${check}>檢查連線</button>`}
       ${st.kind === 's3' && html`<button class="btn text" onClick=${() => changeKeys(st, onChange)}>更新金鑰</button>`}
       ${od && st.signed_in && html`<button class="btn text" onClick=${connect}>重新連線</button>`}
-      ${st.mode === 'managed' && hasFiles && html`<button class="btn tonal" onClick=${() => moveFiles({ origin: String(st.id), title: st.name, onDone: onChange })}><${Icon} name="move" />搬移到…</button>`}
+      ${st.mode === 'managed' && hasFiles && html`<button class="btn text" onClick=${() => moveFiles({ origin: String(st.id), title: st.name, onDone: onChange })}>搬移到…</button>`}
       ${od && st.signed_in && odConfig(st).folder && html`<button class="btn text" disabled=${hasFiles || movingIn || st.running} title=${hasFiles ? '曲庫還有檔案在這個資料夾：先用「搬移到…」把它們搬到別處' : keep} onClick=${pickFolder}>更換資料夾</button>`}
       ${od && html`<button class="btn text" onClick=${() => changeClientSecret(st, onChange)}>更新用戶端密碼</button>`}
       <button class="btn text" onClick=${rename}>重新命名</button>
@@ -215,7 +217,7 @@ export function StorageLocations({ first }) {
         : '這個位置目前無法使用：匯入會失敗，直到它恢復。'}${v.stores.some((s) => s.mode === 'source')
         ? '只讀來源的歌仍可原位匯入，但需要轉檔或分軌的檔案會匯入失敗（之後可以在任務重試），只內嵌在音檔裡的封面也不會保存。' : ''}</div>`}
       <div class="store-drive"><span class="sub grow">Google Drive 有曲庫的 ${drive.songs || 0} 首歌。</span>
-        ${drive.songs > 0 && (managed.length > 0) && html`<button class="btn text" onClick=${() => moveFiles({ origin: 'drive', title: 'Google Drive', onDone: load })}><${Icon} name="move" />搬移到…</button>`}</div>
+        ${drive.songs > 0 && (managed.length > 0) && html`<button class="btn text" onClick=${() => moveFiles({ origin: 'drive', title: 'Google Drive', onDone: load })}>搬移到…</button>`}</div>
     </div>
     ${v.stores.map((st) => html`<${StoreRow} key=${st.id} st=${st} isDefault=${String(st.id) === v.default} onChange=${load} />`)}
     <div class="actions"><button class="btn tonal" onClick=${add}><${Icon} name="add" />新增儲存位置</button></div>`;
