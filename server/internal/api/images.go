@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -195,8 +194,7 @@ func (s *Server) galleryImage(w http.ResponseWriter, r *http.Request) *library.A
 // needsView says whether a picture is shown by its viewing copy (thumbs.ViewSize): one a browser
 // cannot show (TIFF, BMP), or too large to show as it is.
 func needsView(m *library.AlbumImage) bool {
-	web := m.MIME == "image/jpeg" || m.MIME == "image/png" || m.MIME == "image/webp"
-	return !web || max(m.Width, m.Height) > thumbs.ViewSize || m.Size > 16<<20
+	return thumbs.NeedsView(m.MIME, m.Width, m.Height, m.Size)
 }
 
 // image sends a picture of a gallery: at size (a thumbs.Size) or, for size=view, to look at: the
@@ -207,10 +205,10 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	open := func(ctx context.Context) (io.ReadCloser, error) { return s.files.Open(ctx, m.Ref, 0, -1) }
-	size := thumbs.ViewSize
+	ctx, size := thumbs.Looking(r.Context()), thumbs.ViewSize // to look at: before the sizes a page shows (review #248)
 	if q := r.URL.Query().Get("size"); q != "view" {
 		n, _ := strconv.Atoi(q)
-		if size = thumbs.Size(n); size == 0 {
+		if ctx, size = r.Context(), thumbs.Size(n); size == 0 {
 			size = thumbs.ViewSize
 		}
 	}
@@ -220,7 +218,7 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 	case size == thumbs.ViewSize && !needsView(m): // as it is, read through: originals are not kept here
 		body, err := open(r.Context())
 		if err != nil {
-			upstreamError(w, err, 0)
+			fileError(w, err)
 			return
 		}
 		defer body.Close()
@@ -229,16 +227,10 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 		io.Copy(w, io.LimitReader(body, m.Size))
 		return
-	case size != thumbs.ViewSize && needsView(m): // made from the viewing copy
-		data, err = s.thumbs.Get(r.Context(), m.SHA256, size, func(ctx context.Context) (io.ReadCloser, error) {
-			view, err := s.thumbs.Get(ctx, m.SHA256, thumbs.ViewSize, open)
-			if err != nil {
-				return nil, err
-			}
-			return io.NopCloser(bytes.NewReader(view)), nil
-		})
+	case needsView(m): // its sizes made from the original by FFmpeg, as its viewing copy is
+		data, err = s.thumbs.Picture(ctx, m.SHA256, size, open)
 	default:
-		data, err = s.thumbs.Get(r.Context(), m.SHA256, size, open)
+		data, err = s.thumbs.Get(ctx, m.SHA256, size, open)
 	}
 	switch {
 	case errors.Is(err, thumbs.ErrUndecodable):
@@ -246,7 +238,7 @@ func (s *Server) image(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		if r.Context().Err() == nil {
-			upstreamError(w, err, 0)
+			fileError(w, err)
 		}
 		return
 	}
@@ -263,7 +255,7 @@ func (s *Server) imageFile(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.files.Open(r.Context(), m.Ref, 0, -1)
 	if err != nil {
-		upstreamError(w, err, 0)
+		fileError(w, err)
 		return
 	}
 	defer body.Close()

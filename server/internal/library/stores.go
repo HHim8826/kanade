@@ -111,18 +111,21 @@ func (s *Store) MoveRef(ctx context.Context, from, to string) error {
 
 // RefUse is a library file kept in a store, for checking the store holds it.
 type RefUse struct {
-	Ref   string
-	Size  int64
-	State string // an asset's: verified | missing; "" for covers, sidecars and pictures
+	Ref     string
+	Size    int64
+	State   string // an asset's and a picture's: verified | missing; "" for covers and sidecars
+	Picture bool   // a gallery's picture (review #246)
 }
 
-// StoreRefs lists the library's files in a store: songs, covers, sidecars and the galleries' pictures.
+// StoreRefs lists the library's files in a store: songs, covers, sidecars and the galleries' pictures
+// (each file once).
 func (s *Store) StoreRefs(ctx context.Context, kind string, id int64) ([]RefUse, error) {
 	from, to := refRange(kind, id)
-	rows, err := s.db.QueryContext(ctx, `SELECT file_ref, size, state FROM assets WHERE `+likeRefs("file_ref")+`
-		UNION ALL SELECT file_ref, 0, '' FROM covers WHERE `+likeRefs("file_ref")+`
-		UNION ALL SELECT file_ref, size, '' FROM sidecars WHERE `+likeRefs("file_ref")+`
-		UNION ALL SELECT file_ref, size, '' FROM album_images WHERE hidden = 0 AND `+likeRefs("file_ref"), from, to)
+	rows, err := s.db.QueryContext(ctx, `SELECT file_ref, size, state, 0 FROM assets WHERE `+likeRefs("file_ref")+`
+		UNION ALL SELECT file_ref, 0, '', 0 FROM covers WHERE `+likeRefs("file_ref")+`
+		UNION ALL SELECT file_ref, size, '', 0 FROM sidecars WHERE `+likeRefs("file_ref")+`
+		UNION ALL SELECT file_ref, max(size), CASE WHEN min(missing) = 0 THEN '`+AssetVerified+`' ELSE '`+AssetMissing+`' END, 1
+			FROM album_images WHERE hidden = 0 AND `+likeRefs("file_ref")+` GROUP BY file_ref`, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +133,7 @@ func (s *Store) StoreRefs(ctx context.Context, kind string, id int64) ([]RefUse,
 	var out []RefUse
 	for rows.Next() {
 		var u RefUse
-		if err := rows.Scan(&u.Ref, &u.Size, &u.State); err != nil {
+		if err := rows.Scan(&u.Ref, &u.Size, &u.State, &u.Picture); err != nil {
 			return nil, err
 		}
 		out = append(out, u)

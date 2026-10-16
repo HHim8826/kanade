@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -285,5 +286,138 @@ func TestViewingCopy(t *testing.T) {
 	New(s.dir, 1<<30, s.log)
 	if _, err := os.Stat(filepath.Join(s.dir, ".view-123")); !os.IsNotExist(err) {
 		t.Fatal("a half made copy stayed:", err)
+	}
+}
+
+// A gallery picture's sizes (review #248): made by the PictureFunc from the original at the size
+// asked for, not by way of a viewing copy. Of those waiting for their turn, the one looked at goes
+// first, then those for a page, then those made ahead, each the longest waiting first; one asked
+// for again by someone looking at it moves up. Its viewing copy here, a size is resized from it;
+// without a PictureFunc, too.
+func TestPictureSizes(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, 1<<30)
+	s.reads = newGate(10) // the order is the makes' here
+	pics := map[string][]byte{}
+	for i, name := range []string{"a", "b", "c", "p", "l"} {
+		pics[name] = pngData(t, 30+i, 10)
+	}
+	var mu sync.Mutex
+	var order []string
+	longest := map[string]int{}
+	hold := make(chan struct{})
+	s.SetPictures(func(ctx context.Context, src, dst string, n int) error {
+		got, err := os.ReadFile(src)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		for name, p := range pics {
+			if bytes.Equal(p, got) {
+				order = append(order, name)
+				longest[name] = n
+			}
+		}
+		first := len(order) == 1
+		mu.Unlock()
+		if first {
+			<-hold
+		}
+		return os.WriteFile(dst, got, 0o644) // a PNG: as good as a JPEG to resize from
+	})
+	opens := map[string]*atomic.Int32{}
+	for name := range pics {
+		opens[name] = &atomic.Int32{}
+	}
+	until := func(what string, ok func() bool) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); !ok(); time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatal("never ", what)
+			}
+		}
+	}
+	queued := func(n int) func() bool {
+		return func() bool {
+			s.makes.mu.Lock()
+			defer s.makes.mu.Unlock()
+			return len(s.makes.waiting) == n
+		}
+	}
+	var wg sync.WaitGroup
+	ask := func(ctx context.Context, name string, size int) {
+		wg.Go(func() {
+			if _, err := s.Picture(ctx, name, size, source(pics[name], opens[name])); err != nil {
+				t.Error(name, err)
+			}
+		})
+	}
+	ask(ctx, "a", 256)
+	until("made", func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 1 })
+	ask(Ahead(ctx), "b", 256)
+	until("b waits", queued(1))
+	ask(Ahead(ctx), "c", 256)
+	until("c waits", queued(2))
+	ask(ctx, "p", 96)
+	until("p waits", queued(3))
+	ask(Looking(ctx), "l", ViewSize)
+	until("l waits", queued(4))
+	ask(Looking(ctx), "c", 256) // looked at now: it waited longer than l
+	until("c asked again", func() bool { s.mu.Lock(); defer s.mu.Unlock(); return s.calls["c-256.jpg"].waiting == 2 })
+	close(hold)
+	wg.Wait()
+	if fmt.Sprint(order) != "[a c l p b]" {
+		t.Fatalf("made in order %v", order)
+	}
+	if fmt.Sprint(longest) != "map[a:256 b:256 c:256 l:4096 p:96]" || opens["c"].Load() != 1 {
+		t.Fatalf("made at %v; c read %d times", longest, opens["c"].Load())
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "a-256.jpg")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(s.dir, "a-view.jpg")); !os.IsNotExist(err) {
+		t.Fatal("a viewing copy made on the way:", err)
+	}
+
+	// Its viewing copy here: resized from it, the original not read.
+	data, err := s.Picture(ctx, "l", 96, source(pics["l"], opens["l"]))
+	if cfg, format, _ := image.DecodeConfig(bytes.NewReader(data)); err != nil || format != "jpeg" || cfg.Width != 34 || len(order) != 5 || opens["l"].Load() != 1 {
+		t.Fatalf("%s %d %v; made %v, read %d", format, cfg.Width, err, order, opens["l"].Load())
+	}
+	// Without FFmpeg: from the viewing copy decoded here.
+	s.SetPictures(nil)
+	var n atomic.Int32
+	data, err = s.Picture(ctx, "wide", 256, source(pngData(t, 600, 60), &n))
+	if cfg, _, _ := image.DecodeConfig(bytes.NewReader(data)); err != nil || cfg.Width != 256 || n.Load() != 1 {
+		t.Fatalf("%d %v, read %d", cfg.Width, err, n.Load())
+	}
+}
+
+// The next picture's original is read while one is being made; no more than two are held.
+func TestPictureReadWhileMade(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, 1<<30)
+	hold := make(chan struct{})
+	var made atomic.Int32
+	s.SetPictures(func(ctx context.Context, src, dst string, n int) error {
+		if made.Add(1) == 1 {
+			<-hold
+		}
+		return os.WriteFile(dst, []byte("made"), 0o644)
+	})
+	var opens [3]atomic.Int32
+	var wg sync.WaitGroup
+	for i := range opens {
+		wg.Go(func() { s.Picture(ctx, string(rune('a'+i)), 256, source(pngData(t, 20, 20), &opens[i])) })
+		time.Sleep(50 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if opens[0].Load() != 1 || opens[1].Load() != 1 || opens[2].Load() != 0 {
+		t.Fatalf("read %d %d %d while the first is made", opens[0].Load(), opens[1].Load(), opens[2].Load())
+	}
+	close(hold)
+	wg.Wait()
+	if made.Load() != 3 {
+		t.Fatal(made.Load())
 	}
 }

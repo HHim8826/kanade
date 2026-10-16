@@ -52,8 +52,10 @@ type Syncer struct {
 	// Trash moves a file the library let go of to its place's trash, wherever it is (#99); nil:
 	// Drive's, for Drive's files.
 	Trash func(ctx context.Context, ref string) error
-	Every time.Duration
-	Delay time.Duration // before the first round; a minute when 0
+	// Offline says a storage location is known not to be reachable now; its files wait (review #245).
+	Offline func(ctx context.Context, store int64) bool
+	Every   time.Duration
+	Delay   time.Duration // before the first round; a minute when 0
 
 	mu     sync.Mutex
 	status Status
@@ -61,8 +63,9 @@ type Syncer struct {
 	every   time.Duration
 	noInbox bool
 	kick    chan struct{}
-	full    sync.Mutex // one full pass at a time
-	turn    sync.Mutex // the feed and full passes apply what they saw one at a time
+	pacer   library.TrashPacer // a location slow to answer holds up the rest of a round no longer than a file's turn
+	full    sync.Mutex         // one full pass at a time
+	turn    sync.Mutex         // the feed and full passes apply what they saw one at a time
 }
 
 // Result counts what a pass changed.
@@ -275,12 +278,8 @@ func (s *Syncer) RetryTrash(ctx context.Context) (done int) {
 	if err != nil {
 		return 0
 	}
-	for _, id := range ids {
-		// Checked again under the trash lock: a re-import may have taken the file up (review #44).
-		if n, _ := s.Lib.TrashFile(ctx, id, s.trash); n == library.Trashed {
-			done++
-		}
-	}
+	// Checked again under the trash lock: a re-import may have taken the file up (review #44).
+	done, _ = s.pacer.Trash(ctx, s.Lib, ids, s.trash, s.Offline)
 	if done > 0 {
 		s.Log.Info("deleted files moved to the trash", "count", done)
 	}

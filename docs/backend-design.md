@@ -891,6 +891,17 @@ DIR/
 - 驗證：Go 測試 library 的 `TestRelocate`（加上 `since` 的規則與位置被移除）、mover 的 `TestMoveCanceledBeforeRun`、`TestMoveDestRemoved`、`TestMoveOntoTrashed`，api 的 `TestMoveKeepsDestination`、`TestGalleryUploadDuringTrash`（資料夾與模擬的 S3）、`TestGalleryUploadHoldsStaging`、`TestStreamLitePlaybackKept`，importer 的 `TestSourcePicturesFollowScans`，lite 的 `TestPlaybackKeepsWhatItGot`；能在舊程式上編譯的都先確認會失敗。完整測試與 `-race` 通過。Chromium 測試 `t-240`（示範站）：關閉預載時停止並清空、刪掉下一首、關閉無縫播放都送出 `DELETE /stream/prefetch`，預載的那首是下一首時不放掉並照常交棒，開啟預載時交棒前不放掉；省流模式下每次播放有自己的代號，預載的那首交棒後以同一個代號問實際格式。`t-moves` 加上目的地移除 409 與設定頁的說明；`t-lite`、`t-226`、`t-gapless` 改成接受帶 `play=` 的網址。
 - 限制：密碼在別處被改或已在別處登出時，登出無法放掉預載（伺服器拒絕請求），要等伺服器自己換掉。v0.2.20 之前刪掉的圖的 ID 可能已經被重用過。沒有在真正的雲端儲存上測試（用模擬的 S3）。
 
+### 第九輪修正（2026-10-16，v0.2.22，#244–#249，沒有新遷移）
+
+- #244 來源掃描的 held 把內頁圖也算進去：一次不見太多就不標遺失（#227）的門檻連圖片一起算，移走一個 `Scans/` 資料夾就讓整個來源 held，這段期間刪掉的歌也不會標成遺失，畫面還把圖說成「首」。修正：門檻只看音樂檔（音檔與壓縮檔）：不見的音樂檔超過 20 個、而且超過來源音樂檔的一半才 held；整個來源一個檔案都沒列出、而不見的超過 20 個也 held。只有圖不見時照常把那些圖從圖庫隱藏。held 時歌與圖都不標。掃描結果分開記：`held`（音樂檔）、`held_pictures`，以及 `pictures_gone`、`pictures_back`（圖庫實際變動的張數，只算沒有從圖庫移除的）。設定頁顯示「N 張內頁圖不見了（從圖庫隱藏）」「N 張內頁圖回來了」，held 的說明寫成「有 X 個音樂檔和 Y 張內頁圖一次不見太多…」。
+- #245 搬移的舊副本在搬移唯一的迴圈裡逐一進垃圾桶：原位置卡住（不回應的 bucket）時，每個檔案要等到逾時，其他搬移全部停在 0。修正：到期的舊副本改由搬移工作者另一個迴圈處理（`trashLoop`），搬移本身不再等它；一個檔案完成就叫醒它。逐一處理的規則抽成 `library.TrashPacer`：每個檔案最多給 2 分鐘；某個位置失敗後先擱著，1 分鐘起、每次加倍、最多 1 小時，期間它的檔案排著不試；上次檢查是離線或錯誤的位置（`storage.Set.Offline`）不去問，1 分鐘後再看。Drive 照舊各檔案自己退避。Drive 檢查的 `RetryTrash` 也用同一套。
+- #246 存放位置的內頁圖不見時圖庫照樣列出：存放位置的「檢查檔案」只把歌標成遺失，圖只算進「不見了」，結果破圖、張數不對、搬移搬不走、位置無法移除（#238 只修了來源）。修正：`StoreRefs` 把圖單獨列出（依 file_ref，狀態 verified／missing），檢查時不在的圖標成 missing（從圖庫隱藏、不算使用量、不搬），回來的取消標記；held 時圖跟著歌一起不標，位置完全沒列出檔案、不見的超過 20 個也 held。結果加上 `pictures_gone`、`pictures_back`、`held_pictures`，「不見了」改說「個封面或附屬檔」。讀圖、封面與附屬檔時找不到檔案回 404（`fileError`），其他錯誤 503。
+- #247 「連同歌曲永久刪除」專輯後內頁圖留在存放位置：只處理歌曲的檔案，圖看不到、刪不掉，位置也因此無法移除。修正：`library.LetAlbumFilesGo` 在刪除專輯時（含合併進來的專輯）隱藏圖、刪掉附屬檔、清掉 `cover_id` 並刪除沒有其他專輯用的封面，這些檔案沒有其他人用就欠垃圾桶（`trashUnusedTx`），和移除一張圖的規則相同。
+- #248 TIFF 與大型掃圖的縮圖慢：縮圖要先做 4096 像素的檢視用複本，下載整張原圖、一次只轉一張，雲端來源的一排縮圖要十幾秒，點開來看的那張排在後面。修正（`thumbs.Picture`）：需要檢視用複本的圖（`thumbs.NeedsView`：TIFF、BMP，或超過 4096 像素、16 MB 的）縮圖直接用 FFmpeg 從原圖縮成要的大小，不經檢視用複本；複本已經有了（或沒有 FFmpeg）才從複本縮。原圖下載與轉檔分開排隊：最多兩張原圖同時下載（一張在轉時下一張先下載），一次轉一張。排隊不是先來先做：正在看的檢視圖（`Looking`）最先，頁面上的縮圖其次，預先做的（`Ahead`）最後，同一級裡等最久的先；一張圖之後有更急的人要，就跟著升級。匯入時就把要檢視用複本的圖的 256 像素縮圖做好（`Importer.Pictured`，排在最後）：資料夾與資料夾來源讀原檔；雲端來源的 TIFF、BMP 或超過 16 MB 的圖（最多 128 MB），在匯入讀取時順便複製一份到 staging（向預算保留，空間不夠就不複製），做完刪掉；Drive 收件匣與上傳的圖也一樣。
+- #249 內頁圖預設順序只看檔名：`Back／Booklet／Cover／Obi` 這種命名，封面排在封底和內頁之後。修正：依光碟、排好的順序，再依種類（封面、封底、內頁、光碟、側標、其他；沒有種類的和內頁一起），最後依路徑自然排序。
+- 驗證：Go 測試 importer 的 `TestSourceHeldBySongs`（22 首歌、25 張圖：移走 `Scans/` 並刪一首歌，歌標成遺失、圖隱藏；放回；整張專輯移走時 held 21／15）、`TestGalleryOrderByKind`、`TestPicturesToldAsKept`（雲端來源的 TIFF 只讀一次、複製的內容與 SHA-256 相同、staging 清空；JPEG 不複製；資料夾匯入與上傳），api 的 `TestStoredPicturesChecked`、`TestDeleteAlbumLetsGoOfItsFiles`、`TestAlbumGallery`（上傳 TIFF 時做好縮圖），mover 的 `TestTrashBesideMoves`（離線的位置不去問；卡住的 bucket 不擋其他搬移；放開後舊副本進垃圾桶），thumbs 的 `TestPictureSizes`（直接縮、不做檢視用複本；排隊順序與升級；從已有的複本縮；沒有 FFmpeg）、`TestPictureReadWhileMade`；能在舊程式上編譯的都先確認會失敗。完整測試與 `-race` 通過，Chromium 回歸測試通過。
+- 限制：之前匯入的圖，縮圖仍在第一次顯示時才做（同樣受頻寬限制，但不再經過檢視用複本、也不擋正在看的圖）。雲端來源上不超過 16 MB、但超過 4096 像素的 JPEG／PNG 不在匯入時先做。移除的存放位置裡標成 missing 的圖留下看不到的資料列。Drive 的垃圾桶沒有依位置擱置（各檔案自己退避，和之前一樣）。沒有在真正的 R2 或 OneDrive 上測試。
+
 ## 使用方式（開發環境）
 
 ```bash

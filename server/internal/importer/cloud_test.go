@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image/color"
 	"net/http"
 	"net/url"
 	"os"
@@ -413,5 +414,82 @@ func TestOneDriveSourceImport(t *testing.T) {
 	im.db.QueryRow(`SELECT state FROM source_files WHERE key = ?`, twoID).Scan(&state)
 	if state != "imported" {
 		t.Fatalf("source file %q", state)
+	}
+}
+
+// A gallery's picture is told of as it is kept, its original a local file then (review #248): one
+// in a folder where it is, one uploaded; a cloud source's scan (a TIFF) copied aside as it is read,
+// once, and the copy gone after.
+func TestPicturesToldAsKept(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	type told struct {
+		path string
+		same bool
+	}
+	var got []told
+	tell := func(ctx context.Context, m library.AlbumImage, src string) {
+		b, err := os.ReadFile(src)
+		got = append(got, told{m.Path, err == nil && sha256Hex(b) == m.SHA256 && int64(len(b)) == m.Size})
+	}
+	im.Pictured = tell
+	tmp := t.TempDir()
+	mp3 := filepath.Join(tmp, "01.mp3")
+	taggedMP3(t, mp3, map[string]string{"TIT2": "One", "TPE1": "Band", "TALB": "Cloud", "TRCK": "1"})
+	song, _ := os.ReadFile(mp3)
+	tiff := pictureIn(t, "tiff", 40, 30, color.RGBA{1, 2, 3, 255})
+	fake := storagetest.NewS3(t)
+	fake.Put("music/Cloud/01.mp3", song)
+	fake.Put("music/Cloud/Scans/back.tif", tiff)
+	fake.Put("music/Cloud/Scans/front.jpg", pictureIn(t, "jpeg", 8, 8, color.RGBA{9, 9, 9, 255}))
+	cfg, _ := json.Marshal(storage.S3Config{Endpoint: fake.URL, Bucket: fake.Bucket, Prefix: "music"})
+	sec, _ := json.Marshal(storage.S3Secret{AccessKey: fake.AccessKey, SecretKey: fake.SecretKey})
+	st, err := set.Add(ctx, storage.NewStore{Kind: storage.KindS3, Name: "R2", Mode: storage.Source, Config: cfg, Secret: sec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reads atomic.Int32
+	fake.Fail = func(r *http.Request) int {
+		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "back.tif") {
+			reads.Add(1)
+		}
+		return 0
+	}
+	res, err := im.ScanSource(ctx, set, st.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runUntilDone(t, im, res.Batch)
+	if len(gallery(t, lib, albumNamed(t, lib, "Cloud"))) != 2 {
+		t.Fatal("the gallery")
+	}
+	// The TIFF told of, read once; the small JPEG is shown as it is, and not copied.
+	if len(got) != 1 || got[0] != (told{"Scans/back.tif", true}) || reads.Load() != 1 {
+		t.Fatalf("told %+v, the TIFF read %d times", got, reads.Load())
+	}
+	if left, _ := filepath.Glob(filepath.Join(im.staging, "picture-*")); len(left) != 0 {
+		t.Fatalf("copies left: %v", left)
+	}
+
+	// In a folder, where it is; uploaded.
+	im, lib, _ = setup(t)
+	im.Pictured = tell
+	got = nil
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "Local/01.mp3"), map[string]string{"TIT2": "Two", "TPE1": "Band", "TALB": "Local", "TRCK": "1"})
+	put(t, filepath.Join(src, "Local/Scans/obi.tif"), tiff)
+	batch, _, err := im.CreateBatch(ctx, "local", "", src, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runUntilDone(t, im, batch)
+	p := filepath.Join(t.TempDir(), "upload")
+	put(t, p, pictureIn(t, "bmp", 9, 9, color.RGBA{4, 4, 4, 255}))
+	if _, added, err := im.AddAlbumImage(ctx, albumNamed(t, lib, "Local"), "disc.bmp", p); err != nil || !added {
+		t.Fatalf("upload: %v %v", added, err)
+	}
+	if len(got) != 2 || got[0] != (told{"Scans/obi.tif", true}) || got[1] != (told{"disc.bmp", true}) {
+		t.Fatalf("told %+v", got)
 	}
 }

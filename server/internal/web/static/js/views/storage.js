@@ -34,15 +34,20 @@ function scanLine(st) {
   const s = st.scan ? (typeof st.scan === 'string' ? JSON.parse(st.scan) : st.scan) : null;
   if (st.running) return html`<span class="sub">${st.mode === 'source' ? '正在掃描…' : '正在檢查…'}</span>`;
   if (!s) return st.mode === 'source' ? html`<span class="sub">還沒掃描：按「掃描」把這裡的音樂匯入曲庫。</span>` : null;
+  // Pictures are told apart from songs (review #244).
+  const pictures = [s.pictures_gone && `${s.pictures_gone} 張內頁圖不見了（從圖庫隱藏）`, s.pictures_back && `${s.pictures_back} 張內頁圖回來了`];
+  const held = [s.held && `${s.held} ${st.mode === 'source' ? '個音樂檔' : '首歌'}`, s.held_pictures && `${s.held_pictures} 張內頁圖`].filter(Boolean).join('和');
   if (st.mode === 'source') {
     const parts = [s.new && `新加入 ${s.new} 個`, s.changed && `內容改變 ${s.changed} 個`, s.moved && `搬動 ${s.moved} 個`,
-      s.gone && `${s.gone} 首不見了（標成遺失）`, s.back && `${s.back} 首回來了`, s.covers && `封面更新 ${s.covers} 張`].filter(Boolean);
+      s.gone && `${s.gone} 首不見了（標成遺失）`, s.back && `${s.back} 首回來了`, ...pictures, s.covers && `封面更新 ${s.covers} 張`].filter(Boolean);
     return html`<span class="sub">上次掃描：${when(s.at)}，共 ${s.files} 個檔案${parts.length ? '；' + parts.join('、') : '，沒有變動'}${s.bytes ? `（匯入要讀 ${fmtBytes(s.bytes)}）` : ''}</span>
-      ${s.held > 0 && html`<span class="sub state-failed">有 ${s.held} 首一次不見太多，看起來不是被刪除而是沒有完整掛載，所以沒有標成遺失。確認來源正常後再掃描一次。</span>`}
+      ${held && html`<span class="sub state-failed">有 ${held}一次不見太多，看起來不是被刪除而是沒有完整掛載，所以沒有標成遺失。確認來源正常後再掃描一次。</span>`}
       ${s.error && html`<span class="sub state-failed">${s.error}</span>`}`;
   }
-  return html`<span class="sub">上次檢查：${when(s.at)}，這裡有曲庫的 ${s.checked} 首歌${s.missing ? `，${s.missing} 首不見了（標成遺失）` : ''}${s.restored ? `，${s.restored} 首回來了` : ''}${s.lost ? `，${s.lost} 個封面、附屬檔或內頁圖不見了` : ''}</span>
-    ${s.held > 0 && html`<span class="sub state-failed">有 ${s.held} 首一次不見太多，沒有標成遺失；確認位置正常後再檢查一次。</span>`}
+  const parts = [s.missing && `${s.missing} 首不見了（標成遺失）`, s.restored && `${s.restored} 首回來了`, ...pictures,
+    s.lost && `${s.lost} 個封面或附屬檔不見了`].filter(Boolean);
+  return html`<span class="sub">上次檢查：${when(s.at)}，這裡有曲庫的 ${s.checked} 首歌${parts.length ? '，' + parts.join('，') : ''}</span>
+    ${held && html`<span class="sub state-failed">有 ${held}一次不見太多，沒有標成遺失；確認位置正常後再檢查一次。</span>`}
     ${s.error && html`<span class="sub state-failed">${s.error}</span>`}`;
 }
 

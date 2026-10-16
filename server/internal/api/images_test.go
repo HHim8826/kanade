@@ -23,6 +23,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/staging"
+	"github.com/HHim8826/kanade/server/internal/storage"
 	"github.com/HHim8826/kanade/server/internal/storage/storagetest"
 	"golang.org/x/image/tiff"
 )
@@ -89,6 +90,18 @@ func TestAlbumGallery(t *testing.T) {
 	tif := decode[added](t, upload(album, "back.tif", back).Body)
 	if !tif.Added || tif.Image.Kind != "back" || tif.Image.MIME != "image/tiff" || tif.Image.Height != 100 {
 		t.Fatalf("tiff %+v", tif)
+	}
+	// Its size for the gallery made as it is uploaded (review #248); here, without FFmpeg, by way of
+	// its viewing copy.
+	thumbs := s.cfg.Path(config.DirThumbs)
+	var tifSHA, frontSHA string
+	s.db.QueryRow(`SELECT sha256 FROM album_images WHERE id = ?`, tif.Image.ID).Scan(&tifSHA)
+	s.db.QueryRow(`SELECT sha256 FROM album_images WHERE id = ?`, front.Image.ID).Scan(&frontSHA)
+	if _, err := os.Stat(filepath.Join(thumbs, tifSHA+"-256.jpg")); tifSHA == "" || err != nil {
+		t.Fatal("not made as uploaded:", err)
+	}
+	if _, err := os.Stat(filepath.Join(thumbs, frontSHA+"-256.jpg")); frontSHA == "" || !os.IsNotExist(err) {
+		t.Fatal("a JPEG's made ahead:", err)
 	}
 	if rec := upload(album, "notes.jpg", []byte("not a picture")); rec.Code != http.StatusBadRequest {
 		t.Fatalf("no picture: %d %s", rec.Code, rec.Body)
@@ -362,5 +375,171 @@ func TestGalleryUploadHoldsStaging(t *testing.T) {
 	}
 	if peak < int64(len(pic)) || budget.Used(ctx) != 0 {
 		t.Fatalf("held %d while received (%d bytes), %d after", peak, len(pic), budget.Used(ctx))
+	}
+}
+
+// galleryAlbum is a server with a managed folder for new imports (store 1, at root) and an album,
+// and uploads pictures to an album's gallery.
+func galleryAlbum(t *testing.T, root string) (*Server, http.Handler, string, int64, func(album int64, name string, data []byte) library.AlbumImage) {
+	t.Helper()
+	s, h, token := storageServer(t)
+	cfg, _ := json.Marshal(map[string]string{"root": root})
+	if rec := do(t, h, "POST", "/api/v1/storage", token, map[string]any{"kind": "local", "name": "Library", "mode": "managed", "config": json.RawMessage(cfg)}); rec.Code != http.StatusCreated {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "PUT", "/api/v1/storage/default", token, map[string]any{"id": "1"}); rec.Code >= 300 {
+		t.Fatalf("default: %d %s", rec.Code, rec.Body)
+	}
+	upload := func(album int64, name string, data []byte) library.AlbumImage {
+		t.Helper()
+		req := httptest.NewRequest("POST", fmt.Sprintf("/api/v1/albums/%d/images?name=%s", album, name), bytes.NewReader(data))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("upload %s: %d %s", name, rec.Code, rec.Body)
+		}
+		return decode[struct{ Image library.AlbumImage }](t, rec.Body).Image
+	}
+	return s, h, token, newAlbum(t, s, "A"), upload
+}
+
+// newAlbum is an album with a song (its file in Drive).
+func newAlbum(t *testing.T, s *Server, title string) int64 {
+	t.Helper()
+	ctx := context.Background()
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "song-" + title, Size: 1, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "d-"+title)
+	pub, err := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: title, AlbumArtist: "y"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var album int64
+	s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub.EntryID).Scan(&album)
+	return album
+}
+
+// A managed location's check follows its gallery's pictures (review #246): one whose file is gone is
+// missing (not listed nor counted; its file, asked for before, not there: 404), and back when its
+// file is; a location with nothing there at all marks none.
+func TestStoredPicturesChecked(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, h, token, album, upload := galleryAlbum(t, root)
+	var pics []library.AlbumImage
+	for i := range 22 {
+		pics = append(pics, upload(album, fmt.Sprintf("b%02d.jpg", i), pictureData(t, "jpeg", 40+i, 40)))
+	}
+	listed := func() int {
+		rec := do(t, h, "GET", fmt.Sprintf("/api/v1/albums/%d/images", album), token, nil)
+		return len(decode[struct{ Images []library.AlbumImage }](t, rec.Body).Images)
+	}
+	others := func() int {
+		u, _ := s.lib.StoreUse(ctx, storage.KindLocal, 1)
+		return u.Others
+	}
+	var ref string
+	s.db.QueryRow(`SELECT file_ref FROM album_images WHERE id = ?`, pics[0].ID).Scan(&ref)
+	_, _, key, _ := storage.Parse(ref)
+	file := filepath.Join(root, key)
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(file)
+	if rec := do(t, h, "GET", fmt.Sprintf("/api/v1/images/%d?size=view", pics[0].ID), token, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("its file not there: %d %s", rec.Code, rec.Body)
+	}
+	res, err := s.storeSync.Reconcile(ctx, 1)
+	if err != nil || res.PicturesGone != 1 || res.Lost != 0 || res.Held != 0 || listed() != 21 || others() != 21 {
+		t.Fatalf("gone: %+v %v, %d listed, %d others", res, err, listed(), others())
+	}
+	if files, _ := s.lib.AlbumFiles(ctx, []int64{album}); len(files) != 22 { // its song, and the pictures there
+		t.Fatalf("%d files to move", len(files))
+	}
+	os.WriteFile(file, data, 0o644)
+	if res, err = s.storeSync.Reconcile(ctx, 1); err != nil || res.PicturesBack != 1 || listed() != 22 || others() != 22 {
+		t.Fatalf("back: %+v %v, %d listed", res, err, listed())
+	}
+	// Nothing there at all: not believed.
+	os.Rename(filepath.Join(root, "images"), filepath.Join(t.TempDir(), "images"))
+	if res, err = s.storeSync.Reconcile(ctx, 1); err != nil || res.HeldPictures != 22 || res.PicturesGone != 0 || listed() != 22 {
+		t.Fatalf("not there: %+v %v, %d listed", res, err, listed())
+	}
+}
+
+// An album deleted with its songs lets go of its gallery, its cover and its sidecars, those of the
+// albums merged into it too: their files go to the trash, and the location can be removed; a cover
+// another album has stays. One only removed keeps them, and comes back whole (review #247).
+func TestDeleteAlbumLetsGoOfItsFiles(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	s, h, token, album, upload := galleryAlbum(t, root)
+	merged := newAlbum(t, s, "A disc 2")
+	other := newAlbum(t, s, "B")
+	kept := newAlbum(t, s, "C")
+	front := upload(album, "front.jpg", pictureData(t, "jpeg", 30, 30))
+	upload(album, "back.png", pictureData(t, "png", 31, 30))
+	upload(merged, "obi.jpg", pictureData(t, "jpeg", 32, 30))
+	upload(kept, "c.jpg", pictureData(t, "jpeg", 33, 30))
+	if rec := do(t, h, "POST", fmt.Sprintf("/api/v1/images/%d/cover", front.ID), token, nil); rec.Code != 200 {
+		t.Fatalf("cover: %d %s", rec.Code, rec.Body)
+	}
+	os.MkdirAll(filepath.Join(root, "sidecars"), 0o755)
+	os.WriteFile(filepath.Join(root, "sidecars/A.cue"), []byte("FILE"), 0o644)
+	if _, err := s.lib.AddSidecar(ctx, album, "A.cue", "cue", "cue1", 4, "local:1:sidecars/A.cue"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.lib.MergeAlbum(ctx, merged, album); err != nil {
+		t.Fatal(err)
+	}
+	// Another album's cover, the same picture.
+	var cover int64
+	s.db.QueryRow(`SELECT cover_id FROM albums WHERE id = ?`, album).Scan(&cover)
+	s.db.Exec(`UPDATE albums SET cover_id = ? WHERE id = ?`, cover, other)
+
+	// Only removed, then back: whole.
+	if rec := do(t, h, "DELETE", fmt.Sprintf("/api/v1/albums/%d", kept), token, nil); rec.Code != 200 {
+		t.Fatalf("remove: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "POST", fmt.Sprintf("/api/v1/albums/%d/restore", kept), token, nil); rec.Code != 200 {
+		t.Fatalf("restore: %d %s", rec.Code, rec.Body)
+	}
+	if list, _ := s.lib.AlbumImages(ctx, kept); len(list) != 1 {
+		t.Fatalf("restored: %d pictures", len(list))
+	}
+
+	if rec := do(t, h, "DELETE", fmt.Sprintf("/api/v1/albums/%d?tracks=1", album), token, nil); rec.Code != 200 {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body)
+	}
+	var shown, sidecars, coverID int
+	s.db.QueryRow(`SELECT count(*) FROM album_images WHERE album_id IN (?, ?) AND hidden = 0`, album, merged).Scan(&shown)
+	s.db.QueryRow(`SELECT count(*) FROM sidecars WHERE album_id = ?`, album).Scan(&sidecars)
+	s.db.QueryRow(`SELECT count(*) FROM albums WHERE id = ? AND cover_id IS NOT NULL`, album).Scan(&coverID)
+	if shown != 0 || sidecars != 0 || coverID != 0 {
+		t.Fatalf("after: %d pictures shown, %d sidecars, cover %d", shown, sidecars, coverID)
+	}
+	owed := map[string]bool{}
+	rows, _ := s.db.Query(`SELECT file_id FROM file_trash WHERE done_at = 0`)
+	for rows.Next() {
+		var ref string
+		rows.Scan(&ref)
+		if strings.HasPrefix(ref, "local:") { // the songs' are in Drive
+			owed[ref] = true
+		}
+	}
+	rows.Close()
+	if !owed["local:1:sidecars/A.cue"] || len(owed) != 3 { // back.png, obi.jpg, the cue; front.jpg is B's cover
+		t.Fatalf("owed to the trash: %v", owed)
+	}
+	if u, _ := s.lib.StoreUse(ctx, storage.KindLocal, 1); u.Others != 2 { // B's cover and C's picture
+		t.Fatalf("others %+v", u)
+	}
+	if list, _ := s.lib.AlbumImages(ctx, kept); len(list) != 1 {
+		t.Fatalf("another album's gallery: %d", len(list))
+	}
+	if b, _ := s.lib.Album(ctx, other); b == nil || b.CoverID == 0 {
+		t.Fatalf("B's cover: %+v", b)
 	}
 }

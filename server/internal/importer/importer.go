@@ -107,6 +107,10 @@ type Importer struct {
 	// Measure, when set, measures a song's loudness from its local file as it is imported (review
 	// #136); it records a failure itself and never fails the import.
 	Measure func(ctx context.Context, assetID int64, path string)
+	// Pictured, when set, is told of a gallery picture just kept, its original a local file at src
+	// for the call's length: what the gallery shows of it is made while it is at hand (review #248).
+	// It never fails the import.
+	Pictured func(ctx context.Context, m library.AlbumImage, src string)
 	// Budget is the staging budget shared with downloads and uploads (plan §6); data about to be
 	// written to the work folder (unpacked archives, FFmpeg output, inbox fetches) is held on it
 	// first. nil means no limit.

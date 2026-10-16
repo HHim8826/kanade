@@ -37,25 +37,31 @@ type SourceStores interface {
 
 // ScanResult is what a scan of a source found and did.
 type ScanResult struct {
-	At      int64  `json:"at"`
-	Files   int    `json:"files"`            // music, CUE sheets, logs and archives there
-	New     int    `json:"new"`              // queued to be imported
-	Changed int    `json:"changed"`          // other content than before: queued again, the old song missing until it is
-	Moved   int    `json:"moved"`            // followed to where they are now
-	Gone    int    `json:"gone"`             // songs newly missing
-	Back    int    `json:"back"`             // missing songs whose files are back
-	Covers  int    `json:"covers,omitempty"` // pictures taken as covers that moved, have other bytes, or are gone: followed (review #221)
-	Bytes   int64  `json:"bytes"`            // the size of what is queued: what the import reads
-	Batch   int64  `json:"batch,omitempty"`
-	Held    int    `json:"held,omitempty"` // gone, but too many at once: not marked
-	Error   string `json:"error,omitempty"`
+	At      int64 `json:"at"`
+	Files   int   `json:"files"`            // music, CUE sheets, logs, archives and pictures there
+	New     int   `json:"new"`              // queued to be imported
+	Changed int   `json:"changed"`          // other content than before: queued again, the old song missing until it is
+	Moved   int   `json:"moved"`            // followed to where they are now
+	Gone    int   `json:"gone"`             // songs newly missing
+	Back    int   `json:"back"`             // missing songs whose files are back
+	Covers  int   `json:"covers,omitempty"` // pictures taken as covers that moved, have other bytes, or are gone: followed (review #221)
+	Bytes   int64 `json:"bytes"`            // the size of what is queued: what the import reads
+	Batch   int64 `json:"batch,omitempty"`
+	// Gallery pictures newly missing, and missing ones back (review #244).
+	PicturesGone int `json:"pictures_gone,omitempty"`
+	PicturesBack int `json:"pictures_back,omitempty"`
+	// Music files gone, and pictures, but too many at once: none marked.
+	Held         int    `json:"held,omitempty"`
+	HeldPictures int    `json:"held_pictures,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // ErrScanning is a scan asked for while one of the same source runs.
 var ErrScanning = errors.New("this source is being scanned already")
 
-// heldMin is how many gone files are always believed; more than half the source's songs gone at
-// once beyond that is not.
+// heldMin is how many gone music files are always believed; more than half the source's gone at
+// once beyond that is not. Pictures do not count: a booklet's scans may outnumber its songs, and are
+// moved out more readily (review #244).
 const heldMin = 20
 
 type sourceRow struct {
@@ -68,6 +74,12 @@ type sourceRow struct {
 func importable(p string) bool {
 	ext := strings.ToLower(path.Ext(p))
 	return audioExt[ext] || sidecarExt[ext] || bookletExt[ext] || ext == ".zip"
+}
+
+// music is a file a source's songs are imported from: audio, or an archive of it.
+func music(p string) bool {
+	ext := strings.ToLower(path.Ext(p))
+	return audioExt[ext] || ext == ".zip"
 }
 
 func roleFor(p string) string {
@@ -184,9 +196,9 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 	}
 	// What the walk did not see: gone, or moved (a file with its content is among the new ones).
 	unseen := map[int64][]*sourceRow{}
-	var imported int
+	var imported int // music files: what a source not all there is told by
 	for key, r := range rows {
-		if r.state == "imported" {
+		if r.state == "imported" && music(r.path) {
 			imported++
 		}
 		if _, ok := walked[key]; ok || (partial != nil && partial.Covers(r.path)) {
@@ -209,21 +221,31 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 	// Gone: the songs imported from there are missing. Files that never made a song are forgotten,
 	// but for those the library let go of: they stay let go of should they come back.
 	var gone, forget []string
+	goneMusic, gonePictures := 0, 0
 	for _, list := range unseen {
 		for _, r := range list {
 			switch {
 			case r.state == "imported" && r.goneAt == 0:
 				gone = append(gone, r.key)
+				if music(r.path) {
+					goneMusic++
+				} else if isImage(r.path) {
+					gonePictures++
+				}
 			case r.state != "imported" && r.state != "ignored":
 				forget = append(forget, r.key)
 			}
 		}
 	}
-	// So many gone at once is more likely a source not all there (a NAS partly mounted) than files
-	// deleted: none of what was not seen is taken for gone, forgotten files included (review #227).
-	if len(gone) > heldMin && len(gone)*2 > imported {
-		res.Held = len(gone)
-		im.log.Warn("source scan: too many files gone at once; none marked missing", "store", id, "gone", len(gone), "of", imported)
+	// So many music files gone at once is more likely a source not all there (a NAS partly mounted)
+	// than files deleted: none of what was not seen is taken for gone, pictures and forgotten files
+	// included (review #227); nothing there at all is not either. Pictures gone alone are believed
+	// (review #244).
+	held := goneMusic > heldMin && goneMusic*2 > imported || len(walked) == 0 && len(gone) > heldMin
+	if held {
+		res.Held, res.HeldPictures = goneMusic, gonePictures
+		im.log.Warn("source scan: too many files gone at once; none marked missing", "store", id, "gone", goneMusic, "of", imported,
+			"pictures", gonePictures)
 		forget = nil
 	} else if len(gone) > 0 {
 		refs := make([]string, len(gone))
@@ -233,7 +255,7 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		if res.Gone, err = im.lib.MarkRefsMissing(ctx, refs); err != nil {
 			return res, err
 		}
-		if err := im.lib.SetImagesMissing(ctx, refs, true); err != nil { // gallery pictures too (review #238)
+		if res.PicturesGone, err = im.lib.SetImagesMissing(ctx, refs, true); err != nil { // gallery pictures too (review #238)
 			return res, err
 		}
 		if err := im.setGone(ctx, id, gone, db.Now()); err != nil {
@@ -253,7 +275,7 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		if res.Back, err = im.lib.RestoreRefs(ctx, refs); err != nil {
 			return res, err
 		}
-		if err := im.lib.SetImagesMissing(ctx, refs, false); err != nil {
+		if res.PicturesBack, err = im.lib.SetImagesMissing(ctx, refs, false); err != nil {
 			return res, err
 		}
 		if err := im.setGone(ctx, id, back, 0); err != nil {
@@ -271,13 +293,13 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 		if _, err := im.lib.MarkRefsMissing(ctx, refs); err != nil {
 			return res, err
 		}
-		if err := im.lib.SetImagesMissing(ctx, refs, true); err != nil {
+		if _, err := im.lib.SetImagesMissing(ctx, refs, true); err != nil {
 			return res, err
 		}
 		res.Changed = len(changed)
 		queue = append(queue, changed...)
 	}
-	if res.Covers, err = im.followCovers(ctx, b, st, pictures, partial, res.Held > 0); err != nil {
+	if res.Covers, err = im.followCovers(ctx, b, st, pictures, partial, held); err != nil {
 		return res, err
 	}
 	if len(queue) == 0 {

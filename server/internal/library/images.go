@@ -136,20 +136,28 @@ func (s *Store) PlaceImage(ctx context.Context, m AlbumImage) (bool, error) {
 	return !old.hidden, tx.Commit()
 }
 
-// SetImagesMissing says the pictures at refs, files in a source, are gone (or have other bytes now,
-// to be read again), or back as they were (review #238).
-func (s *Store) SetImagesMissing(ctx context.Context, refs []string, missing bool) error {
+// SetImagesMissing says the pictures at refs are gone (or, in a source, have other bytes now, to be
+// read again), or back as they were (reviews #238, #246). It returns how many of those in a gallery
+// (not taken out) it changed.
+func (s *Store) SetImagesMissing(ctx context.Context, refs []string, missing bool) (int, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
+	n := 0
 	for _, ref := range refs {
-		if _, err := tx.ExecContext(ctx, `UPDATE album_images SET missing = ? WHERE file_ref = ?`, missing, ref); err != nil {
-			return err
+		var shown int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM album_images WHERE file_ref = ? AND missing != ? AND hidden = 0`,
+			ref, missing).Scan(&shown); err != nil {
+			return 0, err
 		}
+		if _, err := tx.ExecContext(ctx, `UPDATE album_images SET missing = ? WHERE file_ref = ?`, missing, ref); err != nil {
+			return 0, err
+		}
+		n += shown
 	}
-	return tx.Commit()
+	return n, tx.Commit()
 }
 
 func addImage(ctx context.Context, q querier, m AlbumImage) (int64, error) {
@@ -177,8 +185,8 @@ func (s *Store) Image(ctx context.Context, id int64) (*AlbumImage, bool, error) 
 }
 
 // AlbumImages is an album's gallery, with the albums merged into it (the same picture kept twice is
-// there once), in order: the album's own pictures, then each disc's; within them as arranged, the
-// rest by their paths in natural order.
+// there once), in order (sortImages): the album's own pictures, then each disc's; within them as
+// arranged, the rest by what they are, then by their paths in natural order.
 func (s *Store) AlbumImages(ctx context.Context, albumID int64) ([]AlbumImage, error) {
 	rows, err := s.db.QueryContext(ctx, mergedFrom+` SELECT `+imageCols+` FROM album_images
 		WHERE id IN (SELECT min(id) FROM album_images WHERE album_id IN (SELECT id FROM family) AND hidden = 0 AND missing = 0 GROUP BY sha256, size)`, albumID)
@@ -208,10 +216,20 @@ func boolInt(b bool) int {
 	return 0
 }
 
+// sortImages puts a gallery in order: by disc; within one, those arranged as they were, then the
+// rest by what they are (the front cover first, then the back, the booklet, the discs, the obi and
+// the others, ImageKinds' order; those not said, most often a booklet's pages, with the booklet),
+// then by path (review #249).
 func sortImages(list []AlbumImage) {
+	rank := func(m AlbumImage) int {
+		if m.Kind == "" {
+			return slices.Index(ImageKinds, "booklet")
+		}
+		return slices.Index(ImageKinds, m.Kind)
+	}
 	slices.SortStableFunc(list, func(a, b AlbumImage) int {
 		return cmp.Or(cmp.Compare(a.Disc, b.Disc), cmp.Compare(boolInt(a.position == 0), boolInt(b.position == 0)), cmp.Compare(a.position, b.position),
-			NaturalCompare(a.Path, b.Path), cmp.Compare(a.ID, b.ID))
+			cmp.Compare(rank(a), rank(b)), NaturalCompare(a.Path, b.Path), cmp.Compare(a.ID, b.ID))
 	})
 }
 
@@ -314,6 +332,59 @@ func (s *Store) HideImage(ctx context.Context, id int64) (int64, error) {
 		}
 	}
 	return album, tx.Commit()
+}
+
+// LetAlbumFilesGo lets go of what an album deleted with its songs kept besides them, with the albums
+// merged into it (review #247): its gallery's pictures are taken out, its sidecars dropped, and its
+// cover too where no other album has it. A managed store's file nothing else uses goes to its
+// trash; a source's stays where it is.
+func (s *Store) LetAlbumFilesGo(ctx context.Context, albumID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const fam = `(SELECT id FROM family)`
+	var refs []string
+	rows, err := tx.QueryContext(ctx, mergedFrom+` SELECT file_ref FROM album_images WHERE album_id IN `+fam+` AND hidden = 0
+		UNION SELECT file_ref FROM sidecars WHERE album_id IN `+fam+`
+		UNION SELECT c.file_ref FROM covers c JOIN albums a ON a.cover_id = c.id WHERE a.id IN `+fam+` AND coalesce(c.file_ref, '') != ''`, albumID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return err
+		}
+		refs = append(refs, ref)
+	}
+	rows.Close()
+	covers, err := idsTx(ctx, tx, mergedFrom+` SELECT DISTINCT cover_id FROM albums WHERE id IN `+fam+` AND cover_id IS NOT NULL`, albumID)
+	if err != nil {
+		return err
+	}
+	for _, q := range []string{
+		mergedFrom + ` UPDATE album_images SET hidden = 1 WHERE album_id IN ` + fam,
+		mergedFrom + ` DELETE FROM sidecars WHERE album_id IN ` + fam,
+		mergedFrom + ` UPDATE albums SET cover_id = NULL, updated_at = ?2 WHERE id IN ` + fam + ` AND cover_id IS NOT NULL`,
+	} {
+		if _, err := tx.ExecContext(ctx, q, albumID, db.Now()); err != nil {
+			return err
+		}
+	}
+	for _, id := range covers {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM covers WHERE id = ?1 AND NOT EXISTS (SELECT 1 FROM albums WHERE cover_id = ?1)`, id); err != nil {
+			return err
+		}
+	}
+	for _, ref := range refs {
+		if err := trashUnusedTx(ctx, tx, ref); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // trashUnusedTx owes a managed store's file to its trash, in tx, when nothing in the library uses

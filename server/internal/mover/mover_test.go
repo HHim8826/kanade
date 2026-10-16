@@ -14,8 +14,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -153,7 +155,8 @@ func (f *fixture) owed(ref string) (bool, int64) {
 	return err == nil, next
 }
 
-func (f *fixture) work() { f.m.work(context.Background()) }
+// work does what Run does at once: the moves that can go on, then the old copies due to the trash.
+func (f *fixture) work() { f.m.work(context.Background()); f.m.trashDue(context.Background()) }
 
 func (f *fixture) get(id int64) *Move {
 	f.t.Helper()
@@ -499,5 +502,78 @@ func TestMoveOntoTrashed(t *testing.T) {
 	}
 	if owed, _ := f.owed(song); owed {
 		t.Fatal("the library's copy is owed to the trash")
+	}
+}
+
+// The old copies go to their trash beside the moves (review #245): a location that does not answer
+// holds up no other move, and its copies go once it answers; one known to be offline is not asked.
+func TestTrashBesideMoves(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t)
+	a, b := f.album("One"), f.album("Two")
+	cfg, _ := json.Marshal(storage.LocalConfig{Root: t.TempDir()})
+	other, err := f.set.Add(ctx, storage.NewStore{Kind: storage.KindLocal, Name: "Disk 2", Mode: storage.Managed, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// To the bucket and back: the bucket's copies are owed to its trash, due now.
+	v, _ := f.m.Start(ctx, Request{Dest: "2", Albums: []int64{a.id}})
+	f.work()
+	inBucket := f.refs(a)
+	v, _ = f.m.Start(ctx, Request{Dest: "1", Albums: []int64{a.id}})
+	f.m.work(ctx)
+	if v = f.get(v.ID); v.State != Done {
+		t.Fatalf("back %+v", v)
+	}
+	f.db.Exec(`UPDATE file_trash SET next_at = 0`)
+
+	// Known to be offline: not asked, and its copies wait.
+	var asked atomic.Int32
+	f.fake.Fail = func(r *http.Request) int { asked.Add(1); return 0 }
+	f.db.Exec(`UPDATE stores SET state = ? WHERE id = ?`, storage.StateOffline, f.bucket.ID)
+	f.m.trashDue(ctx)
+	if owed, _ := f.owed(inBucket["song"]); !owed || asked.Load() != 0 {
+		t.Fatalf("offline: owed %v, asked %d times", owed, asked.Load())
+	}
+	f.db.Exec(`UPDATE stores SET state = ? WHERE id = ?`, storage.StateOK, f.bucket.ID)
+	f.m.pacer = library.TrashPacer{} // not held back any more
+
+	// Not answering: another move goes on all the same.
+	hung, release := make(chan struct{}), make(chan struct{})
+	var once, freed sync.Once
+	free := func() { freed.Do(func() { close(release) }) }
+	t.Cleanup(free) // before the fake bucket closes, should this fail
+	f.fake.Fail = func(r *http.Request) int {
+		once.Do(func() { close(hung); <-release })
+		return 0
+	}
+	run, stop := context.WithCancel(ctx)
+	defer stop()
+	go f.m.Run(run)
+	<-hung
+	v, _ = f.m.Start(ctx, Request{Dest: strconv.FormatInt(other.ID, 10), Albums: []int64{b.id}})
+	deadline := time.Now().Add(5 * time.Second)
+	for f.get(v.ID).State != Done && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if v = f.get(v.ID); v.State != Done || v.Moved != 4 {
+		t.Fatalf("another move, while the bucket does not answer: %+v", v)
+	}
+	// It answers: its copies go, one after another.
+	free()
+	stillOwed := func() string {
+		for kind, ref := range inBucket {
+			if owed, _ := f.owed(ref); owed {
+				return kind
+			}
+		}
+		return ""
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for stillOwed() != "" && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if kind := stillOwed(); kind != "" {
+		t.Fatalf("the bucket's %s still owed", kind)
 	}
 }

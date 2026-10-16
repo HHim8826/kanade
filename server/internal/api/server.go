@@ -139,6 +139,9 @@ type Server struct {
 // ThumbsBudget is the most the covers made for the web client take on disk.
 const ThumbsBudget = 256 << 20
 
+// gallerySize is the size the web client shows a gallery's pictures at (gallery.js).
+const gallerySize = 256
+
 // LiteBudget is the most the songs re-encoded for lite mode take on disk: about 35 hours.
 const LiteBudget = 2 << 30
 
@@ -149,6 +152,18 @@ func New(d Deps) *Server {
 		d.Thumbs = thumbs.New(d.Config.Path(config.DirThumbs), ThumbsBudget, d.Log)
 		if d.Importer != nil && d.Importer.FFmpeg != nil {
 			d.Thumbs.SetPictures(d.Importer.FFmpeg.Picture)
+		}
+	}
+	if d.Importer != nil { // a scan's size for its gallery made as it is imported, after what people look at (review #248)
+		covers, log := d.Thumbs, d.Log
+		d.Importer.Pictured = func(ctx context.Context, m library.AlbumImage, src string) {
+			if !thumbs.NeedsView(m.MIME, m.Width, m.Height, m.Size) {
+				return
+			}
+			_, err := covers.Picture(thumbs.Ahead(ctx), m.SHA256, gallerySize, func(context.Context) (io.ReadCloser, error) { return os.Open(src) })
+			if err != nil && ctx.Err() == nil {
+				log.Warn("a gallery picture's size, as it is imported", "picture", m.Path, "err", err)
+			}
 		}
 	}
 	if d.Bangumi == nil {
@@ -466,6 +481,17 @@ func upstreamError(w http.ResponseWriter, err error, retry int) {
 		w.Header().Set("Retry-After", strconv.Itoa(retry))
 	}
 	writeError(w, http.StatusServiceUnavailable, err)
+}
+
+// fileError answers a library file (a cover, a gallery's picture) that could not be read: 404 when
+// its place says it is not there, which trying again does not change (review #246); else as
+// upstreamError.
+func fileError(w http.ResponseWriter, err error) {
+	if errors.Is(err, storage.ErrNotFound) || gdrive.IsNotFound(err) {
+		writeError(w, http.StatusNotFound, err)
+		return
+	}
+	upstreamError(w, err, 0)
 }
 
 func readJSON(r *http.Request, v any) error {

@@ -248,8 +248,9 @@ func (s *Server) removeEntries(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteAlbum removes the album (undoable; its songs stay as standalone songs). With ?tracks=1 the
-// songs that are on no other album are then deleted for good and their files go to the Drive trash;
-// files other albums share are never touched (plan §8).
+// songs that are on no other album are then deleted for good and their files go to the trash, with
+// the album's gallery, cover and sidecars (review #247); files other albums share are never touched
+// (plan §8).
 func (s *Server) deleteAlbum(w http.ResponseWriter, r *http.Request) {
 	id, err := pathID(r)
 	if err != nil {
@@ -296,6 +297,11 @@ func (s *Server) deleteAlbum(w http.ResponseWriter, r *http.Request) {
 			}
 			files = append(files, f...)
 			deleted++
+		}
+		// What the album kept besides its songs goes with them: its gallery, cover and sidecars (review #247).
+		if err := s.lib.LetAlbumFilesGo(ctx, id); err != nil {
+			s.internal(w, r, err)
+			return
 		}
 		trashed, failed := s.trashFiles(r, files)
 		out["deleted_tracks"], out["trashed"], out["trash_failed"] = int64(deleted), int64(trashed), int64(failed)

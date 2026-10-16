@@ -125,7 +125,8 @@ func TestImportKeepsAnAlbumsPictures(t *testing.T) {
 		}
 	}
 	album := albumNamed(t, lib, "Album")
-	want := "Scans/01.jpg|Scans/2.jpg|Scans/10.jpg|Scans/back.png back|Scans/obi.tif obi|Disc 2/Scans/label.bmp disc disc2"
+	// By what they are (those not said with the booklet), then by name (review #249).
+	want := "Scans/back.png back|Scans/01.jpg|Scans/2.jpg|Scans/10.jpg|Scans/obi.tif obi|Disc 2/Scans/label.bmp disc disc2"
 	if got := strings.Join(gallery(t, lib, album), "|"); got != want {
 		t.Fatalf("gallery\n%s\nwant\n%s", got, want)
 	}
@@ -281,7 +282,7 @@ func TestGalleryArrangedAndTakenOut(t *testing.T) {
 	if _, err := lib.MergeAlbum(ctx, two, one); err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Join(gallery(t, lib, one), "|"); got != "Back Cover.png back|c.jpg|folder.jpg front|a.jpg disc1" {
+	if got := strings.Join(gallery(t, lib, one), "|"); got != "folder.jpg front|Back Cover.png back|c.jpg|a.jpg disc1" {
 		t.Fatalf("merged %q", got)
 	}
 }
@@ -489,5 +490,53 @@ func TestSourcePicturesFollowScans(t *testing.T) {
 	im.db.QueryRow(`SELECT count(*), coalesce(sum(hidden), 0) FROM album_images WHERE file_ref = ?`, ref).Scan(&n, &hidden)
 	if n != 1 || hidden != 1 {
 		t.Fatalf("taken out, then changed: %d pictures at the file, %d out", n, hidden)
+	}
+}
+
+// A gallery not arranged is in order of what its pictures are, then of their names (review #249):
+// with names as scans are often given, the front cover comes first; one arranged stays as it is.
+func TestGalleryOrderByKind(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	src := t.TempDir()
+	one := []string{"Cover.jpg", "Back.jpg", "Booklet 01.jpg", "Booklet 02.jpg", "Obi.jpg", "Disc 2/CD.png"}
+	two := []string{"front.jpg", "back.png", "obi.tif"}
+	for i := 1; i <= 18; i++ {
+		two = append(two, fmt.Sprintf("booklet%02d.jpg", i))
+	}
+	for album, names := range map[string][]string{"One": one, "Two": two} {
+		taggedMP3(t, filepath.Join(src, album, "01.mp3"), map[string]string{"TIT2": album, "TPE1": "Band", "TALB": album, "TRCK": "1"})
+		taggedMP3(t, filepath.Join(src, album, "Disc 2/01.mp3"), map[string]string{"TIT2": album + " 2", "TPE1": "Band", "TALB": album, "TRCK": "1", "TPOS": "2"})
+		for i, name := range names {
+			format := map[string]string{".jpg": "jpeg", ".png": "png", ".tif": "tiff"}[filepath.Ext(name)]
+			put(t, filepath.Join(src, album, "Scans", name), pictureIn(t, format, 8, 8, color.RGBA{uint8(i * 10), uint8(len(album)), 0, 255}))
+		}
+	}
+	batch, _, err := im.CreateBatch(ctx, "local", "", src, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runUntilDone(t, im, batch)
+	got := strings.Join(gallery(t, lib, albumNamed(t, lib, "One")), "|")
+	if want := "Scans/Cover.jpg front|Scans/Back.jpg back|Scans/Booklet 01.jpg booklet|Scans/Booklet 02.jpg booklet|Scans/Obi.jpg obi|Scans/Disc 2/CD.png disc disc2"; got != want {
+		t.Fatalf("One:\n%s\nwant\n%s", got, want)
+	}
+	album := albumNamed(t, lib, "Two")
+	list := gallery(t, lib, album)
+	if len(list) != 21 || list[0] != "Scans/front.jpg front" || list[1] != "Scans/back.png back" || list[2] != "Scans/booklet01.jpg booklet" ||
+		list[19] != "Scans/booklet18.jpg booklet" || list[20] != "Scans/obi.tif obi" {
+		t.Fatalf("Two: %v", list)
+	}
+	// Arranged: as it was put.
+	images, _ := lib.AlbumImages(ctx, album)
+	var places []library.ImagePlace
+	for i := len(images) - 1; i >= 0; i-- {
+		places = append(places, library.ImagePlace{ID: images[i].ID, Kind: images[i].Kind})
+	}
+	if err := lib.ArrangeImages(ctx, album, places); err != nil {
+		t.Fatal(err)
+	}
+	if list = gallery(t, lib, album); list[0] != "Scans/obi.tif obi" || list[20] != "Scans/front.jpg front" {
+		t.Fatalf("arranged: %v", list)
 	}
 }

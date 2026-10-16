@@ -297,7 +297,8 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	guard := &diskguard.Guard{Dir: cfg.DataDir, Reserve: *reserveGiB << 30, Free: downloader.FreeSpace,
 		Cache: trimmed{cache, covers, lites}, DL: downloads, UL: ups, Log: log}
-	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget, Trash: files.Trash}
+	syncer := &drivesync.Syncer{DB: d, Drive: drive, Lib: lib, Log: log, Inbox: imp.ScanInbox, Forget: cache.Forget, Trash: files.Trash,
+		Offline: files.Offline}
 	files.Forget = imp.ForgetSource // a source's song deleted: its file is left out of scans
 	stores := &storesync.Syncer{Set: files, Lib: lib, Imp: imp, Log: log, Forget: cache.Forget}
 

@@ -409,7 +409,7 @@ func (s *Server) cover(w http.ResponseWriter, r *http.Request) {
 		return
 	case err != nil:
 		if r.Context().Err() == nil {
-			upstreamError(w, err, 0)
+			fileError(w, err)
 		}
 		return
 	}
@@ -592,7 +592,7 @@ func (s *Server) sidecar(w http.ResponseWriter, r *http.Request) {
 	}
 	body, err := s.files.Open(r.Context(), c.Ref, 0, -1)
 	if err != nil {
-		upstreamError(w, err, 0)
+		fileError(w, err)
 		return
 	}
 	defer body.Close()

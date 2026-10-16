@@ -72,6 +72,8 @@ type Mover struct {
 	RetryEvery time.Duration
 
 	wake     chan struct{}
+	trashing chan struct{} // the old copies' loop: a file was moved
+	pacer    library.TrashPacer
 	mu       sync.Mutex
 	cur      Current
 	curMove  int64
@@ -81,12 +83,14 @@ type Mover struct {
 
 func New(d *sql.DB, lib *library.Store, files *storage.Set, temp string, log *slog.Logger) *Mover {
 	return &Mover{DB: d, Lib: lib, Files: files, Temp: temp, Log: log, TrashAfter: 15 * time.Minute, RetryEvery: 5 * time.Minute,
-		wake: make(chan struct{}, 1), sessions: map[int64]string{}}
+		wake: make(chan struct{}, 1), trashing: make(chan struct{}, 1), sessions: map[int64]string{}}
 }
 
-func (m *Mover) kick() {
+func (m *Mover) kick() { poke(m.wake) }
+
+func poke(c chan struct{}) {
 	select {
-	case m.wake <- struct{}{}:
+	case c <- struct{}{}:
 	default:
 	}
 }
@@ -487,12 +491,14 @@ func (m *Mover) Clear(ctx context.Context, id int64) (int, error) {
 
 // ---- moving ----
 
-// Run moves the files of the moves asked for until ctx ends. Copies left in staging by a stop are
-// removed first: a file is copied again when its turn comes.
+// Run moves the files of the moves asked for until ctx ends, and beside them the old copies of the
+// files moved to their trash. Copies left in staging by a stop are removed first: a file is copied
+// again when its turn comes.
 func (m *Mover) Run(ctx context.Context) {
 	if err := os.RemoveAll(m.Temp); err != nil {
 		m.Log.Warn("removing what moving files left in staging", "err", err)
 	}
+	go m.trashLoop(ctx)
 	for {
 		wait := m.work(ctx)
 		t := time.NewTimer(wait)
@@ -527,25 +533,40 @@ func (m *Mover) work(ctx context.Context) time.Duration {
 			return m.RetryEvery
 		}
 	}
-	m.trashDue(ctx)
 	var next sql.NullInt64
-	m.DB.QueryRowContext(ctx, `SELECT min(at) FROM (SELECT min(next_at) AS at FROM moves WHERE state = ?
-		UNION ALL SELECT min(t.next_at) FROM file_trash t WHERE t.done_at = 0 AND t.file_id IN (SELECT ref FROM move_items WHERE state = 'done'))`,
-		Waiting).Scan(&next)
+	m.DB.QueryRowContext(ctx, `SELECT min(next_at) FROM moves WHERE state = ?`, Waiting).Scan(&next)
 	if !next.Valid {
 		return time.Hour
 	}
 	return max(time.Duration(next.Int64-db.Now())*time.Millisecond, time.Second)
 }
 
+// trashLoop moves the old copies of the files moved to their trash as their wait ends, beside the
+// moves: a location that does not answer, or is offline, holds up none of them (review #245).
+func (m *Mover) trashLoop(ctx context.Context) {
+	for {
+		t := time.NewTimer(m.trashDue(ctx))
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return
+		case <-m.trashing:
+			t.Stop()
+		case <-t.C:
+		}
+	}
+}
+
 // trashDue moves the old copies of the files moved to their trash once their wait is over: all of
 // them soon after a move, rather than a hundred at a time with the Drive check (which takes those
-// whose move was cleared). One that cannot go now is tried again later, a little longer each time.
-func (m *Mover) trashDue(ctx context.Context) {
+// whose move was cleared). One that cannot go now is tried again later, a little longer each time,
+// and its location's others with it (library.TrashPacer). It says how long until the next is due.
+func (m *Mover) trashDue(ctx context.Context) time.Duration {
+	const most = 1000
 	rows, err := m.DB.QueryContext(ctx, `SELECT t.file_id FROM file_trash t WHERE t.done_at = 0 AND t.next_at <= ?
-		AND t.file_id IN (SELECT ref FROM move_items WHERE state = 'done') ORDER BY t.next_at LIMIT 1000`, db.Now())
+		AND t.file_id IN (SELECT ref FROM move_items WHERE state = 'done') ORDER BY t.next_at LIMIT ?`, db.Now(), most)
 	if err != nil {
-		return
+		return m.RetryEvery
 	}
 	var refs []string
 	for rows.Next() {
@@ -555,18 +576,24 @@ func (m *Mover) trashDue(ctx context.Context) {
 		}
 	}
 	rows.Close()
-	done := 0
-	for _, ref := range refs {
-		if ctx.Err() != nil {
-			return
-		}
-		if n, _ := m.Lib.TrashFile(ctx, ref, m.Files.Trash); n == library.Trashed {
-			done++
-		}
-	}
+	done, held := m.pacer.Trash(ctx, m.Lib, refs, m.Files.Trash, m.Files.Offline)
 	if done > 0 {
 		m.Log.Info("moved files' old copies moved to the trash", "count", done)
 	}
+	if len(refs) == most && done > 0 {
+		return time.Second // more of them
+	}
+	var due sql.NullInt64
+	m.DB.QueryRowContext(ctx, `SELECT min(t.next_at) FROM file_trash t WHERE t.done_at = 0 AND t.next_at > ?
+		AND t.file_id IN (SELECT ref FROM move_items WHERE state = 'done')`, db.Now()).Scan(&due)
+	wait := time.Hour
+	if due.Valid {
+		wait = time.Duration(due.Int64-db.Now()) * time.Millisecond
+	}
+	if !held.IsZero() {
+		wait = min(wait, time.Until(held))
+	}
+	return max(wait, time.Second)
 }
 
 type item struct {
@@ -639,6 +666,9 @@ func (m *Mover) run(ctx context.Context, id int64) error {
 			if _, err := m.DB.ExecContext(context.WithoutCancel(ctx), `UPDATE move_items SET state = ?, new_ref = ?, reason = ?, error = ?, updated_at = ? WHERE id = ?`,
 				r.state, r.newRef, r.reason, r.err, db.Now(), it.id); err != nil {
 				return err
+			}
+			if r.state == "done" {
+				poke(m.trashing) // its old copy is owed now
 			}
 			if ctx.Err() != nil {
 				return nil

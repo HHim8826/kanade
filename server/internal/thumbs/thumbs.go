@@ -6,7 +6,7 @@
 // about 100 MB; review #176), and one nobody waits for any more stops; the folder is held to a
 // budget, the oldest files going first; and an image that cannot be decoded is not fetched again
 // for a while. A gallery's pictures (#134) are kept the same way, with a viewing copy of a scan a
-// browser cannot show or one too large to (ViewSize), made by FFmpeg one at a time.
+// browser cannot show or one too large to (ViewSize), made by FFmpeg (pictures.go).
 package thumbs
 
 import (
@@ -24,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "golang.org/x/image/bmp"
@@ -77,7 +78,8 @@ type Store struct {
 	jobs     chan struct{} // covers resized at once, from reading the original to the end
 	fetches  chan struct{} // originals read from Drive at once
 	decodes  chan struct{} // images decoded at once
-	views    chan struct{} // viewing copies made at once
+	reads    *gate         // pictures' originals copied aside at once, until made (pictures.go)
+	makes    *gate         // pictures made by FFmpeg at once
 	pictures PictureFunc   // nil: viewing copies are decoded here, of what is small enough
 
 	mu    sync.Mutex
@@ -92,13 +94,14 @@ type call struct {
 	err     error
 	waiting int                // askers waiting for it
 	stop    context.CancelFunc // once none is
+	level   atomic.Int32       // how soon it is asked for: the soonest of its askers' (pictures.go)
 }
 
 // New keeps covers in dir, at most budget bytes. What a stop left half written, or an earlier
 // version wrote empty, goes.
 func New(dir string, budget int64, log *slog.Logger) *Store {
 	s := &Store{dir: dir, budget: budget, log: log, jobs: make(chan struct{}, 3), fetches: make(chan struct{}, 6), decodes: make(chan struct{}, 2),
-		views: make(chan struct{}, 1), calls: map[string]*call{}, bad: map[string]time.Time{}, used: -1}
+		reads: newGate(2), makes: newGate(1), calls: map[string]*call{}, bad: map[string]time.Time{}, used: -1}
 	for _, e := range s.list() {
 		if e.size == 0 || strings.HasPrefix(filepath.Base(e.path), ".new-") {
 			os.Remove(e.path)
@@ -127,12 +130,19 @@ func (s *Store) Get(ctx context.Context, sha string, size int, open func(context
 	case ViewSize:
 		name = sha + "-view.jpg"
 	}
-	path := filepath.Join(s.dir, name)
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
+	return s.do(ctx, sha, size != 0, name, func(ctx context.Context, c *call) ([]byte, error) {
+		return s.make(ctx, c, sha, size, filepath.Join(s.dir, name), open)
+	})
+}
+
+// do is the file name of image sha, from the folder or made by build, once for those asking for it
+// at once; with bad, not for a while when it could not be decoded.
+func (s *Store) do(ctx context.Context, sha string, bad bool, name string, build func(ctx context.Context, c *call) ([]byte, error)) ([]byte, error) {
+	if data, err := os.ReadFile(filepath.Join(s.dir, name)); err == nil && len(data) > 0 {
 		return data, nil
 	}
 	s.mu.Lock()
-	if until, ok := s.bad[sha]; ok && size != 0 {
+	if until, ok := s.bad[sha]; ok && bad {
 		if time.Now().Before(until) {
 			s.mu.Unlock()
 			return nil, ErrUndecodable
@@ -147,7 +157,7 @@ func (s *Store) Get(ctx context.Context, sha string, size int, open func(context
 		s.calls[name] = c
 		go func() {
 			defer stop()
-			c.data, c.err = s.make(mctx, sha, size, path, open)
+			c.data, c.err = build(mctx, c)
 			s.mu.Lock()
 			if s.calls[name] == c {
 				delete(s.calls, name)
@@ -157,6 +167,11 @@ func (s *Store) Get(ctx context.Context, sha string, size int, open func(context
 		}()
 	}
 	c.waiting++
+	for l := level(ctx); ; { // as soon as its most pressed asker asks
+		if was := c.level.Load(); l <= was || c.level.CompareAndSwap(was, l) {
+			break
+		}
+	}
 	s.mu.Unlock()
 	select {
 	case <-c.done:
@@ -189,23 +204,11 @@ func take(ctx context.Context, sem chan struct{}) (func(), error) {
 	}
 }
 
-func (s *Store) make(ctx context.Context, sha string, size int, path string, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
+func (s *Store) make(ctx context.Context, c *call, sha string, size int, path string, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	if size == ViewSize {
-		data, err := s.view(ctx, open)
-		if errors.Is(err, ErrUndecodable) {
-			s.mu.Lock()
-			s.bad[sha] = time.Now().Add(badFor)
-			s.mu.Unlock()
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := s.keep(path, data); err != nil {
-			s.log.Warn("keep a viewing copy", "file", filepath.Base(path), "err", err) // served all the same
-		}
-		return data, nil
+		return s.made(sha, path, func() ([]byte, error) { return s.picture(ctx, c, open, ViewSize) })
 	}
 	if size != 0 {
 		// Its turn first: the original is read only when it can be resized soon after.
@@ -234,39 +237,6 @@ func (s *Store) make(ctx context.Context, sha string, size int, path string, ope
 		s.log.Warn("keep cover", "file", filepath.Base(path), "err", err) // served all the same
 	}
 	return data, nil
-}
-
-// view makes a picture's viewing copy: the original copied aside, made a JPEG of by FFmpeg, one at a
-// time (a large scan takes some hundred MB to decode); without FFmpeg, decoded and resized here.
-func (s *Store) view(ctx context.Context, open func(context.Context) (io.ReadCloser, error)) ([]byte, error) {
-	done, err := take(ctx, s.views)
-	if err != nil {
-		return nil, err
-	}
-	defer done()
-	if s.pictures == nil {
-		orig, err := s.original(ctx, open)
-		if err != nil {
-			return nil, err
-		}
-		return s.resize(ctx, orig, ViewSize)
-	}
-	dir, err := os.MkdirTemp(s.dir, ".view-")
-	if err != nil {
-		return nil, err
-	}
-	defer os.RemoveAll(dir)
-	src, dst := filepath.Join(dir, "original"), filepath.Join(dir, "view.jpg")
-	if err := s.copyOriginal(ctx, open, src); err != nil {
-		return nil, err
-	}
-	if err := s.pictures(ctx, src, dst, ViewSize); err != nil {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return nil, fmt.Errorf("%w: %v", ErrUndecodable, err)
-	}
-	return os.ReadFile(dst)
 }
 
 // copyOriginal copies what open reads to the file at dst, at most maxPicture bytes.

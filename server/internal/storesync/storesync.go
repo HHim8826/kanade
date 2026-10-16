@@ -44,14 +44,18 @@ func (s *Syncer) Running(id int64) bool {
 
 // Result is what checking that a managed location holds the library's files found.
 type Result struct {
-	At       int64  `json:"at"`
-	Files    int    `json:"files"`    // files there
-	Checked  int    `json:"checked"`  // the library's songs there
-	Missing  int    `json:"missing"`  // newly missing
-	Restored int    `json:"restored"` // missing ones that are back
-	Held     int    `json:"held,omitempty"`
-	Lost     int    `json:"lost,omitempty"` // covers and sidecars not there
-	Error    string `json:"error,omitempty"`
+	At       int64 `json:"at"`
+	Files    int   `json:"files"`    // files there
+	Checked  int   `json:"checked"`  // the library's songs there
+	Missing  int   `json:"missing"`  // newly missing
+	Restored int   `json:"restored"` // missing ones that are back
+	Held     int   `json:"held,omitempty"`
+	Lost     int   `json:"lost,omitempty"` // covers and sidecars not there
+	// Gallery pictures newly missing, missing ones back, and those gone but held (review #246).
+	PicturesGone int    `json:"pictures_gone,omitempty"`
+	PicturesBack int    `json:"pictures_back,omitempty"`
+	HeldPictures int    `json:"held_pictures,omitempty"`
+	Error        string `json:"error,omitempty"`
 }
 
 // ErrRunning is a check asked for while one of the same location runs.
@@ -173,12 +177,18 @@ func (s *Syncer) Reconcile(ctx context.Context, id int64) (res Result, err error
 		return res, err // a partial listing marks nothing
 	}
 	res.Files = len(there)
-	var gone, back []string
+	var gone, back, picsGone, picsBack []string
 	for _, u := range uses {
 		_, _, key, _ := storage.Parse(u.Ref)
 		size, ok := there[key]
 		present := ok && (u.Size <= 0 || size == u.Size)
 		switch {
+		case u.Picture: // missing from its gallery while it is not there (review #246)
+			if !present && u.State == library.AssetVerified {
+				picsGone = append(picsGone, u.Ref)
+			} else if present && u.State == library.AssetMissing {
+				picsBack = append(picsBack, u.Ref)
+			}
 		case u.State == "":
 			if !present {
 				res.Lost++
@@ -193,10 +203,26 @@ func (s *Syncer) Reconcile(ctx context.Context, id int64) (res Result, err error
 			res.Checked++
 		}
 	}
-	if len(gone) > heldMin && len(gone)*2 > res.Checked {
-		res.Held = len(gone)
-		s.Log.Warn("storage check: too many files gone at once; none marked missing", "store", st.Name, "gone", len(gone))
-	} else if len(gone) > 0 {
+	// Pictures follow the songs: held with them, and when there are none, when nothing at all is
+	// there (review #246).
+	if len(gone) > heldMin && len(gone)*2 > res.Checked || len(there) == 0 && len(gone)+len(picsGone) > heldMin {
+		res.Held, res.HeldPictures = len(gone), len(picsGone)
+		s.Log.Warn("storage check: too many files gone at once; none marked missing", "store", st.Name, "gone", len(gone),
+			"pictures", len(picsGone))
+		gone, picsGone = nil, nil
+	}
+	if len(picsGone) > 0 {
+		if res.PicturesGone, err = s.Lib.SetImagesMissing(ctx, picsGone, true); err != nil {
+			return res, err
+		}
+		s.Log.Warn("gallery pictures gone from the storage location", "store", st.Name, "count", len(picsGone), "first", picsGone[0])
+	}
+	if len(picsBack) > 0 {
+		if res.PicturesBack, err = s.Lib.SetImagesMissing(ctx, picsBack, false); err != nil {
+			return res, err
+		}
+	}
+	if len(gone) > 0 {
 		if res.Missing, err = s.Lib.MarkRefsMissing(ctx, gone); err != nil {
 			return res, err
 		}

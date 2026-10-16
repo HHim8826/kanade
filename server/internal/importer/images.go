@@ -97,11 +97,16 @@ func (im *Importer) processImage(ctx context.Context, it *item) (outcome, error)
 	}
 	var rc io.ReadCloser
 	var err error
+	src := it.path // the original as a local file, for Pictured
 	switch files, ok := im.files(); {
 	case it.path != "":
 		rc, err = os.Open(it.path)
 	case it.ref != "" && ok: // in a cloud source: read as it is streamed, never fetched to staging
-		rc, err = files.Open(ctx, it.ref, 0, -1)
+		if rc, err = files.Open(ctx, it.ref, 0, -1); err == nil {
+			var done func()
+			rc, src, done = im.keepAside(ctx, it, rc)
+			defer done()
+		}
 	case it.driveID != "": // in the Drive inbox: read here, then moved where it goes
 		if it.path, err = im.fetchDrive(ctx, it.batchID, it.id, it.driveID, it.rel, it.driveSize); err == nil {
 			it.temp = true
@@ -141,6 +146,8 @@ func (im *Importer) processImage(ctx context.Context, it *item) (outcome, error)
 		added, err := im.lib.PlaceImage(ctx, m)
 		if out.state = StatePublished; !added {
 			out.state = StateDuplicate // taken out of the gallery too: it stays out
+		} else if err == nil {
+			im.pictured(ctx, m, src)
 		}
 		return out, err
 	}
@@ -166,14 +173,52 @@ func (im *Importer) processImage(ctx context.Context, it *item) (outcome, error)
 		if _, err := im.keepImage(ctx, m, it.path); err != nil {
 			return out, err
 		}
+		im.pictured(ctx, m, it.path)
 		out.state = StatePublished
 		return out, nil
 	}
 	if _, err := im.lib.AddImage(ctx, m); err != nil {
 		return out, err
 	}
+	im.pictured(ctx, m, it.path)
 	out.state = StatePublished
 	return out, nil
+}
+
+// pictured tells Pictured of a picture just kept, its original at src ("": not at hand).
+func (im *Importer) pictured(ctx context.Context, m library.AlbumImage, src string) {
+	if im.Pictured != nil && src != "" {
+		im.Pictured(ctx, m, src)
+	}
+}
+
+// keepAside has a cloud source's picture that a gallery would show by its viewing copy (by its
+// name or size: a TIFF, a BMP, a large one) copied aside as it is read, for Pictured: its sizes are
+// made from it without reading it again (review #248). Without room in staging it is read as it is.
+// It returns what to read, the copy's path (once read; "" for none), and what removes the copy.
+func (im *Importer) keepAside(ctx context.Context, it *item, rc io.ReadCloser) (io.ReadCloser, string, func()) {
+	ext := strings.ToLower(path.Ext(it.rel))
+	if im.Pictured == nil || it.driveSize <= 0 || it.driveSize > maxImage ||
+		!(ext == ".tif" || ext == ".tiff" || ext == ".bmp" || it.driveSize > 16<<20) {
+		return rc, "", func() {}
+	}
+	release, err := im.hold(ctx, it.driveSize)
+	if err != nil {
+		return rc, "", func() {}
+	}
+	f, err := os.CreateTemp(im.staging, "picture-*")
+	if err != nil {
+		release()
+		return rc, "", func() {}
+	}
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.TeeReader(rc, f), rc}, f.Name(), func() {
+		f.Close()
+		os.Remove(f.Name())
+		release()
+	}
 }
 
 // ErrNotImage is a file that is no picture for a gallery: not one this can read, or too large.
@@ -401,6 +446,7 @@ func (im *Importer) AddAlbumImage(ctx context.Context, albumID int64, name, p st
 	if m, err = im.keepImage(ctx, m, p); err != nil {
 		return nil, false, err
 	}
+	im.pictured(ctx, m, p)
 	return &m, true, nil
 }
 

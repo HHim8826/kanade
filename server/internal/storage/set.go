@@ -157,6 +157,13 @@ func (s *Set) Get(ctx context.Context, id int64) (*Store, error) {
 	return st, err
 }
 
+// Offline says whether store id was found not reachable when it was last checked (offline, or
+// refusing): a request to it now would wait or fail as well. One removed is not offline.
+func (s *Set) Offline(ctx context.Context, id int64) bool {
+	st, err := s.Get(ctx, id)
+	return err == nil && st != nil && (st.State == StateOffline || st.State == StateError)
+}
+
 // Backend is a store's, made from its row (again when the row changed).
 func (s *Set) Backend(ctx context.Context, id int64) (Backend, *Store, error) {
 	st, err := s.Get(ctx, id)

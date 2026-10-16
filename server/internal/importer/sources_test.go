@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"sort"
@@ -482,5 +483,76 @@ func TestSourceCategory(t *testing.T) {
 	}
 	if st, _ := set.Get(ctx, st.ID); st.Category != 0 {
 		t.Fatalf("still %d", st.Category)
+	}
+}
+
+// A source's scans are held by its music only (review #244): its booklets' pictures, more than its
+// songs, moved out of it with a song deleted are marked missing, the song too; back, they are
+// listed again. A source not all there holds its pictures with its songs.
+func TestSourceHeldBySongs(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	src, away := t.TempDir(), t.TempDir()
+	for i := 1; i <= 22; i++ {
+		taggedMP3(t, filepath.Join(src, fmt.Sprintf("Band/One/%02d.mp3", i)), map[string]string{"TIT2": fmt.Sprint("Song ", i), "TPE1": "Band", "TALB": "One"})
+	}
+	taggedMP3(t, filepath.Join(src, "Band/Two/01.mp3"), map[string]string{"TIT2": "Other", "TPE1": "Band", "TALB": "Two"})
+	scans := map[string]int{"One": 15, "Two": 10} // 25 pictures, 23 songs
+	for album, n := range scans {
+		for i := range n {
+			put(t, filepath.Join(src, "Band", album, "Scans", fmt.Sprintf("p%02d.jpg", i)), pictureIn(t, "jpeg", 8, 8, color.RGBA{uint8(i * 9), uint8(len(album)), 0, 255}))
+		}
+	}
+	st := addFolder(t, set, src, storage.Source)
+	scan := func() ScanResult {
+		t.Helper()
+		res, err := im.ScanSource(ctx, set, st.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Batch != 0 {
+			runUntilDone(t, im, res.Batch)
+		}
+		return res
+	}
+	scan()
+	listed := func() (n int) {
+		for album := range scans {
+			n += len(gallery(t, lib, albumNamed(t, lib, album)))
+		}
+		return n
+	}
+	missing := func() (n int) {
+		im.db.QueryRow(`SELECT count(*) FROM assets WHERE state = 'missing'`).Scan(&n)
+		return n
+	}
+	if n := listed(); n != 25 {
+		t.Fatalf("imported: %d pictures", n)
+	}
+
+	// The scans moved out, a song deleted: both believed.
+	for album := range scans {
+		if err := os.Rename(filepath.Join(src, "Band", album, "Scans"), filepath.Join(away, album)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Remove(filepath.Join(src, "Band/One/22.mp3"))
+	res := scan()
+	if res.Held != 0 || res.HeldPictures != 0 || res.Gone != 1 || res.PicturesGone != 25 || missing() != 1 || listed() != 0 {
+		t.Fatalf("scans moved out, a song deleted: %+v, %d missing, %d listed", res, missing(), listed())
+	}
+	// Back: listed again.
+	for album := range scans {
+		os.Rename(filepath.Join(away, album), filepath.Join(src, "Band", album, "Scans"))
+	}
+	if res = scan(); res.PicturesBack != 25 || res.PicturesGone != 0 || listed() != 25 {
+		t.Fatalf("back: %+v, %d listed", res, listed())
+	}
+
+	// Not all there: most songs gone at once, with their album's pictures: held, all of them.
+	os.Rename(filepath.Join(src, "Band/One"), filepath.Join(away, "One"))
+	if res = scan(); res.Held != 21 || res.HeldPictures != 15 || res.Gone != 0 || res.PicturesGone != 0 || missing() != 1 || listed() != 25 {
+		t.Fatalf("not all there: %+v, %d missing, %d listed", res, missing(), listed())
 	}
 }
