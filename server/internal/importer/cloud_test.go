@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,7 +16,9 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -443,16 +446,23 @@ func TestPicturesToldAsKept(t *testing.T) {
 	fake.Put("music/Cloud/01.mp3", song)
 	fake.Put("music/Cloud/Scans/back.tif", tiff)
 	fake.Put("music/Cloud/Scans/front.jpg", pictureIn(t, "jpeg", 8, 8, color.RGBA{9, 9, 9, 255}))
+	// Wider than a browser is shown, in far less than 16 MB (review #248).
+	fake.Put("music/Cloud/Scans/booklet.jpg", pictureIn(t, "jpeg", 6000, 8, color.RGBA{5, 5, 5, 255}))
+	fake.Put("music/Cloud/Scans/obi.png", pictureIn(t, "png", 8, 5000, color.RGBA{6, 6, 6, 255}))
+	fake.Put("music/Cloud/Scans/disc.webp", webpOf(4200, 4200))
 	cfg, _ := json.Marshal(storage.S3Config{Endpoint: fake.URL, Bucket: fake.Bucket, Prefix: "music"})
 	sec, _ := json.Marshal(storage.S3Secret{AccessKey: fake.AccessKey, SecretKey: fake.SecretKey})
 	st, err := set.Add(ctx, storage.NewStore{Kind: storage.KindS3, Name: "R2", Mode: storage.Source, Config: cfg, Secret: sec})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var reads atomic.Int32
+	reads := map[string]int{}
+	var mu sync.Mutex
 	fake.Fail = func(r *http.Request) int {
-		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "back.tif") {
-			reads.Add(1)
+		if r.Method == "GET" && strings.Contains(r.URL.Path, "/Scans/") {
+			mu.Lock()
+			reads[path.Base(r.URL.Path)]++
+			mu.Unlock()
 		}
 		return 0
 	}
@@ -461,12 +471,19 @@ func TestPicturesToldAsKept(t *testing.T) {
 		t.Fatal(err)
 	}
 	runUntilDone(t, im, res.Batch)
-	if len(gallery(t, lib, albumNamed(t, lib, "Cloud"))) != 2 {
+	if len(gallery(t, lib, albumNamed(t, lib, "Cloud"))) != 5 {
 		t.Fatal("the gallery")
 	}
-	// The TIFF told of, read once; the small JPEG is shown as it is, and not copied.
-	if len(got) != 1 || got[0] != (told{"Scans/back.tif", true}) || reads.Load() != 1 {
-		t.Fatalf("told %+v, the TIFF read %d times", got, reads.Load())
+	// The TIFF and the large ones told of, each read once; the small JPEG is shown as it is, and
+	// not copied.
+	slices.SortFunc(got, func(a, b told) int { return strings.Compare(a.path, b.path) })
+	if want := []told{{"Scans/back.tif", true}, {"Scans/booklet.jpg", true}, {"Scans/disc.webp", true}, {"Scans/obi.png", true}}; !slices.Equal(got, want) {
+		t.Fatalf("told %+v", got)
+	}
+	for name, n := range reads {
+		if n != 1 {
+			t.Fatalf("%s read %d times", name, n)
+		}
 	}
 	if left, _ := filepath.Glob(filepath.Join(im.staging, "picture-*")); len(left) != 0 {
 		t.Fatalf("copies left: %v", left)
@@ -492,4 +509,16 @@ func TestPicturesToldAsKept(t *testing.T) {
 	if len(got) != 2 || got[0] != (told{"Scans/obi.tif", true}) || got[1] != (told{"disc.bmp", true}) {
 		t.Fatalf("told %+v", got)
 	}
+}
+
+// webpOf is the start of a lossless WebP w×h: what tells its size (as much as reading it for a
+// gallery looks at).
+func webpOf(w, h int) []byte {
+	bits := uint32(w-1) | uint32(h-1)<<14
+	chunk := []byte{0x2f, byte(bits), byte(bits >> 8), byte(bits >> 16), byte(bits >> 24), 0}
+	out := []byte("RIFF")
+	out = binary.LittleEndian.AppendUint32(out, uint32(4+8+len(chunk)))
+	out = append(out, "WEBPVP8L"...)
+	out = binary.LittleEndian.AppendUint32(out, 5)
+	return append(out, chunk...)
 }

@@ -66,6 +66,8 @@ const usage = `usage: kanade [-data DIR] <command>
   config set KEY VALUE                      change one: listen, public_url, aria2 or trusted_proxy
                                             ("" for the default)
   backup FILE                               copy the database to FILE while the service runs
+  schema [FILE]                             print the database schema FILE has (without changing
+                                            it), or the one this program makes
   google client FILE                        load the OAuth client JSON from Google Cloud
   google token FILE                         load an existing OAuth token
   version                                   print the version
@@ -112,6 +114,8 @@ func main() {
 		err = configCmd(cfg, args[1:])
 	case "backup":
 		err = backupCmd(ctx, cfg, args[1:])
+	case "schema":
+		err = schemaCmd(ctx, args[1:])
 	case "version":
 		fmt.Println("kanade", version)
 	default:
@@ -509,6 +513,25 @@ func backupCmd(ctx context.Context, cfg config.Config, args []string) error {
 	}
 	fmt.Println("database copied to", dst)
 	return nil
+}
+
+// schemaCmd prints a database's schema, its last migration's number, read without changing it, or
+// with no file the one this program makes: kanade-manager tells by them whether the program from
+// before an update that failed can still use the database (review #255).
+func schemaCmd(ctx context.Context, args []string) error {
+	switch len(args) {
+	case 0:
+		fmt.Println(db.Latest())
+		return nil
+	case 1:
+		v, err := db.SchemaOf(ctx, args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Println(v)
+		return nil
+	}
+	return errors.New("usage: schema [FILE]")
 }
 
 func googleCmd(ctx context.Context, cfg config.Config, args []string) error {

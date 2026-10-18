@@ -119,6 +119,11 @@ type Service struct {
 	handing  map[int64]bool
 	handWait map[int64]time.Time
 	policy   settings.Downloads // how many at a time, and seeding (review #75; under mu)
+
+	diskMu  sync.Mutex // the folder's size as last measured (onDisk), what the downloads said then, and when
+	disk    int64
+	diskKey string
+	diskAt  time.Time
 }
 
 // NewService makes the service with a budget of its own; ShareBudget puts it on the shared one.
@@ -866,9 +871,33 @@ func (s *Service) Committed(ctx context.Context) int64 {
 // Usage is Committed split into what is on disk and what is promised (review #4).
 func (s *Service) Usage(ctx context.Context) staging.Usage {
 	var pending int64
-	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(round_bytes - (done_bytes - done_before), 0) + round_work), 0) FROM downloads
-		WHERE state IN (?, ?, ?)`, StateQueued, StateDownloading, StatePaused).Scan(&pending)
-	return staging.Usage{Disk: dirSize(s.root), Pending: pending}
+	var key string
+	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(round_bytes - (done_bytes - done_before), 0) + round_work)
+		FILTER (WHERE state IN (?, ?, ?)), 0), count(*) || ':' || coalesce(sum(done_bytes), 0) || ':' || coalesce(sum(done_before), 0)
+		|| ':' || coalesce(sum(round), 0) || ':' || coalesce(sum(files_removed), 0) || ':' || coalesce(max(updated_at), 0) FROM downloads`,
+		StateQueued, StateDownloading, StatePaused).Scan(&pending, &key)
+	return staging.Usage{Disk: s.onDisk(key), Pending: pending}
+}
+
+// onDisk is what the downloads' folder takes, measured again only when what the downloads say they
+// have (key) changed since, files were removed, or a minute went by (review #258: walking it for
+// each reservation made an upload of N files cost N walks of it). What aria2 writes between two
+// polls is not seen then, but it is still promised: the downloads' records say it is not fetched
+// yet until the poll that says it is, which measures the folder again.
+func (s *Service) onDisk(key string) int64 {
+	s.diskMu.Lock()
+	defer s.diskMu.Unlock()
+	if key != s.diskKey || s.diskAt.IsZero() || time.Since(s.diskAt) >= time.Minute {
+		s.disk, s.diskKey, s.diskAt = dirSize(s.root), key, time.Now()
+	}
+	return s.disk
+}
+
+// removed says files were removed from the folder: it is measured again.
+func (s *Service) removed() {
+	s.diskMu.Lock()
+	s.diskAt = time.Time{}
+	s.diskMu.Unlock()
 }
 
 // stopOldestSeed frees staging space for a round: it stops the oldest seed whose files are all in
@@ -1201,7 +1230,9 @@ func (s *Service) cleanup(ctx context.Context, r *row) {
 			s.aria.RPC.Call(ctx, "removeDownloadResult", nil, g)
 		}
 	}
-	if err := os.RemoveAll(r.dir); err != nil {
+	err := os.RemoveAll(r.dir)
+	s.removed()
+	if err != nil {
 		s.log.Warn("remove download files", "download", r.ID, "err", err)
 		return
 	}

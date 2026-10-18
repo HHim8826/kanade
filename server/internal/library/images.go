@@ -4,9 +4,11 @@ import (
 	"cmp"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path"
 	"slices"
+	"strconv"
 
 	"github.com/HHim8826/kanade/server/internal/db"
 )
@@ -156,6 +158,98 @@ func (s *Store) SetImagesMissing(ctx context.Context, refs []string, missing boo
 			return 0, err
 		}
 		n += shown
+	}
+	return n, tx.Commit()
+}
+
+// ImagesElsewhere reads the pictures at refs, files of a source gone from it or changed there, from
+// another file of a source with their bytes when there is one (review #252): the same scan twice
+// (in a folder, in two albums merged since) is kept once, at the file read first. Files in away
+// (gone or changed at the same scan) are not taken; one in the same source first. What they are,
+// where in the gallery, taken out or not, stays. It returns how many files' pictures are read from
+// elsewhere now.
+func (s *Store) ImagesElsewhere(ctx context.Context, refs []string, away map[string]bool) (int, error) {
+	if len(refs) == 0 {
+		return 0, nil
+	}
+	list, _ := json.Marshal(refs)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	type picture struct {
+		ref, sha string
+		size     int64
+	}
+	var pictures []picture
+	var shas []string
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT file_ref, sha256, size FROM album_images
+		WHERE file_ref IN (SELECT value FROM json_each(?)) AND sha256 != ''`, string(list))
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var p picture
+		if err := rows.Scan(&p.ref, &p.sha, &p.size); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		pictures, shas = append(pictures, p), append(shas, p.sha)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil || len(pictures) == 0 {
+		return 0, err
+	}
+	// The files with those bytes, there at their source's last scan.
+	type file struct {
+		ref   string
+		store int64
+	}
+	files := map[[2]string][]file{} // by sha256 and size
+	sums, _ := json.Marshal(shas)
+	rows, err = tx.QueryContext(ctx, `SELECT f.sha256, f.size, st.kind, f.store_id, f.key FROM source_files f JOIN stores st ON st.id = f.store_id
+		WHERE f.state = 'imported' AND f.gone_at = 0 AND f.sha256 IN (SELECT value FROM json_each(?)) ORDER BY f.store_id, f.path`, string(sums))
+	if err != nil {
+		return 0, err
+	}
+	for rows.Next() {
+		var sha, kind, key string
+		var size, store int64
+		if err := rows.Scan(&sha, &size, &kind, &store, &key); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		k := [2]string{sha, strconv.FormatInt(size, 10)}
+		files[k] = append(files[k], file{kind + ":" + strconv.FormatInt(store, 10) + ":" + key, store})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, p := range pictures {
+		home, _ := refStore(p.ref)
+		var to string
+		for _, f := range files[[2]string{p.sha, strconv.FormatInt(p.size, 10)}] {
+			if f.ref == p.ref || away[f.ref] {
+				continue
+			}
+			if to == "" || f.store == home {
+				to = f.ref
+			}
+			if f.store == home {
+				break
+			}
+		}
+		if to == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE album_images SET file_ref = ?, missing = 0 WHERE file_ref = ? AND sha256 = ? AND size = ?`,
+			to, p.ref, p.sha, p.size); err != nil {
+			return 0, err
+		}
+		n++
 	}
 	return n, tx.Commit()
 }

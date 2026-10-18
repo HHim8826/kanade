@@ -47,7 +47,7 @@ curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade
 
 | 指令 | |
 |---|---|
-| `kanade-manager install` / `update` / `uninstall` | 更新時會以 `SHA256SUMS` 核對下載的檔案、先備份資料庫，新版啟動不了就退回舊版；即使 Kanade 已是最新，也會把 `kanade-manager` 本身換成該版的腳本（同樣核對）。解除安裝會保留資料，除非你輸入 `DELETE`。 |
+| `kanade-manager install` / `update` / `uninstall` | 更新時會以 `SHA256SUMS` 核對下載的檔案、停下服務後備份資料庫，新版啟動不了就退回舊版；新版若已升級資料庫，也一併換回更新前的備份（升級過的那份留在 `data/backups/`）；即使 Kanade 已是最新，也會把 `kanade-manager` 本身換成該版的腳本（同樣核對）。解除安裝會保留資料，除非你輸入 `DELETE`。 |
 | `kanade-manager status` / `start` / `stop` / `restart` / `log [-f]` | status 也會顯示是否開機啟動。 |
 | `kanade-manager autostart [on\|off]` | 是否開機啟動（依機器使用 systemd、OpenRC、SysV 或 cron）；不加參數時顯示目前設定並詢問。 |
 | `kanade-manager password` | 重設密碼（隨機或自訂），該帳號的所有登入都會結束。 |

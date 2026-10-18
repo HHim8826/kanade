@@ -94,9 +94,14 @@ func (s *Server) storageInfo(w http.ResponseWriter, r *http.Request) {
 			drive["connected"] = st.Connected
 		}
 	}
-	var driveSongs int
-	s.db.QueryRowContext(ctx, `SELECT count(*) FROM assets WHERE file_ref IS NOT NULL AND instr(file_ref, ':') = 0`).Scan(&driveSongs)
-	drive["songs"] = driveSongs
+	// What the library keeps there, its covers and pictures with its songs: they can be moved too
+	// (review #254).
+	use, err := s.lib.DriveUse(ctx)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	drive["songs"], drive["others"] = use.Songs, use.Others
 	writeJSON(w, http.StatusOK, map[string]any{"default": def, "drive": drive, "stores": list, "data_dir": s.cfg.DataDir,
 		"onedrive_redirect": s.oneDriveRedirect(), "onedrive_paste": s.oneDrivePaste()})
 }

@@ -242,6 +242,15 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 	// included (review #227); nothing there at all is not either. Pictures gone alone are believed
 	// (review #244).
 	held := goneMusic > heldMin && goneMusic*2 > imported || len(walked) == 0 && len(gone) > heldMin
+	// A picture is read from another file with its bytes rather than missing, but not from one gone
+	// or changed now (review #252).
+	away := map[string]bool{}
+	for _, k := range gone {
+		away[ref(k)] = true
+	}
+	for _, o := range changed {
+		away[ref(o.Key)] = true
+	}
 	if held {
 		res.Held, res.HeldPictures = goneMusic, gonePictures
 		im.log.Warn("source scan: too many files gone at once; none marked missing", "store", id, "gone", goneMusic, "of", imported,
@@ -253,6 +262,9 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 			refs[i] = ref(k)
 		}
 		if res.Gone, err = im.lib.MarkRefsMissing(ctx, refs); err != nil {
+			return res, err
+		}
+		if _, err := im.lib.ImagesElsewhere(ctx, refs, away); err != nil {
 			return res, err
 		}
 		if res.PicturesGone, err = im.lib.SetImagesMissing(ctx, refs, true); err != nil { // gallery pictures too (review #238)
@@ -291,6 +303,9 @@ func (im *Importer) ScanSource(ctx context.Context, stores SourceStores, id int6
 			refs[i] = ref(o.Key)
 		}
 		if _, err := im.lib.MarkRefsMissing(ctx, refs); err != nil {
+			return res, err
+		}
+		if _, err := im.lib.ImagesElsewhere(ctx, refs, away); err != nil {
 			return res, err
 		}
 		if _, err := im.lib.SetImagesMissing(ctx, refs, true); err != nil {

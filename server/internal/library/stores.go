@@ -159,16 +159,27 @@ func (s *Store) StoreUseTx(ctx context.Context, tx *sql.Tx, kind string, id int6
 }
 
 func storeUse(ctx context.Context, q querier, kind string, id int64) (StoreUse, error) {
-	var u StoreUse
 	from, to := refRange(kind, id)
-	err := q.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0), coalesce(sum(state = ?3), 0) FROM assets
-		WHERE `+likeRefs("file_ref"), from, to, AssetMissing).Scan(&u.Songs, &u.Bytes, &u.Missing)
+	return use(ctx, q, likeRefs, from, to)
+}
+
+// DriveUse is StoreUse for Google Drive (review #254): the covers, sidecars and pictures there can be
+// moved too, a library's songs there or not.
+func (s *Store) DriveUse(ctx context.Context) (StoreUse, error) {
+	return use(ctx, s.db, func(col string) string { return col + ` != '' AND instr(` + col + `, ':') = 0` })
+}
+
+// use is what the library keeps where cond says (on file_ref, with args).
+func use(ctx context.Context, q querier, cond func(col string) string, args ...any) (StoreUse, error) {
+	var u StoreUse
+	err := q.QueryRowContext(ctx, `SELECT count(*), coalesce(sum(size), 0), coalesce(sum(state = '`+AssetMissing+`'), 0) FROM assets
+		WHERE `+cond("file_ref"), args...).Scan(&u.Songs, &u.Bytes, &u.Missing)
 	if err != nil {
 		return u, err
 	}
-	err = q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM covers WHERE `+likeRefs("file_ref")+`)
-		+ (SELECT count(*) FROM sidecars WHERE `+likeRefs("file_ref")+`)
-		+ (SELECT count(*) FROM album_images WHERE hidden = 0 AND missing = 0 AND `+likeRefs("file_ref")+`)`, from, to).Scan(&u.Others)
+	err = q.QueryRowContext(ctx, `SELECT (SELECT count(*) FROM covers WHERE `+cond("file_ref")+`)
+		+ (SELECT count(*) FROM sidecars WHERE `+cond("file_ref")+`)
+		+ (SELECT count(*) FROM album_images WHERE hidden = 0 AND missing = 0 AND `+cond("file_ref")+`)`, args...).Scan(&u.Others)
 	return u, err
 }
 

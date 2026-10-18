@@ -3,6 +3,7 @@ package drivesync
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"path/filepath"
@@ -373,6 +374,34 @@ func TestSlowTrashHoldsUpOnlyItsFile(t *testing.T) {
 	}
 	if n := <-again; n != library.TrashSkipped {
 		t.Fatalf("the second move: %d", n)
+	}
+}
+
+// The files owed to the trash in a storage location that is offline are put off while it is, so
+// that those behind them have their turn however many it has; they are looked at again in a minute
+// (review #253).
+func TestOfflineTrashLetsOthersThrough(t *testing.T) {
+	ctx := context.Background()
+	s, _, _, _ := setup(t)
+	s.DB.Exec(`INSERT INTO stores (id, kind, name, mode, config, secret, created_at) VALUES (7, 's3', 'R2', 'managed', '{}', '{}', 0)`)
+	for i := range 100 {
+		s.DB.Exec(`INSERT INTO file_trash (file_id, created_at) VALUES (?, ?)`, fmt.Sprintf("s3:7:old/%03d.flac", i), i)
+	}
+	s.DB.Exec(`INSERT INTO file_trash (file_id, created_at) VALUES ('drive-late', 1000)`)
+	var asked []string
+	s.Trash = func(_ context.Context, ref string) error { asked = append(asked, ref); return nil }
+	s.Offline = func(context.Context, int64) bool { return true }
+	s.RetryTrash(ctx)
+	s.RetryTrash(ctx)
+	if len(asked) != 1 || asked[0] != "drive-late" {
+		t.Fatalf("asked %v", asked)
+	}
+	var soon, late int
+	now := db.Now()
+	s.DB.QueryRow(`SELECT count(*) FILTER (WHERE next_at BETWEEN ?1 + 50000 AND ?1 + 61000), count(*) FILTER (WHERE next_at > ?1 + 61000)
+		FROM file_trash WHERE file_id LIKE 's3:7:%' AND done_at = 0`, now).Scan(&soon, &late)
+	if soon != 100 || late != 0 {
+		t.Fatalf("put off: %d in a minute, %d later", soon, late)
 	}
 }
 

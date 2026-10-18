@@ -605,6 +605,7 @@ func (s *Service) clearImported(ctx context.Context, r *row) bool {
 			for _, p := range m {
 				os.Remove(p)
 			}
+			s.removed()
 		}
 	}
 	return true
@@ -615,6 +616,7 @@ func (s *Service) removeUnder(root, p string) {
 	if err := os.Remove(p); err != nil {
 		return
 	}
+	s.removed()
 	root = filepath.Clean(root)
 	for dir := filepath.Dir(p); strings.HasPrefix(dir, root+string(filepath.Separator)); dir = filepath.Dir(dir) {
 		if os.Remove(dir) != nil {

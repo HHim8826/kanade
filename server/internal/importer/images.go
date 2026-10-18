@@ -2,6 +2,7 @@ package importer
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -26,6 +27,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/storage"
+	"github.com/HHim8826/kanade/server/internal/thumbs"
 )
 
 // An album's gallery (#134): the pictures in its folder and in the folders below it (Scans/, BK/,
@@ -192,33 +194,60 @@ func (im *Importer) pictured(ctx context.Context, m library.AlbumImage, src stri
 	}
 }
 
-// keepAside has a cloud source's picture that a gallery would show by its viewing copy (by its
-// name or size: a TIFF, a BMP, a large one) copied aside as it is read, for Pictured: its sizes are
-// made from it without reading it again (review #248). Without room in staging it is read as it is.
-// It returns what to read, the copy's path (once read; "" for none), and what removes the copy.
+// keepAside has a cloud source's picture that a gallery would show by its viewing copy
+// (thumbs.NeedsView: a TIFF, a BMP, a large one, by its bytes or its size) copied aside as it is
+// read, for Pictured: its sizes are made from it without reading it again (review #248). Without
+// room in staging it is read as it is. It returns what to read, the copy's path (once read; "" for
+// none), and what removes the copy.
 func (im *Importer) keepAside(ctx context.Context, it *item, rc io.ReadCloser) (io.ReadCloser, string, func()) {
-	ext := strings.ToLower(path.Ext(it.rel))
-	if im.Pictured == nil || it.driveSize <= 0 || it.driveSize > maxImage ||
-		!(ext == ".tif" || ext == ".tiff" || ext == ".bmp" || it.driveSize > 16<<20) {
+	if im.Pictured == nil || it.driveSize <= 0 || it.driveSize > maxImage {
 		return rc, "", func() {}
+	}
+	br := bufio.NewReaderSize(rc, headSize)
+	read := struct {
+		io.Reader
+		io.Closer
+	}{br, rc}
+	if !byViewCopy(br, it.driveSize) {
+		return read, "", func() {}
 	}
 	release, err := im.hold(ctx, it.driveSize)
 	if err != nil {
-		return rc, "", func() {}
+		return read, "", func() {}
 	}
 	f, err := os.CreateTemp(im.staging, "picture-*")
 	if err != nil {
 		release()
-		return rc, "", func() {}
+		return read, "", func() {}
 	}
 	return struct {
 		io.Reader
 		io.Closer
-	}{io.TeeReader(rc, f), rc}, f.Name(), func() {
+	}{io.TeeReader(br, f), rc}, f.Name(), func() {
 		f.Close()
 		os.Remove(f.Name())
 		release()
 	}
+}
+
+// headSize is how much of a picture is looked at for what it is and how large: what comes before a
+// JPEG's frame (its EXIF, a colour profile) is seldom more.
+const headSize = 1 << 20
+
+// byViewCopy says whether a gallery shows a picture of size bytes, beginning with what br has, by
+// its viewing copy (thumbs.NeedsView): a JPEG 6000 pixels wide in 5 MB as well as a TIFF (review
+// #248). One whose size is not found there is by its size alone.
+func byViewCopy(br *bufio.Reader, size int64) bool {
+	head, _ := br.Peek(headSize) // all of it, when shorter
+	if len(head) >= 4 && (string(head[:4]) == "II*\x00" || string(head[:4]) == "MM\x00*" || string(head[:2]) == "BM") {
+		return true
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(head))
+	if err != nil {
+		return size > 16<<20
+	}
+	mime := imageMIME[format]
+	return bookletExt[mimeExt[mime]] && thumbs.NeedsView(mime, cfg.Width, cfg.Height, size)
 }
 
 // ErrNotImage is a file that is no picture for a gallery: not one this can read, or too large.

@@ -2,6 +2,7 @@ package library
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 )
@@ -9,8 +10,10 @@ import (
 // TrashPacer moves files owed to the trash a location at a time (review #245): a file is given at
 // most Wait, so that a location that does not answer holds up the others for that long; a storage
 // location whose try failed is not tried again before a while (a minute, doubling, at most an
-// hour), and one known not to be reachable now not before a minute: its files wait their turn.
-// Drive's files wait each their own (TrashFailed). The zero value is ready to use.
+// hour), and one known not to be reachable now not before a minute: its files wait their turn, put
+// off in the database (review #253: left due, they were the first of each batch again, and those
+// after them never had a turn). Drive's files wait each their own (TrashFailed). The zero value is
+// ready to use.
 type TrashPacer struct {
 	Wait time.Duration // the most a file is given; 0 is two minutes
 
@@ -39,22 +42,27 @@ func (p *TrashPacer) Trash(ctx context.Context, lib *Store, refs []string, trash
 	if give <= 0 {
 		give = trashGive
 	}
+	put := map[int64]bool{} // stores whose files were put off
+	held := func(ref string, store int64, until time.Time) {
+		if next.IsZero() || until.Before(next) {
+			next = until
+		}
+		if !put[store] {
+			put[store] = true
+			lib.putOffTrash(ctx, ref, until)
+		}
+	}
 	for _, ref := range refs {
 		if ctx.Err() != nil {
 			return done, next
 		}
 		store, _ := refStore(ref)
 		if until, ok := p.heldUntil(store); ok {
-			if next.IsZero() || until.Before(next) {
-				next = until
-			}
+			held(ref, store, until)
 			continue
 		}
 		if store != 0 && offline != nil && offline(ctx, store) { // looked at again in a minute
-			until := p.hold(store, false)
-			if next.IsZero() || until.Before(next) {
-				next = until
-			}
+			held(ref, store, p.hold(store, false))
 			continue
 		}
 		tctx, cancel := context.WithTimeout(ctx, give)
@@ -68,13 +76,23 @@ func (p *TrashPacer) Trash(ctx context.Context, lib *Store, refs []string, trash
 			if store == 0 { // Drive: each file waits its own turn, as it did
 				continue
 			}
-			until := p.hold(store, true)
-			if next.IsZero() || until.Before(next) {
-				next = until
-			}
+			held(ref, store, p.hold(store, true))
 		}
 	}
 	return done, next
+}
+
+// putOffTrash puts off until then the files owed to the trash in the storage location of ref, those
+// due before.
+func (s *Store) putOffTrash(ctx context.Context, ref string, until time.Time) {
+	kind, _, _ := strings.Cut(ref, ":")
+	store, ok := refStore(ref)
+	if !ok {
+		return
+	}
+	from, to := refRange(kind, store)
+	s.db.ExecContext(ctx, `UPDATE file_trash SET next_at = ?3 WHERE `+likeRefs("file_id")+` AND done_at = 0 AND next_at < ?3`,
+		from, to, until.UnixMilli())
 }
 
 func (p *TrashPacer) heldUntil(store int64) (time.Time, bool) {

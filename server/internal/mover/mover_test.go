@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -537,6 +538,7 @@ func TestTrashBesideMoves(t *testing.T) {
 	}
 	f.db.Exec(`UPDATE stores SET state = ? WHERE id = ?`, storage.StateOK, f.bucket.ID)
 	f.m.pacer = library.TrashPacer{} // not held back any more
+	f.db.Exec(`UPDATE file_trash SET next_at = 0`)
 
 	// Not answering: another move goes on all the same.
 	hung, release := make(chan struct{}), make(chan struct{})
@@ -575,5 +577,39 @@ func TestTrashBesideMoves(t *testing.T) {
 	}
 	if kind := stillOwed(); kind != "" {
 		t.Fatalf("the bucket's %s still owed", kind)
+	}
+}
+
+// The old copies of a move cleared once it is over go to the trash as soon as their wait is over,
+// all of them, a thousand at a time rather than a hundred every ten minutes (review #259).
+func TestClearedMoveTrashed(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t)
+	a := f.album("One")
+	v, _ := f.m.Start(ctx, Request{Dest: "2", Albums: []int64{a.id}})
+	f.m.work(ctx)
+	if v = f.get(v.ID); v.State != Done || v.Moved != 4 {
+		t.Fatalf("move %+v", v)
+	}
+	if n, err := f.m.Clear(ctx, v.ID); err != nil || n != 1 {
+		t.Fatalf("clear %d %v", n, err)
+	}
+	// Many more, as a large move leaves.
+	for i := range 1500 {
+		f.db.Exec(`INSERT INTO file_trash (file_id, created_at, next_at) VALUES (?, 0, 1)`,
+			storage.Ref(storage.KindLocal, f.local.ID, fmt.Sprintf("library/Band/Many/%04d.flac", i)))
+	}
+	f.db.Exec(`UPDATE file_trash SET next_at = 0`) // the wait is over
+	if wait := f.m.trashDue(ctx); wait != time.Second {
+		t.Fatalf("after a thousand, next in %v", wait)
+	}
+	f.m.trashDue(ctx)
+	if n, _, _ := f.lib.TrashPending(ctx); n != 0 {
+		t.Fatalf("%d still owed", n)
+	}
+	for kind, ref := range a.refs {
+		if _, err := os.Stat(filepath.Join(f.root, strings.TrimPrefix(ref, fmt.Sprintf("local:%d:", f.local.ID)))); !os.IsNotExist(err) {
+			t.Fatalf("the old %s is still there", kind)
+		}
 	}
 }

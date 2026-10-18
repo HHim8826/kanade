@@ -558,13 +558,15 @@ func (m *Mover) trashLoop(ctx context.Context) {
 }
 
 // trashDue moves the old copies of the files moved to their trash once their wait is over: all of
-// them soon after a move, rather than a hundred at a time with the Drive check (which takes those
-// whose move was cleared). One that cannot go now is tried again later, a little longer each time,
-// and its location's others with it (library.TrashPacer). It says how long until the next is due.
+// them soon after a move, rather than a hundred at a time with the Drive check. The other files
+// owed to the trash that are due go with them: those of a move cleared since (review #259: they
+// were left to the Drive check, ten minutes for each hundred), those whose earlier try failed. One
+// that cannot go now is tried again later, a little longer each time, and its location's others
+// with it (library.TrashPacer). It says how long until the next is due.
 func (m *Mover) trashDue(ctx context.Context) time.Duration {
 	const most = 1000
-	rows, err := m.DB.QueryContext(ctx, `SELECT t.file_id FROM file_trash t WHERE t.done_at = 0 AND t.next_at <= ?
-		AND t.file_id IN (SELECT ref FROM move_items WHERE state = 'done') ORDER BY t.next_at LIMIT ?`, db.Now(), most)
+	rows, err := m.DB.QueryContext(ctx, `SELECT file_id FROM file_trash WHERE done_at = 0 AND next_at <= ?
+		ORDER BY next_at LIMIT ?`, db.Now(), most)
 	if err != nil {
 		return m.RetryEvery
 	}
@@ -578,14 +580,14 @@ func (m *Mover) trashDue(ctx context.Context) time.Duration {
 	rows.Close()
 	done, held := m.pacer.Trash(ctx, m.Lib, refs, m.Files.Trash, m.Files.Offline)
 	if done > 0 {
-		m.Log.Info("moved files' old copies moved to the trash", "count", done)
+		m.Log.Info("files owed to the trash moved there", "count", done)
 	}
 	if len(refs) == most && done > 0 {
 		return time.Second // more of them
 	}
+	// Those due still were behind the ones put off (review #253): they go next.
 	var due sql.NullInt64
-	m.DB.QueryRowContext(ctx, `SELECT min(t.next_at) FROM file_trash t WHERE t.done_at = 0 AND t.next_at > ?
-		AND t.file_id IN (SELECT ref FROM move_items WHERE state = 'done')`, db.Now()).Scan(&due)
+	m.DB.QueryRowContext(ctx, `SELECT min(next_at) FROM file_trash WHERE done_at = 0`).Scan(&due)
 	wait := time.Hour
 	if due.Valid {
 		wait = time.Duration(due.Int64-db.Now()) * time.Millisecond

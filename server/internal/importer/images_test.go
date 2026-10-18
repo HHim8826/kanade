@@ -9,6 +9,7 @@ import (
 	"image"
 	"image/color"
 	stdjpeg "image/jpeg"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
-// pictureIn is a w×h image of one colour in a format: jpeg, png, tiff or bmp.
+// pictureIn is a w×h image of one colour in a format: jpeg, tiff, bmp or png.
 func pictureIn(t *testing.T, format string, w, h int, c color.Color) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
@@ -41,7 +42,7 @@ func pictureIn(t *testing.T, format string, w, h int, c color.Color) []byte {
 	case "bmp":
 		err = bmp.Encode(&buf, img)
 	default:
-		return pngOf(t, c)
+		err = png.Encode(&buf, img)
 	}
 	if err != nil {
 		t.Fatal(err)
@@ -539,4 +540,98 @@ func TestGalleryOrderByKind(t *testing.T) {
 	if list = gallery(t, lib, album); list[0] != "Scans/obi.tif obi" || list[20] != "Scans/front.jpg front" {
 		t.Fatalf("arranged: %v", list)
 	}
+}
+
+// Two of a source's files with the same bytes are one picture in its album's gallery, kept at the
+// file read first: that one gone, the picture is read from the other, as it was arranged; the other
+// gone instead, nothing changes; both gone, it is missing (review #252). A copy in the folder of an
+// album merged since serves too.
+func TestSourcePictureTwins(t *testing.T) {
+	ctx := context.Background()
+	im, lib, _ := setup(t)
+	set := withStores(t, im)
+	src := t.TempDir()
+	taggedMP3(t, filepath.Join(src, "Band/Album/01.mp3"), map[string]string{"TIT2": "One", "TPE1": "Band", "TALB": "Album", "TRCK": "1"})
+	taggedMP3(t, filepath.Join(src, "Band/Other/01.mp3"), map[string]string{"TIT2": "Two", "TPE1": "Band", "TALB": "Other", "TRCK": "1"})
+	pic := pictureIn(t, "jpeg", 64, 64, color.RGBA{200, 0, 0, 255})
+	put(t, filepath.Join(src, "Band/Album/Scans/01.jpg"), pic)
+	put(t, filepath.Join(src, "Band/Album/Scans/02.jpg"), pic)
+	st := addFolder(t, set, src, storage.Source)
+	scan := func() ScanResult {
+		t.Helper()
+		res, err := im.ScanSource(ctx, set, st.ID, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Batch != 0 {
+			runUntilDone(t, im, res.Batch)
+		}
+		return res
+	}
+	scan()
+	album := albumNamed(t, lib, "Album")
+	prefix := storage.Ref(storage.KindLocal, st.ID, "")
+	kept := func(what string, want int) string {
+		t.Helper()
+		list, err := lib.AlbumImages(ctx, album)
+		if err != nil || len(list) != want {
+			t.Fatalf("%s: %+v %v", what, list, err)
+		}
+		if want == 0 {
+			return ""
+		}
+		if list[0].Kind != "booklet" {
+			t.Fatalf("%s: arranged as %q", what, list[0].Kind)
+		}
+		var ref string
+		im.db.QueryRow(`SELECT file_ref FROM album_images WHERE id = ?`, list[0].ID).Scan(&ref)
+		return strings.TrimPrefix(ref, prefix)
+	}
+	list, _ := lib.AlbumImages(ctx, album)
+	if len(list) != 1 {
+		t.Fatalf("imported: %+v", list)
+	}
+	if err := lib.ArrangeImages(ctx, album, []library.ImagePlace{{ID: list[0].ID, Kind: "booklet"}}); err != nil {
+		t.Fatal(err)
+	}
+	first := kept("imported", 1)
+	second := map[string]string{"Band/Album/Scans/01.jpg": "Band/Album/Scans/02.jpg", "Band/Album/Scans/02.jpg": "Band/Album/Scans/01.jpg"}[first]
+	if second == "" {
+		t.Fatalf("kept at %q", first)
+	}
+
+	// The one kept gone: read from the other.
+	os.Remove(filepath.Join(src, first))
+	if res := scan(); res.PicturesGone != 0 {
+		t.Fatalf("taken for gone: %+v", res)
+	}
+	if at := kept("the first gone", 1); at != second {
+		t.Fatalf("read from %q", at)
+	}
+	// Back; the other gone: the first again.
+	put(t, filepath.Join(src, first), pic)
+	scan()
+	os.Remove(filepath.Join(src, second))
+	scan()
+	if at := kept("the second gone", 1); at != first {
+		t.Fatalf("read from %q", at)
+	}
+	// A copy in an album merged into this one since, then the first gone: read from the copy.
+	if _, err := lib.MergeAlbum(ctx, albumNamed(t, lib, "Other"), album); err != nil {
+		t.Fatal(err)
+	}
+	put(t, filepath.Join(src, "Band/Other/Scans/front.jpg"), pic)
+	scan()
+	kept("the copy imported", 1)
+	os.Remove(filepath.Join(src, first))
+	scan()
+	if at := kept("the first gone again", 1); at != "Band/Other/Scans/front.jpg" {
+		t.Fatalf("read from %q", at)
+	}
+	// None left: missing.
+	os.Remove(filepath.Join(src, "Band/Other/Scans/front.jpg"))
+	if res := scan(); res.PicturesGone != 1 {
+		t.Fatalf("none left: %+v", res)
+	}
+	kept("none left", 0)
 }

@@ -52,22 +52,86 @@ func OpenVersion(ctx context.Context, path string, version int) (*sql.DB, error)
 	return db, nil
 }
 
+// ErrNewerSchema is a database a newer Kanade upgraded (review #255): this one does not know what it
+// made of the tables, and would read them wrong.
+var ErrNewerSchema = errors.New("the database was upgraded by a newer Kanade")
+
+type migration struct {
+	version int
+	name    string // its file
+}
+
+// known are the migrations this program has, in order.
+func known() ([]migration, error) {
+	names, err := fs.Glob(migrations, "migrations/*.sql")
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(names)
+	var out []migration
+	for _, name := range names {
+		base := strings.TrimPrefix(name, "migrations/")
+		version, err := strconv.Atoi(strings.SplitN(base, "_", 2)[0])
+		if err != nil {
+			return nil, fmt.Errorf("migration %s: name must start with a number", base)
+		}
+		out = append(out, migration{version, name})
+	}
+	return out, nil
+}
+
+// Latest is the schema this program makes: its last migration's number.
+func Latest() int {
+	list, err := known()
+	if err != nil || len(list) == 0 {
+		return 0
+	}
+	return list[len(list)-1].version
+}
+
+// SchemaOf is the schema of the database at path, its last migration's number (0: none), read
+// without changing it: after an update that failed, whether the program before can still use it.
+func SchemaOf(ctx context.Context, path string) (int, error) {
+	if _, err := os.Stat(path); err != nil {
+		return 0, err
+	}
+	d, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(10000)")
+	if err != nil {
+		return 0, err
+	}
+	defer d.Close()
+	var tables int
+	if err := d.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'`).Scan(&tables); err != nil {
+		return 0, err
+	}
+	if tables == 0 {
+		return 0, nil
+	}
+	var v int
+	err = d.QueryRowContext(ctx, `SELECT coalesce(max(version), 0) FROM schema_migrations`).Scan(&v)
+	return v, err
+}
+
 func migrate(ctx context.Context, db *sql.DB, upTo int) error {
 	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL) STRICT`); err != nil {
 		return err
 	}
-	names, err := fs.Glob(migrations, "migrations/*.sql")
+	list, err := known()
 	if err != nil {
 		return err
 	}
-	sort.Strings(names)
-	for _, name := range names {
+	var newest int
+	if err := db.QueryRowContext(ctx, `SELECT coalesce(max(version), 0) FROM schema_migrations`).Scan(&newest); err != nil {
+		return err
+	}
+	if latest := list[len(list)-1].version; newest > latest {
+		return fmt.Errorf("%w (schema %d; this one knows up to %d): run that version, or put back the copy of the database made before the update (kanade-manager restore)",
+			ErrNewerSchema, newest, latest)
+	}
+	for _, m := range list {
+		version, name := m.version, m.name
 		base := strings.TrimPrefix(name, "migrations/")
-		version, err := strconv.Atoi(strings.SplitN(base, "_", 2)[0])
-		if err != nil {
-			return fmt.Errorf("migration %s: name must start with a number", base)
-		}
 		var applied int
 		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM schema_migrations WHERE version = ?`, version).Scan(&applied); err != nil {
 			return err

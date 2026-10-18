@@ -409,12 +409,26 @@ require_installed() {
   installed || die "還沒有安裝 Kanade（找不到 $BIN）。"
 }
 
+# sh_quote WORD: WORD as one word for any POSIX shell (dash, BusyBox), whatever it has in it.
+sh_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+
+# path_ok PATH: whether the services' files can name PATH (review #257): systemd's units and the
+# init scripts give a quote, a backslash, $, % and ` meanings of their own. Spaces, brackets and
+# letters of any language are fine.
+path_ok() {
+  case "$1" in
+  *[\'\"\\\$%\`]* | *[[:cntrl:]]*) return 1 ;;
+  esac
+}
+
 # as_service CMD...: runs a command as the service user.
 as_service() {
   if command -v runuser >/dev/null 2>&1; then
     runuser -u "$RUN_USER" -- "$@"
   else
-    su -s /bin/sh "$RUN_USER" -c "$(printf '%q ' "$@")"
+    local cmd="" a
+    for a in "$@"; do cmd+="$(sh_quote "$a") "; done
+    su -s /bin/sh "$RUN_USER" -c "$cmd"
   fi
 }
 
@@ -562,7 +576,7 @@ Type=simple
 User=$RUN_USER
 Group=$RUN_USER
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$BIN -data $DATA_DIR serve
+ExecStart="$BIN" -data "$DATA_DIR" serve
 Restart=on-failure
 RestartSec=5
 # Kanade stops its aria2 itself, after aria2 has saved what it was doing.
@@ -572,7 +586,7 @@ LimitNOFILE=65535
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
-ReadWritePaths=$DATA_DIR
+ReadWritePaths="$DATA_DIR"
 
 [Install]
 WantedBy=multi-user.target
@@ -583,21 +597,37 @@ EOF
   openrc)
     cat >"$INIT_D/$SERVICE" <<EOF
 #!/sbin/openrc-run
+# Written by kanade-manager (https://github.com/$REPO).
 name="kanade"
 description="Kanade music server"
-command="$BIN"
-command_args="-data $DATA_DIR serve"
-command_user="$RUN_USER:$RUN_USER"
-command_background=true
 pidfile="/run/$SERVICE.pid"
-directory="$INSTALL_DIR"
-output_log="$DATA_DIR/logs/stdout.log"
-error_log="$DATA_DIR/logs/stdout.log"
-retry="TERM/60/KILL/5"
+kanade_bin=$(sh_quote "$BIN")
+kanade_data=$(sh_quote "$DATA_DIR")
+kanade_dir=$(sh_quote "$INSTALL_DIR")
+kanade_user=$(sh_quote "$RUN_USER")
 
 depend() {
 	need net
 	use dns logger
+}
+
+# Started and stopped here rather than by command and command_args: OpenRC reads those with eval
+# to start and splits them to stop, so a folder with a space in its name could not be both (review
+# #257). The log's folder is made first: start-stop-daemon opens the log, it does not make its
+# folder (review #256).
+start() {
+	checkpath --directory --owner "\$kanade_user:\$kanade_user" "\$kanade_data/logs" || return 1
+	ebegin "Starting \$name"
+	start-stop-daemon --start --exec "\$kanade_bin" --user "\$kanade_user:\$kanade_user" --chdir "\$kanade_dir" \\
+		--stdout "\$kanade_data/logs/stdout.log" --stderr "\$kanade_data/logs/stdout.log" \\
+		--background --make-pidfile --pidfile "\$pidfile" -- -data "\$kanade_data" serve
+	eend \$?
+}
+
+stop() {
+	ebegin "Stopping \$name"
+	start-stop-daemon --stop --exec "\$kanade_bin" --pidfile "\$pidfile" --retry TERM/60/KILL/5
+	eend \$?
 }
 EOF
     chmod 755 "$INIT_D/$SERVICE"
@@ -620,11 +650,11 @@ EOF
 # zombie) counts as stopped.
 write_sysv_script() {
   local q_bin q_data q_dir q_user q_log
-  q_bin=$(printf '%q' "$BIN")
-  q_data=$(printf '%q' "$DATA_DIR")
-  q_dir=$(printf '%q' "$INSTALL_DIR")
-  q_user=$(printf '%q' "$RUN_USER")
-  q_log=$(printf '%q' "$DATA_DIR/logs/stdout.log")
+  q_bin=$(sh_quote "$BIN")
+  q_data=$(sh_quote "$DATA_DIR")
+  q_dir=$(sh_quote "$INSTALL_DIR")
+  q_user=$(sh_quote "$RUN_USER")
+  q_log=$(sh_quote "$DATA_DIR/logs/stdout.log")
   cat >"$INIT_D/$SERVICE" <<EOF
 #!/bin/sh
 ### BEGIN INIT INFO
@@ -651,9 +681,9 @@ alive() {
 	pid=\$(cat "\$PIDFILE" 2>/dev/null)
 	case "\$pid" in '' | *[!0-9]*) return 1 ;; esac
 	[ -r "/proc/\$pid/stat" ] || return 1
-	state=\$(sed 's/^.*) //' "/proc/\$pid/stat" | cut -d' ' -f1)
-	[ "\$state" != Z ] && [ "\$state" != X ] || return 1
-	[ "\$(tr '\\0' '\\n' <"/proc/\$pid/cmdline" 2>/dev/null)" = "\$(printf '%s\\n' "\$BIN" -data "\$DATA" serve)" ]
+	state=\$(sed 's/^.*) //' "/proc/\$pid/stat" 2>/dev/null | cut -d' ' -f1)
+	[ -n "\$state" ] && [ "\$state" != Z ] && [ "\$state" != X ] || return 1
+	[ "\$(tr '\\0' '\\n' 2>/dev/null <"/proc/\$pid/cmdline")" = "\$(printf '%s\\n' "\$BIN" -data "\$DATA" serve)" ]
 }
 
 start() {
@@ -669,7 +699,7 @@ start() {
 	elif command -v runuser >/dev/null 2>&1; then
 		runuser -u "\$RUN_USER" -- sh -c "\$cmd" "\$BIN" "\$DATA" "\$LOG" >"\$PIDFILE"
 	else
-		su -s /bin/sh "\$RUN_USER" -c "sh -c '\$cmd' \$BIN \$DATA \$LOG" >"\$PIDFILE"
+		su -s /bin/sh "\$RUN_USER" -c "sh -c '\$cmd' '\$BIN' '\$DATA' '\$LOG'" >"\$PIDFILE"
 	fi
 	sleep 1
 	alive
@@ -801,7 +831,10 @@ remove_service() {
   esac
 }
 
-pattern() { printf '^%s -data %s serve' "$BIN" "$DATA_DIR"; }
+# pattern: the service's command line, as a regular expression for pgrep (a folder may have brackets
+# in its name, review #257).
+pattern() { printf '^%s -data %s serve' "$(regex_quote "$BIN")" "$(regex_quote "$DATA_DIR")"; }
+regex_quote() { printf '%s' "$1" | sed 's/[][\.*^$+?(){}|]/\\&/g'; }
 
 # serving: the program answering is the file at $BIN now (review #91): every running Kanade process
 # runs that very file, not one replaced since, which the process still holds (its /proc exe).
@@ -825,21 +858,21 @@ running() {
 }
 
 service_start() {
+  # Where OpenRC, SysV and the start below send the program's output (review #256).
+  mkdir -p "$DATA_DIR/logs" && chown "$RUN_USER:$RUN_USER" "$DATA_DIR/logs"
   case "$INIT_TYPE" in
   systemd) systemctl start "$SERVICE" ;;
   openrc) rc-service "$SERVICE" start >/dev/null ;;
   sysv) "$INIT_D/$SERVICE" start >/dev/null ;;
   none)
     running && return 0
-    mkdir -p "$DATA_DIR/logs"
-    chown "$RUN_USER:$RUN_USER" "$DATA_DIR/logs"
     # Detached, holding none of this script's files open (a pipe it prints to, a terminal).
     (
       cd "$INSTALL_DIR" || exit 1
       if command -v runuser >/dev/null 2>&1; then
         exec nohup runuser -u "$RUN_USER" -- "$BIN" -data "$DATA_DIR" serve
       fi
-      exec nohup su -s /bin/sh "$RUN_USER" -c "exec $BIN -data $DATA_DIR serve"
+      exec nohup su -s /bin/sh "$RUN_USER" -c "exec $(sh_quote "$BIN") -data $(sh_quote "$DATA_DIR") serve"
     ) >>"$DATA_DIR/logs/stdout.log" 2>&1 </dev/null &
     ;;
   esac
@@ -908,6 +941,7 @@ do_install() {
   /*) ;;
   *) die "安裝位置要用絕對路徑。" ;;
   esac
+  path_ok "$INSTALL_DIR" || die "安裝位置不能有引號、反斜線、\$、%、\` 或控制字元（空白、括號和中文都可以）。"
   DATA_DIR="$INSTALL_DIR/data"
   BIN="$INSTALL_DIR/kanade"
 
@@ -1126,19 +1160,22 @@ do_update() {
     rm -f "$BIN.new"
     die "無法建立 $DATA_DIR/backups，沒有更新。"
   }
-  backup="$DATA_DIR/backups/before-$latest-$(date +%Y%m%d-%H%M%S).sqlite"
-  if ! kanade backup "$backup" >/dev/null; then
-    rm -f "$BIN.new"
-    die "更新前備份資料庫失敗，沒有更新。"
-  fi
-  info "已備份資料庫：$backup"
-  prune_update_backups
 
   if ! stop_service; then
     rm -f "$BIN.new"
     service_start
     die "無法停止服務，沒有更新。"
   fi
+  # The copy is made with the service stopped (review #255): should the new version fail after
+  # upgrading the database, it is put back as it was, nothing written since lost.
+  backup="$DATA_DIR/backups/before-$latest-$(date +%Y%m%d-%H%M%S).sqlite"
+  if ! kanade backup "$backup" >/dev/null; then
+    rm -f "$BIN.new"
+    service_start
+    die "更新前備份資料庫失敗，沒有更新；服務已用 $current 重新啟動。"
+  fi
+  info "已備份資料庫：$backup"
+  prune_update_backups
   # The old program stays as kanade.old (a hard link where the file system has them) until the new
   # one answers as the version asked for.
   rm -f "$BIN.old"
@@ -1162,12 +1199,33 @@ do_update() {
   # Rolling back is checked like updating (review #91): the new program must have stopped before
   # the old one goes back, and what answers afterwards must be the old one.
   if ! stop_service; then
-    error "無法停止服務，沒有退回：$BIN 仍是 $latest，舊的程式在 $BIN.old。請先執行 kanade-manager stop，再執行 mv -f $BIN.old $BIN 並啟動。資料庫更新前的備份在 $backup。"
+    error "無法停止服務，沒有退回：$BIN 仍是 $latest，舊的程式在 $BIN.old。請先執行 kanade-manager stop，再執行 mv -f $BIN.old $BIN；新版本若已升級資料庫，再執行 kanade-manager restore 選 $(basename "$backup")，最後啟動。"
     return 1
+  fi
+  # The new version may have upgraded the database before it failed (review #255): the old one
+  # cannot read it then. The database goes back to the copy made before the update, the one the
+  # new version left kept beside it. The new program, still at $BIN, reads which schema each has.
+  local now was aside="" restored=0
+  now=$(as_service "$BIN" schema "$DATA_DIR/db.sqlite" 2>/dev/null) || now=""
+  was=$(as_service "$BIN" schema "$backup" 2>/dev/null) || was=""
+  case "$now" in '' | *[!0-9]*) now="" ;; esac
+  case "$was" in '' | *[!0-9]*) was="" ;; esac
+  if [ -n "$now" ] && [ -n "$was" ] && [ "$now" -gt "$was" ]; then
+    aside="$DATA_DIR/backups/failed-$latest-$(date +%Y%m%d-%H%M%S).sqlite"
+    if ! put_back_db "$backup" "$aside"; then
+      error "新版本已把資料庫升級（schema $was → $now），$current 無法使用它，但換回更新前的備份失敗（磁碟空間不足？），所以沒有退回：$BIN 仍是 $latest，舊的程式在 $BIN.old。請在服務停止時執行 mv -f $BIN.old $BIN，再執行 kanade-manager restore 選 $(basename "$backup")。"
+      return 1
+    fi
+    restored=1
   fi
   if ! mv -f "$BIN.old" "$BIN"; then
     error "無法放回舊的程式（$BIN.old），請手動處理。資料庫更新前的備份在 $backup。"
     return 1
+  fi
+  if [ "$restored" = 1 ]; then
+    warn "新版本已把資料庫升級（schema $was → $now），$current 無法使用它：已換回更新前的備份。新版本留下的資料庫另存為 $aside。"
+  elif [ -z "$now" ] || [ -z "$was" ]; then
+    warn "無法確認新版本有沒有升級資料庫。若 $current 啟動後顯示資料庫的錯誤，請執行 kanade-manager restore 選 $(basename "$backup")。"
   fi
   if service_start && wait_up && serving && [ "$(installed_version)" = "$current" ]; then
     warn "已退回 $current 並重新啟動。資料庫更新前的備份在 $backup。"
@@ -1175,6 +1233,31 @@ do_update() {
     error "放回 $current 後，無法確認服務正以它運行，請用 kanade-manager log 查看記錄。資料庫更新前的備份在 $backup。"
   fi
   return 1
+}
+
+# put_back_db FILE ASIDE: with the service stopped, the database becomes FILE again; the files it
+# was (the database and its write-ahead log) are copied to ASIDE first. Nothing changes until
+# both copies are made (review #69).
+put_back_db() {
+  local file=$1 aside=$2 next="$DATA_DIR/db.sqlite.restore" f
+  rm -f "$next"
+  if ! install -m 600 -o "$RUN_USER" -g "$RUN_USER" "$file" "$next" || ! cmp -s "$file" "$next"; then
+    rm -f "$next"
+    return 1
+  fi
+  for f in "" -wal -shm; do
+    [ -e "$DATA_DIR/db.sqlite$f" ] || continue
+    if ! cp -p "$DATA_DIR/db.sqlite$f" "$aside$f"; then
+      rm -f "$next" "$aside" "$aside-wal" "$aside-shm"
+      return 1
+    fi
+  done
+  mv -f "$next" "$DATA_DIR/db.sqlite" || {
+    rm -f "$next"
+    return 1
+  }
+  # The write-ahead log belonged to the database just replaced.
+  rm -f "$DATA_DIR/db.sqlite-wal" "$DATA_DIR/db.sqlite-shm"
 }
 
 do_uninstall() {

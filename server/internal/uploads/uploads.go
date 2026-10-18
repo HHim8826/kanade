@@ -15,6 +15,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,10 @@ type Store struct {
 
 	mu    sync.Mutex
 	locks map[int64]*sync.Mutex
+
+	extraMu sync.Mutex // the folder's bytes no upload accounts for, as last measured (Usage)
+	extra   int64
+	extraAt time.Time
 }
 
 // New makes a store with a budget of its own; ShareBudget puts it on the shared one.
@@ -137,15 +142,50 @@ func (s *Store) Committed(ctx context.Context) int64 {
 	return u.Disk + u.Pending
 }
 
-// Usage is the staged upload data, and what receiving uploads still have to send.
+// Usage is the staged upload data, and what receiving uploads still have to send. It is counted
+// from the uploads' records, what a receiving one has and the whole of the others (review #258:
+// walking the folder for each new upload made a selection of N files cost N walks of it). The
+// folder is walked again at most once a minute, for what no record accounts for: a chunk cut off
+// by a stop, a group whose removal stopped halfway.
 func (s *Store) Usage(ctx context.Context) staging.Usage {
-	var pending int64
-	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(max(size - received, 0)), 0) FROM uploads WHERE state = ?`, StateReceiving).Scan(&pending)
-	return staging.Usage{Disk: dirSize(s.root), Pending: pending}
+	var have, pending int64
+	s.db.QueryRowContext(ctx, `SELECT coalesce(sum(CASE WHEN state = ?1 THEN min(received, size) ELSE size END), 0),
+		coalesce(sum(CASE WHEN state = ?1 THEN max(size - received, 0) ELSE 0 END), 0) FROM uploads`, StateReceiving).Scan(&have, &pending)
+	return staging.Usage{Disk: have + s.unrecorded(have), Pending: pending}
 }
 
+// extraEvery is how old the count of what no upload accounts for may get.
+const extraEvery = time.Minute
+
+var measure = dirSize // the folder's size; counted by tests
+
+// unrecorded is what the folder holds beyond have, the uploads' bytes, as last measured. Bytes
+// written while it is measured make it more for a while, never less; removed meanwhile, they could
+// make it less: the last count stands then.
+func (s *Store) unrecorded(have int64) int64 {
+	s.extraMu.Lock()
+	defer s.extraMu.Unlock()
+	if s.extraAt.IsZero() || time.Since(s.extraAt) >= extraEvery {
+		if n := measure(s.root) - have; n >= 0 || s.extraAt.IsZero() {
+			s.extra = max(n, 0)
+		}
+		s.extraAt = time.Now()
+	}
+	return s.extra
+}
+
+// partsDir holds the bytes of the uploads being received, each in a file named by its ID: apart
+// from the files' own paths, which a client chooses (review #251: "a.mp3.part" was where "a.mp3"
+// was received). It is no group's folder: a group's name has no dot.
+func (s *Store) partsDir() string { return filepath.Join(s.root, ".parts") }
+
 func (s *Store) partPath(u *Upload) string {
-	return filepath.Join(s.GroupDir(u.Group), filepath.FromSlash(u.Path)) + ".part"
+	return filepath.Join(s.partsDir(), strconv.FormatInt(u.ID, 10))
+}
+
+// finalPath is where a received upload is, in its group's folder by its path.
+func (s *Store) finalPath(u *Upload) string {
+	return filepath.Join(s.GroupDir(u.Group), filepath.FromSlash(u.Path))
 }
 
 // SetLowDisk is set by the disk guard: while it is on, no new upload starts.
@@ -200,7 +240,7 @@ func (s *Store) Create(ctx context.Context, group, p string, size int64, sha str
 		return nil, err
 	}
 	u := &Upload{ID: id, Group: group, Path: clean, Size: size, State: StateReceiving, sha256: strings.ToLower(sha)}
-	if err := os.MkdirAll(filepath.Dir(s.partPath(u)), 0o700); err != nil {
+	if err := os.MkdirAll(s.partsDir(), 0o700); err != nil {
 		return nil, err
 	}
 	f, err := os.OpenFile(s.partPath(u), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
@@ -228,7 +268,13 @@ func (s *Store) Append(ctx context.Context, id, offset int64, body io.Reader, n 
 	if n <= 0 || n > ChunkSize || offset+n > u.Size {
 		return u, fmt.Errorf("chunk must be 1 byte to %d MB and end within the file", ChunkSize>>20)
 	}
-	f, err := os.OpenFile(s.partPath(u), os.O_WRONLY, 0o600)
+	// What the server had is gone (left behind by a stop, review #251): the upload starts over,
+	// rather than the gap being filled with zeros.
+	if st, err := os.Stat(s.partPath(u)); offset > 0 && (err != nil || st.Size() < offset) {
+		s.reset(ctx, u, "")
+		return u, ErrOffset
+	}
+	f, err := os.OpenFile(s.partPath(u), os.O_WRONLY|os.O_CREATE, 0o600)
 	if err != nil {
 		return u, err
 	}
@@ -268,8 +314,7 @@ func (s *Store) Complete(ctx context.Context, id int64) (*Upload, error) {
 	if u.Received != u.Size {
 		return u, fmt.Errorf("received %d of %d bytes", u.Received, u.Size)
 	}
-	part := s.partPath(u)
-	final := strings.TrimSuffix(part, ".part")
+	part, final := s.partPath(u), s.finalPath(u)
 	src := part
 	if _, err := os.Stat(part); errors.Is(err, fs.ErrNotExist) {
 		if st, err := os.Stat(final); err == nil && st.Mode().IsRegular() && st.Size() == u.Size {
@@ -297,6 +342,9 @@ func (s *Store) Complete(ctx context.Context, id int64) (*Upload, error) {
 		}
 	}
 	if src == part {
+		if err := os.MkdirAll(filepath.Dir(final), 0o700); err != nil {
+			return u, err
+		}
 		if err := os.Rename(part, final); err != nil {
 			return u, err
 		}
@@ -310,9 +358,9 @@ func (s *Store) Complete(ctx context.Context, id int64) (*Upload, error) {
 
 // reset starts an upload over from the first byte.
 func (s *Store) reset(ctx context.Context, u *Upload, why string) error {
-	part := s.partPath(u)
-	os.Remove(strings.TrimSuffix(part, ".part"))
-	if f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
+	os.Remove(s.finalPath(u))
+	os.MkdirAll(s.partsDir(), 0o700)
+	if f, err := os.OpenFile(s.partPath(u), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); err == nil {
 		f.Close()
 	}
 	s.db.ExecContext(ctx, `UPDATE uploads SET received = 0, updated_at = ? WHERE id = ?`, db.Now(), u.ID)
@@ -321,36 +369,82 @@ func (s *Store) reset(ctx context.Context, u *Upload, why string) error {
 }
 
 // Recover finishes, at start-up, uploads whose file was moved into place just before the server
-// stopped, so their group can be imported without the client sending Complete again.
+// stopped, so their group can be imported without the client sending Complete again. Before, it
+// takes up what an older Kanade was receiving beside the files (review #251), and removes the
+// received bytes no upload has any more.
 func (s *Store) Recover(ctx context.Context) (int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM uploads WHERE state = ? AND received = size`, StateReceiving)
+	receiving, err := s.receiving(ctx)
 	if err != nil {
 		return 0, err
 	}
-	var ids []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+	mine := map[string]bool{}
+	for _, u := range receiving {
+		mine[strconv.FormatInt(u.ID, 10)] = true
+		if err := s.adoptPart(ctx, u); err != nil {
 			return 0, err
 		}
-		ids = append(ids, id)
 	}
-	rows.Close()
+	if list, err := os.ReadDir(s.partsDir()); err == nil {
+		for _, e := range list {
+			if !mine[e.Name()] {
+				os.Remove(filepath.Join(s.partsDir(), e.Name()))
+			}
+		}
+	}
 	n := 0
-	for _, id := range ids {
-		u, err := s.Get(ctx, id)
-		if err != nil {
-			return n, err
+	for _, u := range receiving {
+		if u.Received != u.Size {
+			continue
 		}
 		if _, err := os.Stat(s.partPath(u)); !errors.Is(err, fs.ErrNotExist) {
 			continue // still waiting for the client's Complete
 		}
+		id := u.ID
 		if u, err := s.Complete(ctx, id); err == nil && u.State == StateComplete {
 			n++
 		}
 	}
 	return n, nil
+}
+
+func (s *Store) receiving(ctx context.Context) ([]*Upload, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+cols+` FROM uploads WHERE state = ?`, StateReceiving)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Upload
+	for rows.Next() {
+		u, err := scan(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
+// adoptPart moves what an older Kanade received for u, at its path with ".part" added, to where u
+// is received now. Unless that is a file another upload of the group put there: then it is not u's
+// to take (it was overwritten), and u starts over.
+func (s *Store) adoptPart(ctx context.Context, u *Upload) error {
+	old := s.finalPath(u) + ".part"
+	st, err := os.Lstat(old)
+	if err != nil || !st.Mode().IsRegular() {
+		return nil
+	}
+	if _, err := os.Stat(s.partPath(u)); err == nil {
+		return nil
+	}
+	var theirs int
+	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM uploads WHERE grp = ? AND path = ? AND state != ?`,
+		u.Group, u.Path+".part", StateReceiving).Scan(&theirs); err != nil || theirs > 0 {
+		return err
+	}
+	if err := os.MkdirAll(s.partsDir(), 0o700); err != nil {
+		return err
+	}
+	return os.Rename(old, s.partPath(u))
 }
 
 // ReadyForImport reports whether every upload of a group is complete.
@@ -382,10 +476,21 @@ func (s *Store) RemoveGroup(ctx context.Context, group string) error {
 	if !groupRe.MatchString(group) {
 		return errors.New("bad group")
 	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM uploads WHERE grp = ?`, group)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			os.Remove(s.partPath(&Upload{ID: id}))
+		}
+	}
+	rows.Close()
 	if err := os.RemoveAll(s.GroupDir(group)); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM uploads WHERE grp = ?`, group)
+	_, err = s.db.ExecContext(ctx, `DELETE FROM uploads WHERE grp = ?`, group)
 	return err
 }
 

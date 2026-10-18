@@ -134,3 +134,33 @@ func TestMoveKeepsDestination(t *testing.T) {
 		t.Fatalf("remove once canceled: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// Google Drive with no song of the library left there but its covers and pictures: /storage says
+// so, as what can be moved from there (review #254).
+func TestDriveOthersToMove(t *testing.T) {
+	s, h, token := storageServer(t)
+	ctx := context.Background()
+	cfg, _ := json.Marshal(map[string]string{"root": t.TempDir()})
+	if rec := do(t, h, "POST", "/api/v1/storage", token, map[string]any{"kind": "local", "name": "Disk", "mode": "managed",
+		"config": json.RawMessage(cfg)}); rec.Code != http.StatusCreated {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	a, _ := s.lib.CreateAsset(ctx, library.Asset{SHA256: "s1", Size: 1, Format: "flac", Codec: "flac"})
+	s.lib.MarkVerified(ctx, a.ID, "local:1:library/x/01.flac") // the song is elsewhere
+	pub, _ := s.lib.Publish(ctx, a.ID, library.EntryInput{Title: "t", Artist: "x", Album: "A", AlbumArtist: "x"})
+	var album int64
+	s.db.QueryRow(`SELECT album_id FROM album_entries WHERE id = ?`, pub.EntryID).Scan(&album)
+	cover, _ := s.lib.AddCover(ctx, "c1", "image/jpeg", "drive-cover")
+	s.lib.SetAlbumCover(ctx, album, cover)
+	s.lib.AddImage(ctx, library.AlbumImage{AlbumID: album, Path: "Scans/back.jpg", SHA256: "i1", Size: 1, MIME: "image/jpeg", Ref: "drive-scan"})
+	info := decode[struct {
+		Drive struct{ Songs, Others int }
+	}](t, do(t, h, "GET", "/api/v1/storage", token, nil).Body)
+	if info.Drive.Songs != 0 || info.Drive.Others != 2 {
+		t.Fatalf("drive %+v", info.Drive)
+	}
+	rec := do(t, h, "POST", "/api/v1/moves/preview", token, map[string]any{"origin": "drive", "dest": "1"})
+	if p := decode[mover.Plan](t, rec.Body); rec.Code != 200 || p.Files != 2 || p.Songs != 0 {
+		t.Fatalf("preview: %d %+v", rec.Code, p)
+	}
+}

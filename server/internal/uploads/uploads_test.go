@@ -164,8 +164,8 @@ func TestCompleteRecoversAfterRename(t *testing.T) {
 		sum := sha256.Sum256([]byte("hello"))
 		u, _ := s.Create(ctx, "group-0009", "a.mp3", 5, hex.EncodeToString(sum[:]))
 		s.Append(ctx, u.ID, 0, bytes.NewReader([]byte("hello")), 5)
-		part := s.partPath(u)
-		if err := os.Rename(part, part[:len(part)-len(".part")]); err != nil { // the crash point
+		os.MkdirAll(filepath.Dir(s.finalPath(u)), 0o700)
+		if err := os.Rename(s.partPath(u), s.finalPath(u)); err != nil { // the crash point
 			t.Fatal(err)
 		}
 		again := New(s.db, s.root, 1<<30) // a restart
@@ -189,9 +189,8 @@ func TestCompleteRecoversAfterRename(t *testing.T) {
 	sum := sha256.Sum256([]byte("hello"))
 	u, _ := s.Create(ctx, "group-0010", "b.mp3", 5, hex.EncodeToString(sum[:]))
 	s.Append(ctx, u.ID, 0, bytes.NewReader([]byte("hello")), 5)
-	part := s.partPath(u)
-	os.Remove(part)
-	os.WriteFile(part[:len(part)-len(".part")], []byte("jello"), 0o600)
+	os.Remove(s.partPath(u))
+	os.WriteFile(s.finalPath(u), []byte("jello"), 0o600)
 	if _, err := s.Complete(ctx, u.ID); err == nil {
 		t.Fatal("wrong bytes accepted")
 	}
@@ -262,5 +261,150 @@ func TestUnfinishedGroups(t *testing.T) {
 	}
 	if gs, _ := s.Groups(ctx); len(gs) != 0 {
 		t.Fatalf("left %+v", gs)
+	}
+}
+
+// send makes an upload of data at p in group, all sent: Complete is left to the caller.
+func send(t *testing.T, s *Store, group, p string, data []byte) *Upload {
+	t.Helper()
+	ctx := context.Background()
+	u, err := s.Create(ctx, group, p, int64(len(data)), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Append(ctx, u.ID, 0, bytes.NewReader(data), int64(len(data))); err != nil {
+		t.Fatal(err)
+	}
+	return u
+}
+
+// Two uploads whose paths are a name and the name with ".part" each keep their bytes, whichever
+// completes first, a restart between them or not (review #251): what one was received in was the
+// other's place.
+func TestUploadsReceivedApart(t *testing.T) {
+	ctx := context.Background()
+	for _, partFirst := range []bool{true, false} {
+		for _, restart := range []bool{false, true} {
+			s := newStore(t, 1<<30)
+			song := send(t, s, "group-0030", "song.mp3", []byte("AAAA"))
+			part := send(t, s, "group-0030", "song.mp3.part", []byte("BBBB"))
+			first, second := song, part
+			if partFirst {
+				first, second = part, song
+			}
+			if _, err := s.Complete(ctx, first.ID); err != nil {
+				t.Fatal(err)
+			}
+			if restart {
+				s = New(s.db, s.root, 1<<30)
+				if _, err := s.Recover(ctx); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, err := s.Complete(ctx, second.ID); err != nil || got.State != StateComplete {
+				t.Fatalf("complete %+v %v", got, err)
+			}
+			for p, want := range map[string]string{"song.mp3": "AAAA", "song.mp3.part": "BBBB"} {
+				if got, _ := os.ReadFile(filepath.Join(s.GroupDir("group-0030"), p)); string(got) != want {
+					t.Fatalf("part first %v, restart %v: %s has %q", partFirst, restart, p, got)
+				}
+			}
+			if list, _ := os.ReadDir(s.partsDir()); len(list) != 0 {
+				t.Fatalf("received bytes left: %v", list)
+			}
+		}
+	}
+}
+
+// What an older Kanade was receiving beside a file is taken up after the update and the upload
+// goes on from where it was; one another upload's file overwrote starts over instead of taking
+// that file's bytes, and received bytes no upload has go (review #251).
+func TestOlderUploadsTakenUp(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t, 1<<30)
+	u, _ := s.Create(ctx, "group-0031", "Disc 1/01.flac", 8, "")
+	s.Append(ctx, u.ID, 0, bytes.NewReader([]byte("0123")), 4)
+	older := s.finalPath(u) + ".part" // where it was received
+	os.MkdirAll(filepath.Dir(older), 0o700)
+	if err := os.Rename(s.partPath(u), older); err != nil {
+		t.Fatal(err)
+	}
+	// Another upload's file is where the next one's bytes were.
+	v, _ := s.Create(ctx, "group-0031", "b.mp3", 4, "")
+	s.Append(ctx, v.ID, 0, bytes.NewReader([]byte("vvvv")), 4)
+	os.Remove(s.partPath(v))
+	w := send(t, s, "group-0031", "b.mp3.part", []byte("wwww"))
+	s.Complete(ctx, w.ID)
+	os.WriteFile(filepath.Join(s.partsDir(), "999"), []byte("left"), 0o600)
+
+	s = New(s.db, s.root, 1<<30) // the update
+	if _, err := s.Recover(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(older); !os.IsNotExist(err) {
+		t.Fatal("the older bytes are still beside the file")
+	}
+	if _, err := s.Append(ctx, u.ID, 4, bytes.NewReader([]byte("4567")), 4); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Complete(ctx, u.ID); err != nil || got.State != StateComplete {
+		t.Fatalf("complete %+v %v", got, err)
+	}
+	if got, _ := os.ReadFile(s.finalPath(u)); string(got) != "01234567" {
+		t.Fatalf("taken up: %q", got)
+	}
+	if cur, err := s.Complete(ctx, v.ID); err == nil || cur.Received != 0 {
+		t.Fatalf("v completed with another's bytes: %+v %v", cur, err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(s.GroupDir("group-0031"), "b.mp3.part")); string(got) != "wwww" {
+		t.Fatalf("w's file %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(s.partsDir(), "999")); !os.IsNotExist(err) {
+		t.Fatal("bytes of no upload kept")
+	}
+	// Bytes gone while being received: the client is sent back to the start, not given zeros.
+	x, _ := s.Create(ctx, "group-0031", "c.mp3", 3, "")
+	s.Append(ctx, x.ID, 0, bytes.NewReader([]byte("cc")), 2)
+	os.Remove(s.partPath(x))
+	if cur, err := s.Append(ctx, x.ID, 2, bytes.NewReader([]byte("c")), 1); !errors.Is(err, ErrOffset) || cur.Received != 0 {
+		t.Fatalf("lost bytes: %+v %v", cur, err)
+	}
+}
+
+// Making many uploads does not walk the staging folder for each (review #258): what the uploads
+// hold is counted from their records, the folder measured again at most once a while for what no
+// record accounts for.
+func TestUsageFromRecords(t *testing.T) {
+	ctx := context.Background()
+	walks := 0
+	measure = func(dir string) int64 { walks++; return dirSize(dir) }
+	t.Cleanup(func() { measure = dirSize })
+	s := newStore(t, 1<<30)
+	for i := range 300 {
+		u, err := s.Create(ctx, "group-0040", fmt.Sprintf("Scans/%03d.jpg", i), 10, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i%2 == 0 {
+			s.Append(ctx, u.ID, 0, bytes.NewReader(make([]byte, 4)), 4)
+		}
+	}
+	if walks > 1 {
+		t.Fatalf("%d walks for 300 uploads", walks)
+	}
+	if u := s.Usage(ctx); u.Disk != 600 || u.Pending != 2400 {
+		t.Fatalf("usage %+v", u)
+	}
+	// Bytes no upload has are counted once measured.
+	os.WriteFile(filepath.Join(s.root, "left.bin"), make([]byte, 50), 0o600)
+	s.extraAt = time.Now().Add(-extraEvery)
+	if u := s.Usage(ctx); u.Disk != 650 || walks != 2 {
+		t.Fatalf("with bytes of none: %+v, %d walks", u, walks)
+	}
+	if err := s.RemoveGroup(ctx, "group-0040"); err != nil {
+		t.Fatal(err)
+	}
+	if u := s.Usage(ctx); u.Disk != 50 || u.Pending != 0 {
+		t.Fatalf("after removal %+v", u)
 	}
 }

@@ -47,7 +47,7 @@ Afterwards `sudo kanade-manager` opens the same menu:
 
 | Command | |
 |---|---|
-| `kanade-manager install` / `update` / `uninstall` | Update checks the download against `SHA256SUMS`, backs up the database first, and goes back to the old version if the new one does not start. It also replaces `kanade-manager` itself with the release's script (checked the same way), even when Kanade is already up to date. Uninstall keeps the data unless you type `DELETE`. |
+| `kanade-manager install` / `update` / `uninstall` | Update checks the download against `SHA256SUMS`, stops the service and backs up the database, and goes back to the old version if the new one does not start; should the new one have upgraded the database already, that goes back to the backup too (the upgraded one stays in `data/backups/`). It also replaces `kanade-manager` itself with the release's script (checked the same way), even when Kanade is already up to date. Uninstall keeps the data unless you type `DELETE`. |
 | `kanade-manager status` / `start` / `stop` / `restart` / `log [-f]` | Status also says whether Kanade starts at boot. |
 | `kanade-manager autostart [on\|off]` | Start at boot or not (systemd, OpenRC, SysV or cron, whichever the machine uses); without an argument it shows the setting and asks. |
 | `kanade-manager password` | Reset a password (random or your own); every login of that account ends. |
