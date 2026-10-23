@@ -921,7 +921,7 @@ DIR/
 
 發佈與安裝：
 
-- #260 release 說明只有 Full Changelog：`gh release create --generate-notes` 只列合併的 PR，改動直接推到 main。修正：`scripts/release-notes.sh TAG` 列出上一個版本標籤以來每個 commit 的標題，附上它修正的 issue（commit 內文的 `Fixes #N`），最後是比較連結；release workflow 用它產生說明（checkout 改 `fetch-depth: 0` 拿得到舊標籤）。v0.2.21–v0.2.23 的說明也用它補上。
+- #260 release 說明只有 Full Changelog：`gh release create --generate-notes` 只列合併的 PR，改動直接推到 main。修正：`scripts/release-notes.sh TAG` 列出上一個版本標籤以來每個 commit 的標題，附上它修正的 issue（commit 內文的 `Fixes #N`），最後是比較連結；release workflow 用它產生說明（checkout 改 `fetch-depth: 0` 拿得到舊標籤）。之前只有 Full Changelog 連結的 50 個 release 也用它補上說明（v0.2.3 原本就有 PR 清單，沒有動）。
 - #261 README 的安裝指令下載 main 上的 `kanade.sh`，可能比最新 release 新。修正：改下載 `releases/latest/download/kanade.sh`，和要安裝的程式同一個 release；README 寫了怎麼用同一個 release 的 `SHA256SUMS` 核對，代理的例子跟著改。
 - #262 FFmpeg 靜態版下載 BtbN 的 `latest`，校驗值也來自同一處。修正：固定到 2026-09-30 的月底建置（`autobuild-2026-09-30-13-08`，n8.1.3-9-g29e619e767），amd64、arm64 的 SHA-256 寫在腳本裡，和 aria2 一樣；BtbN 的每日建置只留約兩週，月底的留約兩年。
 - #263 action 改為固定到 commit SHA（後面註解版本：checkout v7.0.1、setup-go v7.0.0、setup-node v7.1.0、upload-artifact v7.0.2），checkout 不留 token（`persist-credentials: false`）；release workflow 最上層只給 `contents: read`，`checked` job 給 `actions: read`、`release` job 給 `contents: write`；加上 `.github/dependabot.yml`（github-actions 與 `/server` 的 gomod，每週，各一個合併的 PR）。CI 的 shellcheck 也檢查 `release-notes.sh`。
