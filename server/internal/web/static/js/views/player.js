@@ -84,7 +84,7 @@ export function PlayerBar() {
   const item = s.queue[s.index];
   if (remote) return html`<${RemoteBar} />`;
   if (!item) return html`<${Elsewhere} />`;
-  return html`<div class="player-bar">
+  return html`<section class="player-bar" aria-label="播放器">
     ${s.blocked && html`<button class="blocked-note" onClick=${toggle}><${Icon} name="play" size=${18} />瀏覽器要你點一下才能開始播放：按這裡開始</button>`}
     <${Seek} s=${s} className="bar-seek" />
     <button class="now" onClick=${() => open(true)} aria-label="開啟正在播放">
@@ -106,7 +106,7 @@ export function PlayerBar() {
       <${DevicesButton} />
       <span class="wide-only"><${Volume} s=${s} /></span>
     </div>
-  </div>`;
+  </section>`;
 }
 
 function FavButton({ trackId }) {

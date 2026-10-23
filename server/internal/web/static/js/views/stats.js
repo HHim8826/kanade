@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from '../../ven
 import { api, get } from '../api.js';
 import { fromTrack, playQueue } from '../player.js';
 import { href, keepInAddress, parseHash } from '../router.js';
-import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
+import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, radioKeys, showDialog, toast, useLoad } from '../ui.js';
 import { useRunner } from './organize.js';
 
 // My listening (review #93): how long was listened each day of the year (a heat map), today, this
@@ -207,14 +207,14 @@ function Heatmap({ q, today, rev }) {
     ${data.error && html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     <div class="heat-area" ref=${area}>
     <div class=${'heat-wrap' + (data.loading ? ' refreshing' : '')} ref=${grid} onScroll=${follow}>
-      <div class="heat" role="grid" aria-label=${`${year} 年每天的聆聽時間`} onKeyDown=${move}
+      <div class="heat" role="group" aria-label=${`${year} 年每天的聆聽時間，用方向鍵換日子`} onKeyDown=${move}
         style=${`--cell: ${cell}px; grid-template-columns: auto repeat(${weeks.length}, var(--cell))`}>
-        <span></span>${months.map((m, i) => html`<span key=${'m' + i} class="heat-month">${m}</span>`)}
+        <span aria-hidden="true"></span>${months.map((m, i) => html`<span key=${'m' + i} class="heat-month" aria-hidden="true">${m}</span>`)}
         ${weekdays.map((w, row) => html`
-          <span key=${'w' + row} class="heat-day">${row % 2 === 0 ? w : ''}</span>
+          <span key=${'w' + row} class="heat-day" aria-hidden="true">${row % 2 === 0 ? w : ''}</span>
           ${weeks.map((wk) => {
             const d = addDays(wk, row);
-            if (d < first || d > last) return html`<span key=${d} class="heat-pad"></span>`;
+            if (d < first || d > last) return html`<span key=${d} class="heat-pad" aria-hidden="true"></span>`;
             const t = byDate[d];
             const ms = t ? t.ms : 0;
             return html`<button key=${d} data-date=${d} class=${`heat-cell l${level(ms)}${d === picked ? ' picked' : ''}${d > today ? ' future' : ''}`}
@@ -298,23 +298,34 @@ function niceMax(ms) {
 const axis = (ms) => (ms >= 3600000 ? `${+(ms / 3600000).toFixed(1)} 小時` : `${Math.round(ms / 60_000)} 分`);
 
 // Columns is a column chart of times: a column per item, its own tooltip on hover and focus, a
-// clean scale, a few x labels, and a table of the same numbers.
+// clean scale, a few x labels, and a table of the same numbers. The columns are a list of one tab
+// stop, the arrow keys going from one to the next and Home and End to the ends; they are not buttons,
+// pressing one does nothing (review #267).
 function Columns({ title, items, label = () => '', detail = () => '' }) {
   const [tip, setTip] = useState(null);
+  const [at, setAt] = useState(0); // the column that is the tab stop
   const box = useRef(null);
   const top = niceMax(Math.max(...items.map((i) => i.ms), 1));
   const show = (e, i) => {
     const b = box.current.getBoundingClientRect(), r = e.currentTarget.getBoundingClientRect();
     setTip({ i, x: r.left - b.left + r.width / 2, y: r.top - b.top + r.height * (1 - items[i].ms / top) });
   };
+  const cur = Math.min(at, items.length - 1);
+  const move = (e) => {
+    const to = { ArrowLeft: cur - 1, ArrowRight: cur + 1, Home: 0, End: items.length - 1 }[e.key];
+    if (to === undefined) return;
+    e.preventDefault();
+    const col = box.current.querySelectorAll('.col')[Math.max(0, Math.min(items.length - 1, to))];
+    if (col) col.focus();
+  };
   return html`<figure class="colchart">
     <figcaption>${title}</figcaption>
     <div class="col-plot" ref=${box}>
       <div class="col-grid" aria-hidden="true">${[top, top / 2, 0].map((v) => html`<span key=${v}><i>${axis(v)}</i></span>`)}</div>
-      <div class="col-bars" role="list">${items.map((it, i) => html`<button key=${i} class="col" role="listitem"
-        aria-label=${`${it.name}：${fmtDur(it.ms)}`} onPointerEnter=${(e) => show(e, i)} onPointerLeave=${() => setTip(null)}
-        onFocus=${(e) => show(e, i)} onBlur=${() => setTip(null)}>
-        <span class="bar" style=${`height:${(it.ms / top) * 100}%`}></span></button>`)}</div>
+      <div class="col-bars" role="list" aria-label=${`${title}，用方向鍵移動`} onKeyDown=${move}>${items.map((it, i) => html`<div key=${i}
+        class="col" role="listitem" tabindex=${i === cur ? 0 : -1} aria-label=${`${it.name}：${fmtDur(it.ms)}`}
+        onPointerEnter=${(e) => show(e, i)} onPointerLeave=${() => setTip(null)} onFocus=${(e) => { setAt(i); show(e, i); }}
+        onBlur=${() => setTip(null)}><span class="bar" style=${`height:${(it.ms / top) * 100}%`}></span></div>`)}</div>
       ${tip && html`<div class="chart-tip" style=${`left:${tip.x}px; top:${tip.y}px`} role="status">
         <b>${fmtDur(items[tip.i].ms)}</b><span>${items[tip.i].name}${detail(items[tip.i])}</span></div>`}
     </div>
@@ -429,9 +440,11 @@ export function StatsTimeZone() {
   return html`<h2 class="section-title">聆聽統計</h2>
     <div class="card pad">
       <div class="sub">「我的聆聽」用哪個時區分日</div>
-      <div class="choices" role="radiogroup" aria-label="聆聽統計的時區">
-        <button type="button" class="choice" role="radio" aria-checked=${s.mode === 'auto'} onClick=${() => choose({ mode: 'auto' })}>跟隨瀏覽器</button>
-        <button type="button" class="choice" role="radio" aria-checked=${s.mode === 'manual'} onClick=${() => choose({ mode: 'manual' })}>手動選擇</button>
+      <div class="choices" role="radiogroup" aria-label="聆聽統計的時區" onKeyDown=${radioKeys}>
+        <button type="button" class="choice" role="radio" aria-checked=${s.mode === 'auto'} tabindex=${s.mode === 'manual' ? -1 : 0}
+          onClick=${() => choose({ mode: 'auto' })}>跟隨瀏覽器</button>
+        <button type="button" class="choice" role="radio" aria-checked=${s.mode === 'manual'} tabindex=${s.mode === 'manual' ? 0 : -1}
+          onClick=${() => choose({ mode: 'manual' })}>手動選擇</button>
       </div>
       ${s.mode === 'manual'
         ? html`<label class="field">時區<select value=${s.zone} onChange=${(e) => choose({ zone: e.target.value })}>

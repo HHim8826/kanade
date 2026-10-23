@@ -15,8 +15,8 @@ export function Me({ tab }) {
   if (!tabs.some(([k]) => k === tab)) tab = 'playlists';
   return html`<section>
     <div class="page-head"><h1 class="page-title">我的</h1></div>
-    <nav class="tabs" role="tablist">
-      ${tabs.map(([k, label]) => html`<a key=${k} role="tab" aria-selected=${k === tab} class=${k === tab ? 'active' : ''} href=${href('me/' + k)}>${label}</a>`)}
+    <nav class="tabs" aria-label="我的">
+      ${tabs.map(([k, label]) => html`<a key=${k} aria-current=${k === tab ? 'page' : undefined} class=${k === tab ? 'active' : ''} href=${href('me/' + k)}>${label}</a>`)}
     </nav>
     ${tab === 'playlists' && html`<${Loaded} path="/playlists">${(lists) => html`<${PlaylistsTab} lists=${lists} />`}<//>`}
     ${tab === 'favorites' && html`<${Loaded} path="/favorites">${(data) => html`<${FavoritesTab} data=${data} />`}<//>`}

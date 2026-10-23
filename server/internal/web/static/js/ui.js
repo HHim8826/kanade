@@ -109,10 +109,35 @@ export function Cover({ id, size = 300, alt = '', className = '' }) {
   const [failedSrc, setFailedSrc] = useState(null);
   const src = coverURL(id, size);
   if (!src || failedSrc === src) {
-    return html`<div class=${'cover placeholder ' + className} role="img" aria-label=${alt}><${Icon} name="album" size=${40} /></div>`;
+    return html`<div class=${'cover placeholder ' + className} ...${placeholderA11y(alt)}><${Icon} name="album" size=${40} /></div>`;
   }
   return html`<img key=${src} class=${'cover ' + className} src=${src} alt=${alt} loading="lazy" onError=${() => setFailedSrc(src)} />`;
 }
+
+// Radio groups of buttons (role="radio") work as radio buttons do (review #271): the group is one tab
+// stop, the one chosen (the first when none is), and the arrow keys choose the next or the previous
+// one, round at the ends, Home and End the first and the last. radioKeys is the group's onKeyDown;
+// rove(keys, value) gives each button's tabindex, by its key.
+export function radioKeys(e) {
+  const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[e.key];
+  if (!step && e.key !== 'Home' && e.key !== 'End') return;
+  const radios = [...e.currentTarget.querySelectorAll('[role="radio"]:not(:disabled)')];
+  const at = radios.indexOf(document.activeElement);
+  if (at < 0) return;
+  e.preventDefault();
+  const n = radios.length;
+  const next = radios[e.key === 'Home' ? 0 : e.key === 'End' ? n - 1 : (at + step + n) % n];
+  next.focus();
+  next.click();
+}
+export function rove(keys, value) {
+  const tab = keys.includes(value) ? value : keys[0];
+  return (k) => (k === tab ? 0 : -1);
+}
+
+// placeholderA11y names a picture's placeholder as the picture would be (alt), or hides it where the
+// picture is only decoration, its title beside it (alt ""): an image without a name is none (review #265).
+export const placeholderA11y = (alt) => (alt ? { role: 'img', 'aria-label': alt } : { 'aria-hidden': 'true' });
 
 // copyText: the clipboard API needs https; reached over plain http (an IP address), the old way.
 export async function copyText(text) {

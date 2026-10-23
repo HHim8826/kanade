@@ -8,6 +8,9 @@
 #   SHA256SUMS                                              their checksums and the script's
 #   VERSION                                                 the tag, for update checks
 #   kanade.sh                                               the install and manage script
+# Its notes are the titles of the commits since the version before (scripts/release-notes.sh): a
+# generated list names pull requests only, and changes come straight to main (review #260).
+# Each job has only the permissions it needs, and actions are pinned to commits (review #263).
 
 name: Release
 
@@ -17,13 +20,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  actions: read
+  contents: read
 
 jobs:
   # passed: CI ran on this commit when it was pushed to main, and passed.
   checked:
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
     outputs:
       passed: ${{ steps.find.outputs.passed }}
     steps:
@@ -46,16 +50,23 @@ jobs:
   ci:
     needs: checked
     if: needs.checked.outputs.passed != 'true'
+    permissions:
+      contents: read
     uses: ./.github/workflows/ci.yml
 
   release:
     needs: [checked, ci]
     if: ${{ !cancelled() && needs.checked.result == 'success' && (needs.checked.outputs.passed == 'true' || needs.ci.result == 'success') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # the release
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the tags, for the notes
+          persist-credentials: false
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: server/go.mod
           cache-dependency-path: server/go.sum
@@ -88,11 +99,13 @@ jobs:
         run: |
           pre=()
           [[ "$GITHUB_REF_NAME" == *-* ]] && pre=(--prerelease) # v1.2.3-rc1 and the like
-          gh release create "$GITHUB_REF_NAME" dist/* --title "Kanade $GITHUB_REF_NAME" --generate-notes "${pre[@]}"
+          scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* --title "Kanade $GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/notes.md" "${pre[@]}"
 
       - name: Artifact
         if: github.ref_type != 'tag'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: kanade-${{ github.sha }}
           path: dist/

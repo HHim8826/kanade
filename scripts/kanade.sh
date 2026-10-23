@@ -3,7 +3,9 @@
 #
 # Kanade 安裝與管理腳本
 #
-#   curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade.sh -o kanade.sh && sudo bash kanade.sh
+#   curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh -o kanade.sh && sudo bash kanade.sh
+#
+# 腳本和程式來自同一個 release；release 的 SHA256SUMS 也有這個腳本的校驗值。
 #
 # 不帶參數時顯示選單；也可以直接下指令：
 #   install | update | uninstall | status | start | stop | restart | log |
@@ -44,13 +46,18 @@ INIT_D="/etc/init.d"
 RC_ROOT="/etc" # rc0.d … rc6.d
 
 # Static aria2 and FFmpeg for systems whose packages have neither: the builds Kanade is developed
-# and tested with. aria2 publishes no Linux build; this one is pinned by checksum. FFmpeg's is the
-# latest build of the release branch, checked against the checksums published with it.
+# and tested with, each pinned by its checksum, so every install gets the same one (review #262).
+# aria2 publishes no Linux build. FFmpeg's is BtbN's build of the release branch from the last day
+# of a month: those are kept about two years, the daily ones about two weeks. To move to a newer one,
+# change the tag, the build's name and both checksums together (its checksums.sha256 lists them).
 ARIA2_STATIC="https://github.com/abcfy2/aria2-static-build/releases/download/1.37.0"
 ARIA2_SHA256_amd64="e0a09b12ef67f35f8a8e4fdddbec851d235b7c31da549d0578bff459032b499a"
 ARIA2_SHA256_arm64="0c681a89a40e0f82d1f5137608e86257eb0af201459c002941ea098f2b8c26b6"
-FFMPEG_STATIC="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+FFMPEG_STATIC="https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08"
+FFMPEG_BUILD="ffmpeg-n8.1.3-9-g29e619e767"
 FFMPEG_BRANCH="8.1"
+FFMPEG_SHA256_amd64="97ce978979194b5cf7e06a5e68020dbdaa7a4f3294c5452b6a1bc347100dbb79"
+FFMPEG_SHA256_arm64="10523d1e0be6b3ce62a9708cc50815c4b5eb5f36ae147fbe2afeecda6f2d6845"
 
 RED='\033[1;31m'
 GREEN='\033[1;32m'
@@ -277,26 +284,25 @@ static_aria2() {
 
 # static_ffmpeg WORK: ffmpeg and ffprobe into tools/ffmpeg/bin.
 static_ffmpeg() {
-  local work="$1" arch dir pkg free
+  local work="$1" arch sum dir pkg free
   case "$ARCH" in
-  amd64) arch="linux64" ;;
-  arm64) arch="linuxarm64" ;;
+  amd64) arch="linux64" sum="$FFMPEG_SHA256_amd64" ;;
+  arm64) arch="linuxarm64" sum="$FFMPEG_SHA256_arm64" ;;
   esac
-  dir="ffmpeg-n$FFMPEG_BRANCH-latest-$arch-gpl-$FFMPEG_BRANCH"
+  dir="$FFMPEG_BUILD-$arch-gpl-$FFMPEG_BRANCH"
   pkg="$dir.tar.xz"
   free=$(df -Pk "$INSTALL_DIR" 2>/dev/null | awk 'NR == 2 {print $4}')
   if [ "${free:-0}" -lt $((600 * 1024)) ]; then
     warn "$INSTALL_DIR 所在的磁碟剩不到 600 MB，沒有下載 FFmpeg。"
     return 1
   fi
-  info "下載 FFmpeg $FFMPEG_BRANCH 靜態版（約 150 MB）……"
-  if ! fetch "$GH_PROXY$FFMPEG_STATIC/$pkg" "$work/$pkg" || ! fetch "$GH_PROXY$FFMPEG_STATIC/checksums.sha256" "$work/ffmpeg.sha256"; then
+  info "下載 FFmpeg ${FFMPEG_BUILD#ffmpeg-n} 靜態版（約 150 MB）……"
+  if ! fetch "$GH_PROXY$FFMPEG_STATIC/$pkg" "$work/$pkg"; then
     warn "下載 FFmpeg 失敗。"
     return 1
   fi
-  # The build is replaced daily: a mismatch can also mean it changed between the two downloads.
-  if ! (cd "$work" && grep " $pkg\$" ffmpeg.sha256 | sha256sum -c --status); then
-    warn "FFmpeg 校驗失敗（SHA-256 不符），沒有安裝。請稍後重試，或換一個代理。"
+  if ! printf '%s  %s\n' "$sum" "$work/$pkg" | sha256sum -c --status; then
+    warn "FFmpeg 校驗失敗（SHA-256 不符），沒有安裝。請重試，或換一個代理。"
     return 1
   fi
   info "解壓縮 FFmpeg……"

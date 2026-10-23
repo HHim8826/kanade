@@ -3,7 +3,7 @@ import { get, post } from '../api.js';
 import { BANDS, MAX_DB, PRESETS, TARGETS, boost as boostOf, effects, presetOf, setEffects } from '../effects.js';
 import { driveOnly } from '../places.js';
 import { useStore } from '../store.js';
-import { Dialog, ErrorBox, fmtBytes, html, showDialog, toast } from '../ui.js';
+import { Dialog, ErrorBox, fmtBytes, html, radioKeys, rove, showDialog, toast } from '../ui.js';
 
 // The sound effects' controls (reviews #136, #139), in the settings and from now playing.
 
@@ -50,12 +50,17 @@ export function EffectsPanel() {
   const custom = e.preset.startsWith('custom:') ? e.preset.slice('custom:'.length) : '';
   const boost = boostOf(e.gains);
   const shaped = e.eq && e.gains.some((g) => g !== 0); // the equalizer has a curve to apply
+  const presetTab = rove([...PRESETS.map(([k]) => k), ...Object.keys(e.customs).map((n) => 'custom:' + n)], e.preset);
   const choice = (key, label) => html`<button key=${key} type="button" class="choice" role="radio" aria-checked=${e.preset === key}
-    disabled=${!e.eq} onClick=${() => pick(key)}>${label}</button>`;
-  const pickChoice = (label, list, value, set) => html`<div class="sub">${label}</div>
-    <div class="choices" role="radiogroup" aria-label=${label}>
-      ${list.map(([k, text]) => html`<button key=${k} type="button" class="choice" role="radio" aria-checked=${value === k} onClick=${() => set(k)}>${text}</button>`)}
+    tabindex=${presetTab(key)} disabled=${!e.eq} onClick=${() => pick(key)}>${label}</button>`;
+  const pickChoice = (label, list, value, set) => {
+    const tab = rove(list.map(([k]) => k), value);
+    return html`<div class="sub">${label}</div>
+    <div class="choices" role="radiogroup" aria-label=${label} onKeyDown=${radioKeys}>
+      ${list.map(([k, text]) => html`<button key=${k} type="button" class="choice" role="radio" aria-checked=${value === k} tabindex=${tab(k)}
+        onClick=${() => set(k)}>${text}</button>`)}
     </div>`;
+  };
   return html`<div class="effects">
     ${e.unsupported && html`<div class="error-box" role="alert"><span>這個瀏覽器無法處理音效；播放照常，不受影響。</span></div>`}
     ${e.suspended && html`<p class="hint">瀏覽器暫停了音效處理，點一下畫面或按任一鍵就會恢復。</p>`}
@@ -71,7 +76,7 @@ export function EffectsPanel() {
       <input type="checkbox" role="switch" checked=${e.eq} disabled=${e.unsupported} onChange=${(ev) => setEffects({ eq: ev.target.checked })} />
     </label>
     <div class=${'eq' + (e.eq ? '' : ' off')}>
-      <div class="choices" role="radiogroup" aria-label="預設曲線">
+      <div class="choices" role="radiogroup" aria-label="預設曲線" onKeyDown=${radioKeys}>
         ${PRESETS.map(([k, label]) => choice(k, label))}
         ${Object.keys(e.customs).map((n) => choice('custom:' + n, n))}
         ${e.preset === '' && html`<span class="choice ghost" aria-current="true">自訂（未儲存）</span>`}

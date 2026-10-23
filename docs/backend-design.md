@@ -917,6 +917,29 @@ DIR/
 - 驗證：Go 測試 uploads 的 `TestUploadsReceivedApart`（兩種完成順序，中間重啟與否）、`TestOlderUploadsTakenUp`（舊版的 `.part` 接著傳；被別的上傳覆蓋的不拿；沒有上傳的暫存檔刪掉；暫存不見時從頭開始）、`TestUsageFromRecords`（300 個上傳最多走一次目錄；記錄以外的位元組量到後算進去），drivesync 的 `TestOfflineTrashLetsOthersThrough`（離線位置 100 筆在前，Drive 的那筆兩輪內處理，100 筆延到約一分鐘後），mover 的 `TestClearedMoveTrashed`（清除任務後 1,500 多筆舊副本兩輪清完，檔案移走），importer 的 `TestSourcePictureTwins`（刪第一張、刪第二張、合併專輯裡的那份、全刪）、`TestPicturesToldAsKept`（加上 6000 像素的 JPEG、5000 像素的 PNG、4200 像素的 WebP，各只讀一次），api 的 `TestDriveOthersToMove`，db 的 `TestSchemaOfAndNewer`；能在舊程式上編譯的都先確認會失敗。腳本：shellcheck 通過；`systemd-analyze verify`（systemd 257）在 `…/My Music (テスト) [1]` 下，舊 unit 報出 `Command …/My is not executable` 與 `ReadWritePaths=` 被拆開，新 unit 通過；Alpine 3.24 的 chroot（user namespace）裡用 OpenRC 0.63.2 實際啟動同一路徑：舊腳本 `eval: syntax error: unexpected "("`，新腳本建立 `logs`、啟動、回應、`status` 為 started、停止後沒有殘留（namespace 裡不能 setgroups，測試時拿掉了 `--user`）；同一路徑的 SysV 腳本在 BusyBox sh 下啟動、停止；含括號路徑下的 `serving` 舊版對不到、新版對得到。更新回退：用真的 `do_update`（換掉下載、權限、服務啟停）從 v0.2.22 更新到一個多一個遷移、在遷移後才失敗的版本：舊腳本退回後資料庫停在 48，新腳本換回 47 的備份、另存 48 的那份，舊程式啟動並回應；新版沒遷移就失敗時資料庫不動；新版正常時照常更新。
 - 限制：OpenRC 與 SysV 沒有在真正以服務帳號執行的系統上測（namespace 裡只能用 root）。#255 的回退只在用 v0.2.23 以後的 `kanade-manager` 更新時有效；舊程式若早於 v0.2.23，遇到較新的資料庫時不會自己拒絕啟動。新版啟動期間寫入的資料在換回備份後不在曲庫裡，只留在另存的那份。
 
+### 第十一輪修正（2026-10-23，v0.2.24，#260–#271，沒有新遷移）
+
+發佈與安裝：
+
+- #260 release 說明只有 Full Changelog：`gh release create --generate-notes` 只列合併的 PR，改動直接推到 main。修正：`scripts/release-notes.sh TAG` 列出上一個版本標籤以來每個 commit 的標題，附上它修正的 issue（commit 內文的 `Fixes #N`），最後是比較連結；release workflow 用它產生說明（checkout 改 `fetch-depth: 0` 拿得到舊標籤）。v0.2.21–v0.2.23 的說明也用它補上。
+- #261 README 的安裝指令下載 main 上的 `kanade.sh`，可能比最新 release 新。修正：改下載 `releases/latest/download/kanade.sh`，和要安裝的程式同一個 release；README 寫了怎麼用同一個 release 的 `SHA256SUMS` 核對，代理的例子跟著改。
+- #262 FFmpeg 靜態版下載 BtbN 的 `latest`，校驗值也來自同一處。修正：固定到 2026-09-30 的月底建置（`autobuild-2026-09-30-13-08`，n8.1.3-9-g29e619e767），amd64、arm64 的 SHA-256 寫在腳本裡，和 aria2 一樣；BtbN 的每日建置只留約兩週，月底的留約兩年。
+- #263 action 改為固定到 commit SHA（後面註解版本：checkout v7.0.1、setup-go v7.0.0、setup-node v7.1.0、upload-artifact v7.0.2），checkout 不留 token（`persist-credentials: false`）；release workflow 最上層只給 `contents: read`，`checked` job 給 `actions: read`、`release` job 給 `contents: write`；加上 `.github/dependabot.yml`（github-actions 與 `/server` 的 gomod，每週，各一個合併的 PR）。CI 的 shellcheck 也檢查 `release-notes.sh`。
+- #264 `docs/plan-v0.5.md` 開頭註明這是 2026-10-02 的原始計畫、之後的決定以 `decisions.md` 為準（例如 D1 不嵌入 rclone、D3／D8 網頁端先行）；簡體字改成正體（issue 列的 8 個，另外還有空间、手机、环境 3 個）。
+
+無障礙（`server/internal/web/static`）：
+
+- #265 沒有封面時的佔位圖 `role="img"` 卻沒有名稱：`alt` 是空的（旁邊已有標題）時改為 `aria-hidden`，有 `alt` 時才是有名稱的圖（`ui.placeholderA11y`，封面與作品圖共用）。
+- #266 搜尋框拿掉了輸入框的外框，外層也沒有焦點樣式：`.search-field:focus-within` 顯示 2px `primary` 外框。
+- #267 「聆聽」頁圖表的 ARIA：熱度圖不再宣告 `grid`（沒有 row／gridcell），改為有名稱的 `group`，月份與星期的標籤對輔助技術隱藏（每格的名稱已有完整日期），方向鍵照舊；長條圖的每一欄原本是 `role="listitem"` 的按鈕（按了沒有作用），改成可聚焦的清單項目，整張圖一個 Tab 停點，方向鍵、Home、End 移動，數值提示照舊在聚焦時出現。改成保留按鈕角色時 axe 會改報 `target-size`（每小時一欄太窄），所以不用按鈕。
+- #268 段落裡的連結只靠顏色區分：`.link` 一律加底線；播放頁歌名下的專輯名稱自成一行，維持只在滑過時加底線。
+- #269 同步歌詞非目前行的對比：透明度 .55／.4 改為 .7／.62，淺色主題約 4.0:1 與 3.25:1（大字至少 3:1），深色 5.9:1 與 4.8:1。
+- #270 淺色主題的評分星星：亮的星用新的 `--star`（淺色 `#8a5a00`，對話框底色上約 4.8:1；深色維持 `#f5a623`），沒亮的星改用 `outline`（3.7:1／4.5:1）；亮與沒亮的顏色在淺色主題亮度相近，所以沒亮的改用空心的 ☆，形狀也不同。
+- #271 按鈕做的單選群組（播放、外觀、聆聽統計的時區、音效、評分）加上單選鈕的鍵盤慣例：一個 Tab 停點（選中的那個，沒有就第一個），方向鍵選下一個或上一個並繞回，Home、End 到頭尾（`ui.radioKeys`、`ui.rove`）；「我的」、曲庫與 RSS 的分頁是換頁的連結，拿掉 `tablist`／`tab`，改為有名稱的 `nav` 加 `aria-current="page"`；播放列（本機、遙控、其他裝置）改為有名稱的 `section`；播放列頂端的位置滑桿點擊高度 16px 改為 24px。
+
+- 驗證：示範曲庫（兩張專輯，一張沒有封面，一首有 LRC）上用 axe-core 4.10.3（wcag2a／2aa／21a／21aa／22aa 與 best-practice）跑 11 個頁面（首頁、專輯列表、兩張專輯、搜尋、歌單、聆聽、設定、RSS、作品、播放頁的歌詞），藍紫淺色、藍紫深色、玫瑰深色與青綠淺色的手機寬度：v0.2.23 有 `aria-allowed-role` 244、`aria-required-children` 4、`link-in-text-block` 8、`region` 100、`role-img-alt` 8、`target-size` 10 個節點，修正後沒有任何違規。另以 Chromium 實測鍵盤與樣式 21 項（單選群組的停點與方向鍵、搜尋框外框、連結底線、分頁的 `aria-current`、熱度圖與長條圖的方向鍵、佔位圖、各主題星星的對比與寬度）。`release-notes.sh` 對 v0.2.21–v0.2.23 產生的內容核對過；README 的 `SHA256SUMS` 核對指令對 v0.2.23 實際執行通過；用腳本的 `static_ffmpeg` 實際下載、校驗、安裝固定版本的 amd64 FFmpeg 並執行（arm64 以 GitHub 記錄的 SHA-256、`checksums.sha256` 與封存檔開頭的目錄名稱核對）。actionlint、shellcheck 通過。
+- 限制：評分星星只在連結 Bangumi 後的對話框出現，以同樣的 class 放在頁面上量測，沒有在真的對話框裡看。熱度圖選了不宣告 grid，螢幕閱讀器不會報出行列位置（每格名稱有完整日期）。選單（`role="menu"`）彈出時仍在 landmark 之外。Dependabot 開始送 PR 之後要有人合併。
+
 ## 使用方式（開發環境）
 
 ```bash

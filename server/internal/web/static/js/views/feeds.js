@@ -27,8 +27,8 @@ export function Feeds({ tab = 'items', q = '' }) {
         <button class="btn tonal" onClick=${() => editSource(null, reload)}><${Icon} name="add" />新增來源</button>
       </div>
     </div>
-    <nav class="tabs" role="tablist">
-      ${[['items', '條目'], ['sources', '來源']].map(([k, label]) => html`<a role="tab" aria-selected=${k === tab} class=${k === tab ? 'active' : ''}
+    <nav class="tabs" aria-label="RSS">
+      ${[['items', '條目'], ['sources', '來源']].map(([k, label]) => html`<a key=${k} aria-current=${k === tab ? 'page' : undefined} class=${k === tab ? 'active' : ''}
         href=${href('feeds?tab=' + k)}>${label}</a>`)}
     </nav>
     ${sources.loading && !sources.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${sources.error} onRetry=${sources.reload} />`}

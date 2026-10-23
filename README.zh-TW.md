@@ -31,10 +31,12 @@
 在 Linux 伺服器（amd64 或 arm64）上以 root 執行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade.sh -o kanade.sh && sudo bash kanade.sh
+curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh -o kanade.sh && sudo bash kanade.sh
 ```
 
-連 GitHub 很慢的地方（中國大陸），在網址前面加上代理，例如 `https://ghproxy.net/https://raw.githubusercontent.com/…`；腳本下載其他檔案時會詢問要不要用同一個代理。
+腳本來自最新的 release，和它要安裝的是同一版。想先核對腳本：把同一個 release 的 `SHA256SUMS` 下載到旁邊，執行 `sha256sum -c --ignore-missing SHA256SUMS`。
+
+連 GitHub 很慢的地方（中國大陸），在網址前面加上代理，例如 `https://ghproxy.net/https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh`；腳本下載其他檔案時會詢問要不要用同一個代理。
 
 腳本會：
 

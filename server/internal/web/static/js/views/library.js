@@ -221,8 +221,8 @@ export function Library({ tab = 'albums', filter = '' }) {
         <a class="btn text" href=${href('edits')}><${Icon} name="history" />修改紀錄</a>
       </div>
     </div>
-    <nav class="tabs" role="tablist">
-      ${tabs.map(([k, label]) => html`<a role="tab" aria-selected=${k === tab} class=${k === tab ? 'active' : ''} href=${href('library/' + k)}>${label}</a>`)}
+    <nav class="tabs" aria-label="曲庫">
+      ${tabs.map(([k, label]) => html`<a key=${k} aria-current=${k === tab ? 'page' : undefined} class=${k === tab ? 'active' : ''} href=${href('library/' + k)}>${label}</a>`)}
     </nav>
     ${tab === 'tracks' && html`<nav class="seg filter-seg" aria-label="篩選">${trackFilters.map(([k, label]) => html`<a key=${k}
       class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/tracks' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}

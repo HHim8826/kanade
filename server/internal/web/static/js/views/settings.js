@@ -15,7 +15,7 @@ import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName } from '.
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
 import { StatsTimeZone } from './stats.js';
-import { Dialog, ErrorBox, FilePick, copyText, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast, useLoad } from '../ui.js';
+import { Dialog, ErrorBox, FilePick, copyText, Icon, IconButton, Spinner, fmtBytes, html, radioKeys, rove, showDialog, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
 
@@ -308,10 +308,14 @@ function PlaybackSettings() {
     lite: useStore(player, (p) => p.lite), liteServer: useStore(player, (p) => p.liteServer),
   };
   useEffect(askLite, []);
-  const choices = (label, list, value, pick) => html`<div class="sub">${label}</div>
-    <div class="choices" role="radiogroup" aria-label=${label}>
-      ${list.map(([k, text]) => html`<button type="button" class="choice" role="radio" aria-checked=${value === k} onClick=${() => pick(k)}>${text}</button>`)}
+  const choices = (label, list, value, pick) => {
+    const tab = rove(list.map(([k]) => k), value);
+    return html`<div class="sub">${label}</div>
+    <div class="choices" role="radiogroup" aria-label=${label} onKeyDown=${radioKeys}>
+      ${list.map(([k, text]) => html`<button key=${k} type="button" class="choice" role="radio" aria-checked=${value === k} tabindex=${tab(k)}
+        onClick=${() => pick(k)}>${text}</button>`)}
     </div>`;
+  };
   const resume = (kind, k) => setPrefs({ resume: { ...s.resume, [kind]: k } });
   return html`<h2 class="section-title">播放</h2>
     <div class="card pad">
@@ -348,17 +352,18 @@ function Appearance() {
     setT(next);
     setTheme(next);
   };
+  const themeTab = rove(themes.map(([k]) => k), t.theme), modeTab = rove(modes.map(([k]) => k), t.mode);
   return html`<h2 class="section-title">外觀</h2>
     <div class="card pad">
       <div class="sub">配色</div>
-      <div class="choices" role="radiogroup" aria-label="配色">
-        ${themes.map(([k, label]) => html`<button type="button" class="choice" role="radio" aria-checked=${t.theme === k}
-          onClick=${() => choose({ theme: k })}><span class=${'swatch ' + k}></span>${label}</button>`)}
+      <div class="choices" role="radiogroup" aria-label="配色" onKeyDown=${radioKeys}>
+        ${themes.map(([k, label]) => html`<button key=${k} type="button" class="choice" role="radio" aria-checked=${t.theme === k}
+          tabindex=${themeTab(k)} onClick=${() => choose({ theme: k })}><span class=${'swatch ' + k}></span>${label}</button>`)}
       </div>
       <div class="sub">明暗</div>
-      <div class="choices" role="radiogroup" aria-label="明暗">
-        ${modes.map(([k, label]) => html`<button type="button" class="choice" role="radio" aria-checked=${t.mode === k}
-          onClick=${() => choose({ mode: k })}>${label}</button>`)}
+      <div class="choices" role="radiogroup" aria-label="明暗" onKeyDown=${radioKeys}>
+        ${modes.map(([k, label]) => html`<button key=${k} type="button" class="choice" role="radio" aria-checked=${t.mode === k}
+          tabindex=${modeTab(k)} onClick=${() => choose({ mode: k })}>${label}</button>`)}
       </div>
       <${Toggle} label="分頁標題顯示播放進度" sub=${`在分頁標題的站名後面顯示播放狀態、進度和歌名，例如「${siteName()} · ▶ 1:23 / 3:45 · 歌名」。`}
         checked=${info} onChange=${setTitleInfo} />

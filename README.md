@@ -31,10 +31,12 @@ The screenshots use a made-up demo library: the albums, artists, lyrics, covers 
 On a Linux server (amd64 or arm64), as root:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/HHim8826/kanade/main/scripts/kanade.sh -o kanade.sh && sudo bash kanade.sh
+curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh -o kanade.sh && sudo bash kanade.sh
 ```
 
-Where GitHub is slow (mainland China), put a proxy in front of the address, for example `https://ghproxy.net/https://raw.githubusercontent.com/…`; the script asks for the same proxy for its downloads.
+The script comes from the latest release, the same one it installs. To check it before running it, download that release's `SHA256SUMS` beside it and run `sha256sum -c --ignore-missing SHA256SUMS`.
+
+Where GitHub is slow (mainland China), put a proxy in front of the address, for example `https://ghproxy.net/https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh`; the script asks for the same proxy for its downloads.
 
 What the script does:
 

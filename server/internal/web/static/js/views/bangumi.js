@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { siteName } from '../site.js';
-import { Dialog, Empty, ErrorBox, Icon, Spinner, copyText, html, showDialog, toast } from '../ui.js';
+import { Dialog, Empty, ErrorBox, Icon, Spinner, copyText, html, radioKeys, showDialog, toast } from '../ui.js';
 import { confirmDialog, useLibRev, useRunner } from './organize.js';
 import { WorkImage, bindSubject, workLine } from './works.js';
 
@@ -106,10 +106,10 @@ function CollectionDialog({ album, onSaved, close }) {
       <div class="seg collection-type" role="radiogroup" aria-label="收藏狀態">${Object.entries(statusNames).map(([k, label]) => html`<label key=${k}
         class=${form.type === Number(k) ? 'on' : ''}><input type="radio" checked=${form.type === Number(k)} onChange=${() => setForm({ ...form, type: Number(k) })} />${label}</label>`)}</div>
       <div class="field">我的評價
-        <div class="stars" role="radiogroup" aria-label="評分">
+        <div class="stars" role="radiogroup" aria-label="評分" onKeyDown=${radioKeys}>
           <button type="button" class="star-clear" aria-label="不評分" title="不評分" onClick=${() => setForm({ ...form, rate: 0 })}><${Icon} name="close" size=${18} /></button>
-          ${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => html`<button key=${n} type="button" role="radio" aria-checked=${form.rate === n} aria-label=${`${n} 分`}
-            class=${'star' + (n <= form.rate ? ' on' : '')} onClick=${() => setForm({ ...form, rate: n })}>★</button>`)}
+          ${[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => html`<button key=${n} type="button" role="radio" aria-checked=${form.rate === n} aria-label=${`${n} 分`} tabindex=${(form.rate || 1) === n ? 0 : -1}
+            class=${'star' + (n <= form.rate ? ' on' : '')} onClick=${() => setForm({ ...form, rate: n })}>${n <= form.rate ? '★' : '☆'}</button>`)}
           <span class="sub">${form.rate ? `${form.rate} 分` : '未評分'}</span>
         </div>
       </div>

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { fromTrack, playQueue } from '../player.js';
 import { href, keepInAddress, parseHash } from '../router.js';
-import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
+import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, openMenu, placeholderA11y, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumGrid, TrackList } from './common.js';
 import { done, useLibRev, useRunner } from './organize.js';
 
@@ -28,7 +28,7 @@ export function WorkImage({ id, sid, size = 300, alt = '', className = '' }) {
   const [failed, setFailed] = useState(null);
   const src = id ? `/api/v1/works/${id}/image?size=${size}` : sid ? `/api/v1/bangumi/subjects/${sid}/image?size=${size}` : null;
   if (!src || failed === src) {
-    return html`<div class=${'cover placeholder work-pic ' + className} role="img" aria-label=${alt}><${Icon} name="work" size=${32} /></div>`;
+    return html`<div class=${'cover placeholder work-pic ' + className} ...${placeholderA11y(alt)}><${Icon} name="work" size=${32} /></div>`;
   }
   return html`<img key=${src} class=${'cover work-pic ' + className} src=${src} alt=${alt} loading="lazy" onError=${() => setFailed(src)} />`;
 }

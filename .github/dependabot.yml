@@ -1,0 +1,18 @@
+# Proposes newer actions (pinned to commits in the workflows) and Go modules, once a week, each kind
+# in one pull request that CI checks (review #263).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: gomod
+    directory: /server
+    schedule:
+      interval: weekly
+    groups:
+      go-modules:
+        patterns: ["*"]

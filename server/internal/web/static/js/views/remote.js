@@ -279,7 +279,7 @@ export function RemoteBar() {
   const { name, busy } = useStore(control);
   if (!d) return null;
   const song = hasSong(d);
-  return html`<div class="player-bar remote-bar">
+  return html`<section class="player-bar remote-bar" aria-label="遙控播放器">
     <${RemoteSeek} d=${d} className="bar-seek" />
     <button class="now" onClick=${() => control.set({ open: true })} aria-label=${`開啟「${name}」的播放`}>
       <${Cover} id=${song ? d.cover_id : 0} size=${96} className="thumb" />
@@ -301,7 +301,7 @@ export function RemoteBar() {
       <${DevicesButton} />
       <${IconButton} icon="close" label=${`結束控制「${name}」`} onClick=${endControl} />
     </div>
-  </div>`;
+  </section>`;
 }
 
 // RemoteNowPlaying is the device controlled, full screen: its song, controls and queue.
@@ -385,12 +385,12 @@ export function Elsewhere() {
   const list = useStore(devices, (s) => s.list);
   const d = others(list).find((x) => x.online && x.player && hasSong(x));
   if (!d) return null;
-  return html`<div class="player-bar elsewhere">
+  return html`<section class="player-bar elsewhere" aria-label="其他裝置的播放">
     <${Cover} id=${d.cover_id} size=${96} className="thumb" />
     <span class="track-text grow"><span class="title">${d.title}</span>
       <span class="sub"><${Icon} name="devices" size=${16} />「${nameOf(d)}」${d.state === 'playing' ? '播放中' : '已暫停'}</span></span>
     <button class="btn tonal" onClick=${() => takeOver(d)}>在這裡接續</button>
     <span class="wide-only"><button class="btn text" onClick=${() => controlDevice(d)}>控制</button></span>
     <${DevicesButton} />
-  </div>`;
+  </section>`;
 }
