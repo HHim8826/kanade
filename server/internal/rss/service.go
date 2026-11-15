@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/HHim8826/kanade/server/internal/db"
+	"github.com/HHim8826/kanade/server/internal/netguard"
 )
 
 const (
@@ -66,9 +67,8 @@ func (s *Service) lockSource(id int64) func() {
 
 func New(d *sql.DB, dl Downloader, contact string, log *slog.Logger) *Service {
 	return &Service{db: d, dl: dl, log: log, wake: make(chan struct{}, 1),
-		ua: fmt.Sprintf("Kanade/0.2 ( %s )", contact),
-		http: &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DialContext: safeDial, Proxy: http.ProxyFromEnvironment},
-			CheckRedirect: checkRedirect}}
+		ua:   fmt.Sprintf("Kanade/0.2 ( %s )", contact),
+		http: &http.Client{Timeout: 30 * time.Second, Transport: netguard.Transport(), CheckRedirect: checkRedirect}}
 }
 
 type sourceKey struct{}
@@ -85,24 +85,6 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 		src.credentials(req)
 	}
 	return nil
-}
-
-// safeDial keeps feed fetches off this machine's own services (aria2's RPC, the app itself).
-func safeDial(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, err
-	}
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	for _, ip := range ips {
-		if ip.IP.IsLoopback() || ip.IP.IsUnspecified() {
-			return nil, errors.New("feeds on this machine are not allowed")
-		}
-	}
-	return (&net.Dialer{Timeout: 15 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
 }
 
 var (

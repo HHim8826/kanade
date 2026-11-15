@@ -213,7 +213,7 @@ func (s *Store) Work(ctx context.Context, id int64) (*WorkDetail, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var t WorkTrack
-		if err := rows.Scan(append([]any{&t.Use, &t.Note, &t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind}, t.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&t.Use, &t.Note, &t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind, &t.Variant}, t.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		d.Songs = append(d.Songs, t)

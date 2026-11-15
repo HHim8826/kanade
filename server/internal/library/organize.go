@@ -456,6 +456,8 @@ func (e *editor) write(target string, id int64, field string, v *string) error {
 		e.markIndex("track", id)
 	case target == "track" && field == "title", target == "album" && (field == "title" || field == "album_artist"):
 		e.markIndex(target, id)
+	case target == "track" && field == "version": // what the song is (Variant) goes by its note too
+		e.markIndex(target, id)
 	}
 	return nil
 }
@@ -501,8 +503,13 @@ func aliasNames(ctx context.Context, q querier, target string, id int64) ([]stri
 	return out, rows.Err()
 }
 
-// reindex rebuilds one object's search text from its names and aliases.
+// reindex rebuilds one object's search text from its names and aliases; and a track's variant.
 func reindex(ctx context.Context, tx *sql.Tx, kind string, id int64) error {
+	if kind == "track" {
+		if err := setVariant(ctx, tx, id); err != nil {
+			return err
+		}
+	}
 	parts, err := indexParts(ctx, tx, kind, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return unindex(ctx, tx, kind, id)

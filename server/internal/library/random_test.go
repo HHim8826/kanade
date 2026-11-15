@@ -28,7 +28,7 @@ func TestRandomTracks(t *testing.T) {
 
 	seen := map[int64]int{}
 	for i := 0; i < 1500; i++ {
-		list, err := s.RandomTracks(ctx, 1, "music", nil)
+		list, err := s.RandomTracks(ctx, 1, "music", false, nil)
 		if err != nil || len(list) != 1 {
 			t.Fatalf("%v %v", list, err)
 		}
@@ -42,19 +42,19 @@ func TestRandomTracks(t *testing.T) {
 			t.Fatalf("song %d picked %d times of 1500: %v", id, n, seen)
 		}
 	}
-	all, _ := s.RandomTracks(ctx, 10, "", nil)
+	all, _ := s.RandomTracks(ctx, 10, "", false, nil)
 	if len(all) != 4 {
 		t.Fatalf("all kinds: %d", len(all))
 	}
-	if list, _ := s.RandomTracks(ctx, 5, "music", []int64{a, b.TrackID}); len(list) != 1 || list[0].ID != e.TrackID {
+	if list, _ := s.RandomTracks(ctx, 5, "music", false, []int64{a, b.TrackID}); len(list) != 1 || list[0].ID != e.TrackID {
 		t.Fatalf("leaving out the ones just played: %+v", list)
 	}
 	// Everything was just played (the latest first): round again, those played longest ago first,
 	// never the very last one (review #105).
-	if list, _ := s.RandomTracks(ctx, 5, "music", []int64{e.TrackID, b.TrackID, a}); len(list) != 2 || list[0].ID != a || list[1].ID != b.TrackID {
+	if list, _ := s.RandomTracks(ctx, 5, "music", false, []int64{e.TrackID, b.TrackID, a}); len(list) != 2 || list[0].ID != a || list[1].ID != b.TrackID {
 		t.Fatalf("all just played: %+v", list)
 	}
-	if list, _ := s.RandomTracks(ctx, 5, "spoken", []int64{c.TrackID}); len(list) != 1 || list[0].ID != c.TrackID {
+	if list, _ := s.RandomTracks(ctx, 5, "spoken", false, []int64{c.TrackID}); len(list) != 1 || list[0].ID != c.TrackID {
 		t.Fatalf("a library of one: %+v", list)
 	}
 }

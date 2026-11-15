@@ -25,6 +25,8 @@ export function modeFrom(p) {
 // Playback preferences (review #78), kept in this browser with the volume and the mode:
 //   scope: what shuffle draws from, the queue or the whole library (#72);
 //   autoContinue: when the queue's songs run out, go on with songs from the library (#73);
+//   plain: shuffling leaves out instrumentals and shortened versions (TV size), unless they are all
+//     there is to shuffle;
 //   resume: per kind, whether choosing a song starts it over or where it was left;
 //   preload: warm the next song's stream ahead;
 //   gapless: start the next song the moment this one ends (gapless playback, below);
@@ -40,6 +42,7 @@ function loadPrefs() {
     ...modeState(modeFrom(p)),
     scope: p.scope === 'library' ? 'library' : 'queue',
     autoContinue: !!p.autoContinue,
+    plain: p.plain !== false,
     preload: p.preload !== false,
     gapless: p.gapless !== false,
     lite: !!p.lite,
@@ -89,9 +92,9 @@ const routed = (op, args) => remote !== null && remote(op, args);
 export const now = () => clock.get().time;
 
 function savePrefs() {
-  const { volume, muted, mode, scope, autoContinue, preload, gapless, lite, resume } = player.get();
+  const { volume, muted, mode, scope, autoContinue, plain, preload, gapless, lite, resume } = player.get();
   try {
-    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, preload, gapless, lite, resume }));
+    localStorage.setItem(PREFS, JSON.stringify({ volume, muted, mode, scope, autoContinue, plain, preload, gapless, lite, resume }));
   } catch { /* private mode: the choice lasts for this page */ }
 }
 
@@ -266,14 +269,14 @@ export const current = () => {
 export function fromEntry(e, album) {
   return {
     assetId: e.asset.id, trackId: e.track_id, title: e.title, artist: e.artist, album: album.title, albumId: album.id,
-    coverId: album.cover_id, durationMs: e.asset.duration_ms, asset: e.asset, kind: e.kind,
+    coverId: album.cover_id, durationMs: e.asset.duration_ms, asset: e.asset, kind: e.kind, variant: e.variant || '',
   };
 }
 
 export function fromTrack(t) {
   return {
     assetId: t.asset.id, trackId: t.id, title: t.title, artist: t.artist, album: t.album, albumId: t.album_id,
-    coverId: t.cover_id, durationMs: t.asset.duration_ms, asset: t.asset, kind: t.kind,
+    coverId: t.cover_id, durationMs: t.asset.duration_ms, asset: t.asset, kind: t.kind, variant: t.variant || '',
   };
 }
 
@@ -472,7 +475,7 @@ export function playQueue(items, index = 0) {
   }
   if (s.shuffle) {
     const first = list[index];
-    player.set({ original: list, queue: [first, ...shuffled(list.filter((q) => q !== first))], index: 0, radio: null, radioError: null });
+    player.set({ original: list, queue: [first, ...shuffleRest(list, first)], index: 0, radio: null, radioError: null });
     load(0);
     return;
   }
@@ -499,7 +502,7 @@ export async function playLibraryShuffle(kind = 'music') {
   const my = ++gen;
   const s = player.get();
   try {
-    const list = await get(`/tracks/random?n=3&kind=${kind}&not=${recentIds(s).join(',')}`);
+    const list = await get(`/tracks/random?n=3&kind=${kind}${s.plain ? '&plain=1' : ''}&not=${recentIds(s).join(',')}`);
     if (my !== gen) return false;
     if (!list.length) {
       toast(kind === 'spoken' ? '曲庫沒有可以播放的廣播劇或談話' : '曲庫沒有可以播放的歌', 'error');
@@ -574,7 +577,7 @@ async function fetchMore(s, n) {
   try {
     const list = await get(s.radio.playlist // a smart playlist played on: its rules pick (review #96)
       ? `/playlists/${s.radio.playlist}/next?n=${n}&not=${recentIds(s).join(',')}`
-      : `/tracks/random?n=${n}&kind=${s.radio.kind}&not=${recentIds(s).join(',')}`);
+      : `/tracks/random?n=${n}&kind=${s.radio.kind}${s.plain ? '&plain=1' : ''}&not=${recentIds(s).join(',')}`);
     if (my !== gen || !player.get().radio) return 'stale'; // another queue began, or it was turned off
     if (!list.length) throw new Error(s.radio.playlist ? '沒有其他符合條件的歌' : '曲庫沒有可以接續的歌');
     const q = player.get();
@@ -606,6 +609,14 @@ function endRadio() {
   const s = player.get();
   const queue = s.queue.filter((q, i) => i <= s.index || !q.auto);
   player.set({ queue, radio: null, radioError: null });
+}
+
+// shuffleRest is the rest of a list after first, in random order: without instrumentals and
+// shortened versions with the plain preference, unless the list has nothing else. The list itself
+// (original) keeps them, for when shuffle is turned off.
+function shuffleRest(list, first) {
+  const plain = player.get().plain && list.some((q) => !q.variant);
+  return shuffled(list.filter((q) => q !== first && !(plain && q.variant)));
 }
 
 export function shuffled(items) {
@@ -689,7 +700,7 @@ export function setMode(mode) {
     gen++;
     queue = { original: s.queue, from: cur.qid, queue: s.queue.slice(0, s.index + 1), radio: { kind: kindOf(cur) }, radioError: null };
   } else if (mode === 'shuffle' && cur) {
-    queue = { original: s.queue, queue: [cur, ...shuffled(s.queue.filter((q) => q !== cur))], index: 0 };
+    queue = { original: s.queue, queue: [cur, ...shuffleRest(s.queue, cur)], index: 0 };
   } else if (s.shuffle) {
     let list = s.original || s.queue;
     let index = cur ? list.findIndex((q) => q.qid === cur.qid) : -1;

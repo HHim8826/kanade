@@ -49,7 +49,35 @@ func OpenVersion(ctx context.Context, path string, version int) (*sql.DB, error)
 		db.Close()
 		return nil, err
 	}
+	if err := Optimize(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return db, nil
+}
+
+// Optimize brings the statistics the query planner goes by up to date (review T3): ANALYZE, within
+// a bounded time, of each table never analyzed or whose rows have grown or shrunk a lot since. At
+// open, and once a day while the service runs (Maintain).
+func Optimize(ctx context.Context, db *sql.DB) error {
+	_, err := db.ExecContext(ctx, "PRAGMA optimize=0x10002")
+	return err
+}
+
+// Maintain runs Optimize every period until ctx ends.
+func Maintain(ctx context.Context, db *sql.DB, every time.Duration, warn func(error)) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if err := Optimize(ctx, db); err != nil && ctx.Err() == nil {
+				warn(err)
+			}
+		}
+	}
 }
 
 // ErrNewerSchema is a database a newer Kanade upgraded (review #255): this one does not know what it

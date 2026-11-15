@@ -243,3 +243,39 @@ func TestSearchIndexRebuild(t *testing.T) {
 		t.Fatalf("after the rebuild: found %d, %d rows", n, all)
 	}
 }
+
+// Matches are ranked before the limit: the title that is the words, one that starts with them, one
+// that has them, then one whose artist has them; songs played more first within each.
+func TestSearchRanks(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	add := func(h, title, artist string) int64 {
+		a := verifiedAsset(t, s, h)
+		s.Publish(ctx, a, EntryInput{Title: title, Artist: artist})
+		var id int64
+		s.db.QueryRow(`SELECT track_id FROM track_assets WHERE asset_id = ?`, a).Scan(&id)
+		return id
+	}
+	add("r1", "Other tune", "Hello Band")
+	add("r2", "Say hello again", "x")
+	played := add("r3", "Hello, goodbye", "x")
+	add("r4", "Hello World", "x")
+	add("r5", "Hello", "x")
+	for i := range 3 {
+		if _, err := s.db.Exec(`INSERT INTO plays (session, asset_id, track_id, started_at, updated_at) SELECT ?, asset_id, track_id, 1, 1
+			FROM track_assets WHERE track_id = ?`, fmt.Sprint("p", i), played); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := s.Search(ctx, "hello", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, tr := range r.Tracks {
+		got = append(got, tr.Title)
+	}
+	if strings.Join(got, "|") != "Hello|Hello, goodbye|Hello World|Say hello again" {
+		t.Fatalf("order: %q", got)
+	}
+}

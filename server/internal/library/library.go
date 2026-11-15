@@ -278,8 +278,8 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 		if kind == "" {
 			kind = "music"
 		}
-		r, err := tx.ExecContext(ctx, `INSERT INTO tracks (title, artist, kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-			in.Title, in.Artist, kind, now, now)
+		r, err := tx.ExecContext(ctx, `INSERT INTO tracks (title, artist, kind, variant, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
+			in.Title, in.Artist, kind, Variant(in.Title, ""), now, now)
 		if err != nil {
 			return res, err
 		}

@@ -132,7 +132,7 @@ func (s *Server) randomTracks(w http.ResponseWriter, r *http.Request) {
 			not = append(not, id)
 		}
 	}
-	list, err := s.lib.RandomTracks(r.Context(), n, kind, not)
+	list, err := s.lib.RandomTracks(r.Context(), n, kind, q.Get("plain") == "1", not)
 	if err != nil {
 		s.internal(w, r, err)
 		return

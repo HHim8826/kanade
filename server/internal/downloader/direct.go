@@ -15,6 +15,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/HHim8826/kanade/server/internal/netguard"
 )
 
 // Direct downloads: one file fetched over HTTP or HTTPS, an album's zip or a song, beside the
@@ -46,6 +48,10 @@ var typeExt = map[string]string{
 // directExt: what the importer takes from a direct download, audio or a zip of it.
 func directExt(ext string) bool { return audioExt[ext] || ext == ".zip" }
 
+// web fetches links from outside (pasted, or an RSS item's): not to this machine or, unless the
+// download settings allow it, the local network (review T1).
+var web = &http.Client{Transport: netguard.Transport()}
+
 // probe looks at what a web link gives, reading no more than the start of a large answer: a
 // .torrent, returned whole for Add to check, or a file to download directly. That file must be
 // something the importer takes, audio or a zip, and the server must say how large it is, so that
@@ -57,7 +63,7 @@ func probe(ctx context.Context, uri string) ([]byte, *direct, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := web.Do(req)
 	if err != nil {
 		return nil, nil, fmt.Errorf("fetching the link: %w", err)
 	}

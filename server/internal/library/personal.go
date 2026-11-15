@@ -200,7 +200,7 @@ func (s *Store) Playlist(ctx context.Context, id int64) (*PlaylistDetail, error)
 		return d, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT pi.id, t.id, t.title, t.artist,
-		coalesce(al.title, ''), coalesce(al.id, 0), coalesce(al.cover_id, 0), t.kind, `+briefCols+`
+		coalesce(al.title, ''), coalesce(al.id, 0), coalesce(al.cover_id, 0), t.kind, t.variant, `+briefCols+`
 		FROM playlist_items pi JOIN tracks t ON t.id = pi.track_id
 		JOIN assets a ON a.id = coalesce(pi.asset_id, (SELECT ta.asset_id FROM track_assets ta JOIN assets x ON x.id = ta.asset_id
 			WHERE ta.track_id = t.id AND x.state = 'verified' ORDER BY ta.asset_id LIMIT 1))
@@ -213,7 +213,7 @@ func (s *Store) Playlist(ctx context.Context, id int64) (*PlaylistDetail, error)
 	for rows.Next() {
 		var it PlaylistItem
 		t := &it.TrackItem
-		if err := rows.Scan(append([]any{&it.ItemID, &t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind}, t.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&it.ItemID, &t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind, &t.Variant}, t.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		d.DurationMS += t.Asset.DurationMS
@@ -486,7 +486,7 @@ func (s *Store) History(ctx context.Context, limit int, before, beforeID int64) 
 		beforeID = 1<<62 - 1
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT p.id, p.started_at, p.updated_at, p.listened_ms, p.counted, p.finished,
-		t.id, t.title, t.artist, coalesce(al.title, ''), coalesce(al.id, 0), coalesce(al.cover_id, 0), t.kind, `+briefCols+`
+		t.id, t.title, t.artist, coalesce(al.title, ''), coalesce(al.id, 0), coalesce(al.cover_id, 0), t.kind, t.variant, `+briefCols+`
 		FROM plays p JOIN tracks t ON t.id = p.track_id JOIN assets a ON a.id = p.asset_id
 		LEFT JOIN albums al ON al.id = coalesce(p.album_id, (SELECT e.album_id FROM album_entries e WHERE e.track_id = t.id ORDER BY e.id LIMIT 1))
 		WHERE (p.updated_at < ?1 OR (p.updated_at = ?1 AND p.id < ?2)) AND (p.listened_ms >= 10000 OR p.finished = 1 OR p.counted = 1)
@@ -500,7 +500,7 @@ func (s *Store) History(ctx context.Context, limit int, before, beforeID int64) 
 		var h HistoryItem
 		t := &h.TrackItem
 		if err := rows.Scan(append([]any{&h.PlayID, &h.StartedAt, &h.UpdatedAt, &h.ListenedMS, &h.Counted, &h.Finished,
-			&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind}, t.Asset.dest()...)...); err != nil {
+			&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind, &t.Variant}, t.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

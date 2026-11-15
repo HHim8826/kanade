@@ -42,6 +42,7 @@ import (
 	"github.com/HHim8826/kanade/server/internal/loudness"
 	"github.com/HHim8826/kanade/server/internal/lrclib"
 	"github.com/HHim8826/kanade/server/internal/mover"
+	"github.com/HHim8826/kanade/server/internal/netguard"
 	"github.com/HHim8826/kanade/server/internal/presence"
 	"github.com/HHim8826/kanade/server/internal/rss"
 	"github.com/HHim8826/kanade/server/internal/settings"
@@ -168,6 +169,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 		fmt.Fprintln(os.Stderr, "logging to", *logPath) // stderr keeps only this and crashes
 	}
 	log := slog.New(slog.NewTextHandler(logOut, nil))
+	if limit := memoryLimit(); limit > 0 {
+		log.Info("memory limit", "MiB", limit>>20)
+	}
 	d, err := db.Open(ctx, cfg.DBPath())
 	if err != nil {
 		return err
@@ -178,6 +182,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	drive := gdrive.New(d, gdrive.RedirectFor(cfg.PublicURL))
 	lib := library.New(d)
 	if err := lib.EnsureSearchIndex(ctx); err != nil {
+		return err
+	}
+	if err := lib.EnsureVariants(ctx); err != nil { // instrumentals and TV sizes, for shuffling (review)
 		return err
 	}
 	if err := lib.BackfillListening(ctx); err != nil { // plays from before the listening spans (review #93)
@@ -252,6 +259,7 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	} else if n > 0 {
 		log.Info("uploads completed after a restart", "count", n)
 	}
+	go db.Maintain(ctx, d, 24*time.Hour, func(err error) { log.Warn("optimizing the database", "err", err) })
 	go func() { // interrupted uploads left for a week give their staging space back (review #6)
 		for {
 			if n, err := ups.Expire(ctx, 7*24*time.Hour); err != nil {
@@ -326,8 +334,12 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	if err != nil {
 		return err
 	}
+	netguard.AllowLocal(dl.LocalLinks)
 	downloads.SetPolicy(ctx, dl)
-	store.OnDownloads = func(p settings.Downloads) { downloads.SetPolicy(context.Background(), p) }
+	store.OnDownloads = func(p settings.Downloads) {
+		netguard.AllowLocal(p.LocalLinks)
+		downloads.SetPolicy(context.Background(), p)
+	}
 	dr, err := store.Drive(ctx)
 	if err != nil {
 		return err

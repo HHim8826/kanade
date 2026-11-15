@@ -547,7 +547,7 @@ func fetchTorrent(ctx context.Context, uri string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := web.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetching the torrent: %w", err)
 	}

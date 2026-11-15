@@ -33,6 +33,9 @@ type Downloads struct {
 	Seed      bool    `json:"seed"`
 	SeedRatio float64 `json:"seed_ratio"`
 	SeedHours int     `json:"seed_hours"`
+	// Links to the local network (private and shared addresses, a NAS) may be fetched: pasted
+	// ones and an RSS feed's. This machine's own addresses never may (review T1).
+	LocalLinks bool `json:"local_links"`
 }
 
 // Drive is how the library keeps up with Drive (P2-6, decision D6).

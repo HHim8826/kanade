@@ -125,6 +125,7 @@ type Entry struct {
 	Artist  string     `json:"artist"`
 	Version string     `json:"version,omitempty"`
 	Kind    string     `json:"kind"`
+	Variant string     `json:"variant,omitempty"` // instrumental | short (Variant)
 	Asset   AssetBrief `json:"asset"`
 	// Works says what the song is to works (review #94).
 	Works []TrackWork `json:"works,omitempty"`
@@ -188,7 +189,7 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 	if d.Sections, err = sectionNames(ctx, s.db, id); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.version, t.kind, `+briefCols+`
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.disc_no, e.track_no, t.id, t.title, t.artist, t.version, t.kind, t.variant, `+briefCols+`
 		FROM album_entries e JOIN tracks t ON t.id = e.track_id JOIN assets a ON a.id = e.asset_id
 		WHERE e.album_id = ? AND a.state = 'verified' ORDER BY e.disc_no, e.track_no, t.title`, id)
 	if err != nil {
@@ -197,7 +198,7 @@ func (s *Store) Album(ctx context.Context, id int64) (*AlbumDetail, error) {
 	defer rows.Close()
 	for rows.Next() {
 		var e Entry
-		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist, &e.Version, &e.Kind}, e.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&e.EntryID, &e.DiscNo, &e.TrackNo, &e.TrackID, &e.Title, &e.Artist, &e.Version, &e.Kind, &e.Variant}, e.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		e.Works = uses[e.TrackID]
@@ -213,13 +214,14 @@ type TrackItem struct {
 	Album   string     `json:"album,omitempty"`
 	AlbumID int64      `json:"album_id,omitempty"`
 	CoverID int64      `json:"cover_id,omitempty"`
-	Kind    string     `json:"kind"`  // music | spoken
-	Asset   AssetBrief `json:"asset"` // the track's first verified file
+	Kind    string     `json:"kind"`              // music | spoken
+	Variant string     `json:"variant,omitempty"` // instrumental | short (Variant)
+	Asset   AssetBrief `json:"asset"`             // the track's first verified file
 }
 
 // trackSQL picks one verified asset per track and the first album it appears on.
 const trackSQL = `SELECT t.id, t.title, t.artist,
-	coalesce(fa.title, ''), coalesce(fa.id, 0), coalesce(fa.cover_id, 0), t.kind,
+	coalesce(fa.title, ''), coalesce(fa.id, 0), coalesce(fa.cover_id, 0), t.kind, t.variant,
 	` + briefCols + `
 	` + trackFrom
 
@@ -242,7 +244,7 @@ func scanTracks(rows *sql.Rows, err error) ([]TrackItem, error) {
 	out := []TrackItem{}
 	for rows.Next() {
 		var t TrackItem
-		if err := rows.Scan(append([]any{&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind}, t.Asset.dest()...)...); err != nil {
+		if err := rows.Scan(append([]any{&t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind, &t.Variant}, t.Asset.dest()...)...); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -406,10 +408,22 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 	default:
 		match, pattern = `text LIKE ? ESCAPE '\'`, "%"+strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)+"%"
 	}
-	// Each kind its own limit: common words do not leave albums and artists out behind songs.
+	// Each kind its own limit: common words do not leave albums and artists out behind songs. The
+	// matches are ranked before the limit (of many, any would come back otherwise): the title or
+	// name that is the words, then one that starts with them, then one that has them, then a match
+	// in the artist or an alias only; within each, songs played more first, then the shorter title.
+	// The title is the text's first line (putIndex).
 	ids := map[string][]any{}
 	for _, kind := range []string{"track", "album", "artist"} {
-		rows, err := s.db.QueryContext(ctx, `SELECT ref_id FROM search_index WHERE `+match+` AND kind = ? LIMIT ?`, pattern, kind, limit)
+		played := ""
+		if kind == "track" {
+			played = `(SELECT count(*) FROM plays p WHERE p.track_id = ref_id) DESC, `
+		}
+		rows, err := s.db.QueryContext(ctx, `SELECT ref_id FROM (
+			SELECT ref_id, substr(text, 1, instr(text || char(10), char(10)) - 1) AS head FROM search_index
+			WHERE `+match+` AND kind = ?)
+			ORDER BY CASE WHEN head = ? THEN 3 WHEN substr(head, 1, length(?)) = ? THEN 2 WHEN instr(head, ?) > 0 THEN 1 ELSE 0 END DESC,
+				`+played+`length(head), ref_id LIMIT ?`, pattern, kind, q, q, q, q, limit)
 		if err != nil {
 			return nil, err
 		}
@@ -429,18 +443,20 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 	var err error
 	in := func(n int) string { return strings.TrimSuffix(strings.Repeat("?,", n), ",") }
 	if v := ids["track"]; len(v) > 0 {
-		if res.Tracks, err = scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id IN (`+in(len(v))+`) ORDER BY t.title`, v...)); err != nil {
+		if res.Tracks, err = scanTracks(s.db.QueryContext(ctx, trackSQL+` WHERE t.id IN (`+in(len(v))+`)`, v...)); err != nil {
 			return nil, err
 		}
+		inOrder(res.Tracks, v, func(t TrackItem) int64 { return t.ID })
 	}
 	if v := ids["album"]; len(v) > 0 {
-		if res.Albums, err = scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id IN (`+in(len(v))+`) GROUP BY al.id `+listed+` ORDER BY al.title`, v...)); err != nil {
+		if res.Albums, err = scanAlbums(s.db.QueryContext(ctx, albumSummarySQL+` WHERE al.id IN (`+in(len(v))+`) GROUP BY al.id `+listed, v...)); err != nil {
 			return nil, err
 		}
+		inOrder(res.Albums, v, func(a AlbumSummary) int64 { return a.ID })
 	}
 	if v := ids["artist"]; len(v) > 0 {
 		rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, count(ta.track_id) FROM artists ar
-			JOIN track_artists ta ON ta.artist_id = ar.id WHERE ar.id IN (`+in(len(v))+`) GROUP BY ar.id ORDER BY ar.name`, v...)
+			JOIN track_artists ta ON ta.artist_id = ar.id WHERE ar.id IN (`+in(len(v))+`) GROUP BY ar.id`, v...)
 		if err != nil {
 			return nil, err
 		}
@@ -453,10 +469,20 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 			res.Artists = append(res.Artists, a)
 		}
 	}
+	inOrder(res.Artists, ids["artist"], func(a Artist) int64 { return a.ID })
 	if res.Works, err = s.searchWorks(ctx, raw, limit); err != nil {
 		return nil, err
 	}
 	return res, nil
+}
+
+// inOrder puts items in the order of ids, the order their matches were ranked in.
+func inOrder[T any](items []T, ids []any, id func(T) int64) {
+	at := make(map[int64]int, len(ids))
+	for i, v := range ids {
+		at[v.(int64)] = i
+	}
+	sort.SliceStable(items, func(a, b int) bool { return at[id(items[a])] < at[id(items[b])] })
 }
 
 // StreamTarget resolves an asset for playback.
@@ -514,12 +540,13 @@ func (s *Store) TrackBySameAudio(ctx context.Context, audioMD5 string) (string, 
 // RandomTracks picks up to n songs at random from the whole library (reviews #72, #73): each song
 // as likely as any other, whatever album or how many versions it has; only songs with a playable
 // file; of kind (music or spoken, "" both); leaving out not (the songs just played) unless that
-// leaves nothing to play.
-func (s *Store) RandomTracks(ctx context.Context, n int, kind string, not []int64) ([]TrackItem, error) {
+// leaves nothing to play. Plain leaves out instrumentals and shortened versions (Variant) as well,
+// unless they are all there is.
+func (s *Store) RandomTracks(ctx context.Context, n int, kind string, plain bool, not []int64) ([]TrackItem, error) {
 	// pick picks songs at random, leaving out those of not, or only among those of only.
 	pick := func(not, only []int64) ([]any, error) {
-		args := []any{kind, kind}
-		q := `SELECT t.id FROM tracks t WHERE (? = '' OR t.kind = ?) AND EXISTS (SELECT 1 FROM track_assets ta
+		args := []any{kind, kind, plain}
+		q := `SELECT t.id FROM tracks t WHERE (? = '' OR t.kind = ?) AND (NOT ? OR t.variant = '') AND EXISTS (SELECT 1 FROM track_assets ta
 			JOIN assets a ON a.id = ta.asset_id WHERE ta.track_id = t.id AND a.state = 'verified')`
 		for _, set := range []struct {
 			op  string
@@ -558,6 +585,9 @@ func (s *Store) RandomTracks(ctx context.Context, n int, kind string, not []int6
 			}
 			ids = ids[:min(len(ids), n)]
 		}
+	}
+	if err == nil && len(ids) == 0 && plain {
+		return s.RandomTracks(ctx, n, kind, false, not)
 	}
 	if err != nil || len(ids) == 0 {
 		return []TrackItem{}, err

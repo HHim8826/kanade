@@ -206,7 +206,7 @@ function DownloadSettings({ conf }) {
     n('max_peers') <= 500 && n('seed_ratio') >= 0 && n('seed_hours') >= 0;
   const save = () => saveSection(conf, '/settings/downloads', {
     down_kib: n('down_kib'), up_kib: n('up_kib'), concurrent: n('concurrent'), max_peers: n('max_peers'),
-    seed: v.seed, seed_ratio: n('seed_ratio'), seed_hours: n('seed_hours'),
+    seed: v.seed, seed_ratio: n('seed_ratio'), seed_hours: n('seed_hours'), local_links: !!v.local_links,
   }, '已儲存下載設定');
   const forever = v.seed && !n('seed_ratio') && !n('seed_hours');
   return html`<h2 class="section-title">下載</h2>
@@ -229,6 +229,8 @@ function DownloadSettings({ conf }) {
       <p class="hint">${forever ? '分享率與時間都不限：會一直做種，直到在任務頁按「停止做種」。'
         : v.seed ? '分享率或時間先達到的就停止。' : '下載完成、交給匯入後就停止，不做種。'}
         速度與連線數立即套用到進行中的下載；同時下載數與做種條件在 2 秒內套用到所有下載。重新啟動服務後，做種中的下載會繼續做種。</p>
+      <${Toggle} label="允許從區網下載" sub="貼上的連結與 RSS 可以連到私人網段（例如家裡的 NAS）。這台機器自己的位址與雲端的中繼資料位址一律不會連。"
+        checked=${!!v.local_links} onChange=${(on) => set({ local_links: on })} />
       <div class="actions"><button class="btn filled" disabled=${!changed || !ok} onClick=${save}>儲存</button></div>
     </div>`;
 }
@@ -304,6 +306,7 @@ function PlaybackSettings() {
   // One value each: a fresh object would re-render this four times a second while a song plays.
   const s = {
     mode: useStore(player, (p) => p.mode), scope: useStore(player, (p) => p.scope), autoContinue: useStore(player, (p) => p.autoContinue),
+    plain: useStore(player, (p) => p.plain),
     preload: useStore(player, (p) => p.preload), gapless: useStore(player, (p) => p.gapless), resume: useStore(player, (p) => p.resume),
     lite: useStore(player, (p) => p.lite), liteServer: useStore(player, (p) => p.liteServer),
   };
@@ -322,6 +325,8 @@ function PlaybackSettings() {
       ${choices('播放模式（與播放列的按鈕相同）', [['order', '順序播放'], ['all', '列表循環'], ['one', '單曲循環'], ['shuffle', '隨機播放']], s.mode, setMode)}
       ${choices('隨機播放的範圍', [['queue', '目前的佇列'], ['library', '全曲庫']], s.scope, (k) => setPrefs({ scope: k }))}
       <p class="hint tight">「全曲庫」時，隨機播放會從整個曲庫挑歌（每首歌機會相同，不限專輯；音樂與廣播劇分開），一直接著播。首頁與曲庫的「全曲庫隨機播放」不論模式都這樣播。</p>
+      <${Toggle} label="隨機播放時略過伴奏與短版" sub="標題或版本說明寫著 Instrumental、Off Vocal、カラオケ、TV size、Short ver. 這類的歌不會被抽到；整個佇列都是這種歌時照常播放。從下一次隨機播放開始生效。"
+        checked=${s.plain} onChange=${(on) => setPrefs({ plain: on })} />
       <${Toggle} label="播完後自動接續" sub="佇列（專輯、歌單）播完後，從曲庫隨機挑歌接著播；自己加入的歌先播。單曲循環與列表循環時照常循環；隨機播放目前佇列時，播完一輪改為接續。"
         checked=${s.autoContinue} onChange=${(on) => setPrefs({ autoContinue: on })} />
       ${choices('音樂：點一首歌時', [['start', '從頭播放'], ['resume', '從上次停下的地方']], s.resume.music, (k) => resume('music', k))}
