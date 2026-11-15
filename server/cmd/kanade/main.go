@@ -279,8 +279,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	budget := &staging.Budget{Limit: *stagingMiB << 20, Reserve: *reserveGiB << 30, Dir: cfg.DataDir, Free: downloader.FreeSpace}
 	loud.Budget = budget
 	files.Reserve = func() int64 { _, reserve := budget.Limits(); return reserve }
-	// A copy of the database in Drive every day, the 14 latest kept (review #161).
-	backups := &backup.Service{DB: d, Drive: drive, Dir: cfg.Path(config.DirStaging, "backup"), Budget: budget, Keep: 14,
+	// A copy of the database every day, in Drive or a managed storage location, the 14 latest kept
+	// (review #161).
+	backups := &backup.Service{DB: d, Drive: drive, Places: files, Dir: cfg.Path(config.DirStaging, "backup"), Budget: budget, Keep: 14,
 		Every: 24 * time.Hour, Log: log}
 	downloads.ShareBudget(budget)
 	ups.ShareBudget(budget)

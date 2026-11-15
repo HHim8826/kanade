@@ -3,6 +3,8 @@ package backup
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/HHim8826/kanade/server/internal/db"
 	"github.com/HHim8826/kanade/server/internal/gdrive"
+	"github.com/HHim8826/kanade/server/internal/storage"
 )
 
 type fakeDrive struct {
@@ -220,5 +223,79 @@ func TestStartIsRunningAtOnce(t *testing.T) {
 	}
 	if st := s.State(ctx); st.Running || st.Last == 0 || st.Error != "" {
 		t.Fatalf("after %+v", st)
+	}
+}
+
+// Copies can go to a managed storage location instead (a library kept elsewhere had none off the
+// server): its backups folder, the 14 latest kept and older ones in its trash; a source or a
+// location that is not there is no place for them.
+func TestCopiesInAStorageLocation(t *testing.T) {
+	ctx := context.Background()
+	s, fd, _ := setup(t)
+	set := &storage.Set{DB: s.DB, DataDir: t.TempDir()}
+	s.Places = set
+	root, src := t.TempDir(), t.TempDir()
+	add := func(root, mode string) *storage.Store {
+		cfg, _ := json.Marshal(map[string]string{"root": root})
+		st, err := set.Add(ctx, storage.NewStore{Kind: storage.KindLocal, Name: "NAS " + mode, Mode: mode, Config: cfg})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	nas, source := add(root, storage.Managed), add(src, storage.Source)
+	for _, id := range []string{fmt.Sprint(source.ID), "99", "x"} {
+		if err := s.SetPlace(ctx, id); !errors.Is(err, ErrNoPlace) {
+			t.Fatalf("place %s: %v", id, err)
+		}
+	}
+	if err := s.SetPlace(ctx, fmt.Sprint(nas.ID)); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(root, Folder), 0o700)
+	var before []stored
+	for i := range 15 {
+		name := fmt.Sprintf("kanade-db-202501%02d-000000.sqlite", i+1)
+		os.WriteFile(filepath.Join(root, Folder, name), []byte("old"), 0o600)
+		before = append(before, stored{Place: fmt.Sprint(nas.ID), Ref: storage.Ref(storage.KindLocal, nas.ID, Folder+"/"+name), Name: name})
+	}
+	before = append(before, stored{Place: "7", Ref: "local:7:backups/elsewhere.sqlite", Name: "kanade-db-20240101-000000.sqlite"})
+	if err := s.saveCopies(ctx, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Now(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := s.State(ctx)
+	if st.Error != "" || st.Kept != 14 || st.Place != fmt.Sprint(nas.ID) || st.Where != "NAS managed" {
+		t.Fatalf("state %+v", st)
+	}
+	if len(fd.files) != 0 {
+		t.Fatal("a copy went to Drive")
+	}
+	names, _ := os.ReadDir(filepath.Join(root, Folder))
+	if len(names) != 14 {
+		t.Fatalf("%d copies in the folder", len(names))
+	}
+	for _, n := range names {
+		if n.Name() < "kanade-db-20250103" {
+			t.Fatalf("%s kept, an older one", n.Name())
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(root, Folder, st.Name))
+	if err != nil || len(b) < 4096 {
+		t.Fatalf("the copy: %d bytes, %v", len(b), err)
+	}
+	list, _ := s.copies(ctx)
+	if len(list) != 15 { // 14 here, and the one elsewhere
+		t.Fatalf("%d copies written down", len(list))
+	}
+	// Removed, the location is said to be gone.
+	set.Remove(ctx, nas.ID)
+	if err := s.Now(ctx); err == nil || s.State(ctx).Reason != "no_place" {
+		t.Fatalf("removed: %v %+v", err, s.State(ctx))
+	}
+	if err := s.SetPlace(ctx, storage.DriveID); err != nil || s.Now(ctx) != nil || len(fd.files) != 1 {
+		t.Fatalf("back to Drive: %v, %d files", err, len(fd.files))
 	}
 }

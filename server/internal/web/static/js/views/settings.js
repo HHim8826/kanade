@@ -10,6 +10,7 @@ import { DiscordSettings } from './discord.js';
 import { DevicesSettings } from './remote.js';
 import { BangumiAccount } from './bangumi.js';
 import { StorageLocations } from './storage.js';
+import { loadPlaces, places } from '../places.js';
 import { href } from '../router.js';
 import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName } from '../site.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
@@ -50,10 +51,22 @@ function useSection(path, first) {
   return { ...s, reload };
 }
 
-// Backups: a copy of the database in Drive every day (review #161).
+// Backups: a copy of the database every day, in Google Drive or a managed storage location
+// (review #161).
 function Backups() {
   const data = useSection('/backup');
   const b = data.data && data.data.state;
+  const where = useStore(places);
+  useEffect(() => { if (!where.loaded) loadPlaces(); }, []);
+  const managed = where.stores.filter((st) => st.mode === 'managed');
+  const choose = async (place) => {
+    try {
+      data.reload(await api('PUT', '/backup/place', { place }));
+      toast('之後的備份會存到這裡；已有的備份留在原處');
+    } catch (e) {
+      toast(e.message, 'error');
+    }
+  };
   useEffect(() => { // a copy being made: follow it
     if (!b || !b.running) return;
     const t = setTimeout(data.reload, 2000);
@@ -73,15 +86,27 @@ function Backups() {
   const busy = starting || (b && b.running);
   const why = b && b.error && ({
     not_connected: '沒有連線 Google Drive。', auth_expired: 'Google Drive 的授權已過期，請重新連線。', room: '暫存空間不夠放複本。',
+    no_place: '備份的位置已經移除，請另選一個。', offline: '備份的位置目前連不上。', store_auth: '備份的位置拒絕了它的金鑰或登入。',
+    store_room: '備份的位置空間不夠。',
   }[b.reason] || b.error);
+  const drive = !b || b.place === 'drive';
+  const at = drive ? ' Google Drive 的「Kanade/backups」' : `「${b.where || '已移除的位置'}」的 backups 資料夾`;
   return html`<h2 class="section-title">資料庫備份</h2>
     <div class="card pad">
       ${!data.data && data.loading && html`<${Spinner} />`}
       <${ErrorBox} error=${data.error} onRetry=${data.reload} />
-      <div class="sub">專輯分組、修改紀錄、歌單、收藏、書籤、聆聽記錄和 Drive 授權都在資料庫裡，Drive 上只有音檔。每天自動備份一份到 Google Drive 的「Kanade/backups」，保留最近 ${b ? b.keep : 14} 份，較舊的移到 Drive 垃圾桶。備份含 Google 授權與密碼雜湊。</div>
-      ${b && html`<div class="sub">上次備份：${b.last ? `${when(b.last)}（${b.name}）` : '還沒有'}${b.kept > 0 ? `；Drive 上有 ${b.kept} 份` : ''}</div>`}
+      <div class="sub">專輯分組、修改紀錄、歌單、收藏、書籤、聆聽記錄和各種授權都在資料庫裡，儲存位置上只有音檔。每天自動備份一份到${at}，保留最近 ${b ? b.keep : 14} 份，較舊的移到那裡的垃圾桶。備份含 Google 與其他位置的授權、金鑰和密碼雜湊：請存在只有自己能讀的地方。</div>
+      ${b && (managed.length > 0 || !drive) && html`<label class="field">備份存到
+        <select value=${b.place} onChange=${(e) => choose(e.target.value)}>
+          <option value="drive">Google Drive</option>
+          ${managed.map((st) => html`<option value=${String(st.id)}>${st.name}</option>`)}
+          ${!drive && !managed.some((st) => String(st.id) === b.place) && html`<option value=${b.place}>（已移除的位置）</option>`}
+        </select>
+        <span class="hint tight">放在和音樂不同的地方，其中一個帳號出事時另一邊還在。</span>
+      </label>`}
+      ${b && html`<div class="sub">上次備份：${b.last ? `${when(b.last)}（${b.name}）` : '還沒有'}${b.kept > 0 ? `；那裡有 ${b.kept} 份` : ''}</div>`}
       ${why && html`<div class="task-error">上次備份失敗${b.error_at ? `（${when(b.error_at)}）` : ''}：${why}</div>`}
-      <div class="sub">還原：從 Drive 下載備份檔，放進伺服器資料目錄的 backups/ 資料夾，再執行 <code>sudo kanade-manager restore</code>。</div>
+      <div class="sub">還原：從${drive ? ' Drive ' : '備份的位置'}下載備份檔，放進伺服器資料目錄的 backups/ 資料夾，再執行 <code>sudo kanade-manager restore</code>。</div>
       <div class="actions"><button class="btn tonal" disabled=${!b || busy} onClick=${now}><${Icon} name="backup" />${busy ? '備份中…' : '立即備份'}</button></div>
     </div>`;
 }
@@ -811,10 +836,10 @@ function SettingsPage({ first, onLogout, section }) {
     <${Group} id="storage">
       <h2 class="section-title">儲存位置</h2>
       <${StorageLocations} first=${first.storage} />
-      <h2 class="section-title">Google Drive</h2>
+      <h2 class="section-title" id="drive-settings">Google Drive</h2>
       <${Drive} drive=${drive} />
       ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
-      ${d && d.status.connected && html`<${Backups} />`}
+      <${Backups} />
     <//>
     <${Group} id="playback">
       <${PlaybackSettings} />

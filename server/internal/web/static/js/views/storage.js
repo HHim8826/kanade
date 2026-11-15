@@ -1,4 +1,4 @@
-// Storage locations (#95, #99, #100): where imported music is kept besides Google Drive, and
+// Storage locations (#95, #99, #100): where imported music is kept, Google Drive among them, and
 // collections already somewhere (a NAS, a OneDrive) imported where they are.
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
@@ -173,6 +173,38 @@ function StoreRow({ st, isDefault, onChange }) {
   </div>`;
 }
 
+// DriveRow is Google Drive in the list of locations, a managed one like the others: its
+// connection, sign-in and inbox are set up in the Google Drive section below.
+function DriveRow({ drive, isDefault, managed, onChange }) {
+  const [busy, run] = useRunner();
+  const [open, setOpen] = useState(false);
+  const songs = drive.songs || 0, others = drive.others || 0;
+  const makeDefault = () => run(async () => {
+    await api('PUT', '/storage/default', { id: 'drive' });
+    toast('新匯入的音樂會存到 Google Drive');
+    onChange();
+  });
+  const toSettings = () => document.getElementById('drive-settings')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  return html`<div class=${'card pad store-row' + (open ? ' open' : '')}>
+    <button class="store-head plain" aria-expanded=${open} onClick=${() => setOpen(!open)}>
+      <${Icon} name="cloud" />
+      <span class="grow"><span class="title">Google Drive</span>
+        <span class="sub"><span class=${drive.connected ? '' : 'state-failed'}>${drive.connected ? '已連線' : '尚未連線'}</span> · 存放位置${isDefault ? ' · 新匯入存在這裡' : ''} · ${songs} 首</span></span>
+      <span class=${'chev' + (open ? ' open' : '')}><${Icon} name="expand" /></span>
+    </button>
+    ${open && html`<div class="store-lines">
+      <span class="sub">Google Drive · 存放位置 · 「Kanade」資料夾</span>
+      <span class="sub">曲庫有 ${songs} 首歌${others ? `和 ${others} 個封面、附屬檔或內頁圖` : ''}在這裡。</span>
+      ${!drive.connected && html`<span class="sub state-failed">還沒連線：在下面的「Google Drive」連線。</span>`}
+    </div>
+    <div class="actions">
+      ${!isDefault && html`<button class="btn text" disabled=${busy || !drive.connected} onClick=${makeDefault}>設為新匯入的位置</button>`}
+      ${songs + others > 0 && managed.length > 0 && html`<button class="btn text" onClick=${() => moveFiles({ origin: 'drive', title: 'Google Drive', onDone: onChange })}>搬移到…</button>`}
+      <button class="btn text" onClick=${toSettings}>連線與同步設定</button>
+    </div>`}
+  </div>`;
+}
+
 // StorageLocations is the settings section: where new imports go, the locations, and adding one.
 // first is the page's first read of it: the section is there with the rest of the page, not put
 // above it once it answers (review #218).
@@ -221,9 +253,8 @@ export function StorageLocations({ first }) {
         ? '還沒連線 Google Drive：匯入會失敗。請連線 Google Drive，或新增一個存放位置並選它。'
         : '這個位置目前無法使用：匯入會失敗，直到它恢復。'}${v.stores.some((s) => s.mode === 'source')
         ? '只讀來源的歌仍可原位匯入，但需要轉檔或分軌的檔案會匯入失敗（之後可以在任務重試），只內嵌在音檔裡的封面也不會保存。' : ''}</div>`}
-      <div class="store-drive"><span class="sub grow">Google Drive 有曲庫的 ${drive.songs || 0} 首歌${drive.others ? `和 ${drive.others} 個封面、附屬檔或內頁圖` : ''}。</span>
-        ${(drive.songs || 0) + (drive.others || 0) > 0 && managed.length > 0 && html`<button class="btn text" onClick=${() => moveFiles({ origin: 'drive', title: 'Google Drive', onDone: load })}>搬移到…</button>`}</div>
     </div>
+    <${DriveRow} drive=${drive} isDefault=${v.default === 'drive'} managed=${managed} onChange=${load} />
     ${v.stores.map((st) => html`<${StoreRow} key=${st.id} st=${st} isDefault=${String(st.id) === v.default} onChange=${load} />`)}
     <div class="actions"><button class="btn tonal" onClick=${add}><${Icon} name="add" />新增儲存位置</button></div>`;
 }

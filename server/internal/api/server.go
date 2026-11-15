@@ -295,6 +295,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/loudness/scan", s.authed(s.runLoudnessScan))
 	mux.Handle("GET /api/v1/backup", s.authed(s.backupState))
 	mux.Handle("POST /api/v1/backup", s.authed(s.backupNow))
+	mux.Handle("PUT /api/v1/backup/place", s.authed(s.setBackupPlace))
 	mux.Handle("GET /api/v1/tracks/{id}/lyrics/online", s.authed(s.findLyrics))
 	mux.Handle("POST /api/v1/tracks/{id}/lyrics/online", s.authed(s.useFoundLyrics))
 	mux.Handle("GET /api/v1/history", s.authed(s.history))
