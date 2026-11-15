@@ -234,9 +234,10 @@ export function Library({ tab = 'albums', filter = '' }) {
     ${gone ? html`<${Empty} icon="album">這個儲存位置已經移除了。<//>`
       : data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} empty=${filter ? '這裡沒有專輯。' : undefined} />`}
+    ${tab === 'artists' && html`<${SplitCard} rev=${rev} />`}
     ${list && tab === 'artists' && html`<ul class="list">
       ${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
-        <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
+        <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}${a.kind === 'character' && html`<span class="sub"> · 角色</span>`}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
     </ul>`}
     ${list && tab === 'tracks' && (list.length
       ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum sel=${sel} />`
@@ -370,25 +371,58 @@ function AlbumFavorite({ id }) {
     className=${on ? 'fav-on' : ''} onClick=${() => toggleFav('album', id)} />`;
 }
 
+// The other roles an artist is credited in, as its page heads them (D13).
+const roleTitles = { voice: '配音演唱', composer: '作曲', lyricist: '作詞', arranger: '編曲' };
+
+// PeopleLine links the artists paired with this one: who voiced a character, the characters one voiced.
+function PeopleLine({ label, list }) {
+  if (!list || !list.length) return null;
+  return html`<div class="sub alias-line">${label}：${list.map((p, i) => html`${i ? '、' : ''}<a class="link"
+    href=${href(`artist/${p.id}?name=${encodeURIComponent(p.name)}`)}>${p.name}</a>`)}</div>`;
+}
+
 export function Artist({ id, name }) {
   const rev = useLibRev();
   const artist = useLoad(() => get('/artists/' + id), [id], rev);
   const a = artist.data;
+  const sung = a ? a.items.map(fromTrack) : [];
+  // A voice's songs say which character it sang as.
+  const roles = a ? (a.roles || []).map((r) => ({ ...r, items: r.items.map((t) => ({ ...fromTrack(t), key: r.role + t.id,
+    tags: t.as ? [{ label: t.as, title: '飾演的角色' }] : undefined })) })) : [];
+  const every = [...sung, ...roles.flatMap((r) => r.items)].filter((t, i, all) => all.findIndex((x) => x.trackId === t.trackId) === i);
   return html`<section>
     <div class="page-head">
       <div class="grow">
+        ${a && a.kind === 'character' && html`<div class="overline">角色</div>`}
         <h1 class="page-title">${a ? a.name : name || '歌手'}</h1>
         ${a && a.aliases.length > 0 && html`<div class="sub alias-line">別名：${a.aliases.join('、')}</div>`}
+        ${a && html`<${PeopleLine} label="聲優" list=${a.voices} /><${PeopleLine} label="飾演" list=${a.characters} />`}
       </div>
       ${a && html`<${IconButton} icon="more" label="更多" onClick=${(e) => openMenu(e, [
-        a.items.length && { icon: 'play', label: '全部播放', onClick: () => playQueue(a.items.map(fromTrack), 0) },
+        every.length && { icon: 'play', label: '全部播放', onClick: () => playQueue(every, 0) },
         { icon: 'edit', label: '改名…', onClick: () => renameArtist(a) },
         { icon: 'note', label: '編輯別名…', onClick: () => editArtistAliases(a) },
       ])} />`}
     </div>
     ${artist.loading && !a ? html`<${Spinner} />` : html`<${ErrorBox} error=${artist.error} onRetry=${artist.reload} />`}
-    ${a && (a.items.length ? html`<${TrackList} items=${a.items.map(fromTrack)} showAlbum />` : html`<${Empty} icon="person">這位歌手已經沒有歌曲。<//>`)}
+    ${a && !every.length && html`<${Empty} icon="person">這位歌手已經沒有歌曲。<//>`}
+    ${sung.length > 0 && html`${roles.length > 0 && html`<h2 class="section-title">演唱</h2>`}<${TrackList} items=${sung} showAlbum />`}
+    ${roles.map((r) => html`<div key=${r.role}><h2 class="section-title">${roleTitles[r.role] || r.role}</h2>
+      <${TrackList} items=${r.items} showAlbum /></div>`)}
   </section>`;
+}
+
+// SplitCard asks about the names that look like several artists, on the artists tab (D13).
+function SplitCard({ rev }) {
+  const splits = useLoad(() => get('/artists/splits'), [], rev);
+  const list = splits.data ? splits.data.proposals : [];
+  if (!list.length) return null;
+  return html`<div class="card summary-card">
+    <${Icon} name="person" />
+    <span class="grow track-text"><span class="title">${list.length} 個歌手名稱看起來是幾位歌手</span>
+      <span class="sub">${list.slice(0, 3).map((x) => x.name).join('、')}${list.length > 3 ? ' 等' : ''}</span></span>
+    <a class="btn tonal" href=${href('splits')}>逐一確認…</a>
+  </div>`;
 }
 
 // Search keeps its words in the address (#/search?q=…), so coming back from a result finds them

@@ -20,7 +20,7 @@ import { Me } from './views/me.js';
 import { Login } from './views/login.js';
 import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
-import { Edits, Missing } from './views/organize.js';
+import { Edits, Missing, Splits } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
 import { RemoteNowPlaying } from './views/remote.js';
 import { Settings } from './views/settings.js';
@@ -49,6 +49,7 @@ function Page({ route, onLogout }) {
     case 'playlist': return html`<${Playlist} id=${arg} />`;
     case 'me': return html`<${Me} tab=${arg || 'playlists'} />`;
     case 'edits': return html`<${Edits} />`;
+    case 'splits': return html`<${Splits} />`;
     case 'missing': return html`<${Missing} />`;
     case 'tasks': return html`<${Tasks} />`;
     case 'upload': return html`<${Upload} />`;
@@ -91,7 +92,7 @@ function App() {
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'category', 'work'].includes(section))
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'splits', 'category', 'work'].includes(section))
     || (key === 'me' && section === 'playlist') || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section));
   // The page scrolls on its own above the player bar and the navigation, which keep their room
   // (review #48).

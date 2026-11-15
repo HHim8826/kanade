@@ -148,7 +148,7 @@ func fold(s string, strip bool) string {
 
 // indexVersion changes whenever Normalize or the index's layout does; EnsureSearchIndex then
 // rebuilds the index.
-const indexVersion = "4"
+const indexVersion = "5" // 5: a track's composer, lyricist and arranger (D13)
 
 // indexRow is where an object's row is in the search index (review #163): its rowid, so it is found
 // by the table's own key, not by a scan of its unindexed columns.
@@ -235,6 +235,8 @@ type EntryInput struct {
 	TrackNo     int
 	CoverID     int64  // 0 when none
 	Kind        string // music | spoken; empty means music
+	// Who wrote it, as the tags say (D13).
+	Composer, Lyricist, Arranger string
 
 	// Set by a planned import (P2-3).
 	Tagged    *Tagged // what the file's tags said: the entry's identity, whatever the preview changed
@@ -278,8 +280,9 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 		if kind == "" {
 			kind = "music"
 		}
-		r, err := tx.ExecContext(ctx, `INSERT INTO tracks (title, artist, kind, variant, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)`,
-			in.Title, in.Artist, kind, Variant(in.Title, ""), now, now)
+		r, err := tx.ExecContext(ctx, `INSERT INTO tracks (title, artist, composer, lyricist, arranger, kind, variant, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			in.Title, in.Artist, in.Composer, in.Lyricist, in.Arranger, kind, Variant(in.Title, ""), now, now)
 		if err != nil {
 			return res, err
 		}
@@ -288,16 +291,10 @@ func (s *Store) Publish(ctx context.Context, assetID int64, in EntryInput) (Publ
 		if _, err := tx.ExecContext(ctx, `INSERT INTO track_assets (track_id, asset_id) VALUES (?, ?)`, res.TrackID, assetID); err != nil {
 			return res, err
 		}
-		if in.Artist != "" {
-			artistID, err := upsertArtist(ctx, tx, in.Artist)
-			if err != nil {
-				return res, err
-			}
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO track_artists (track_id, artist_id) VALUES (?, ?)`, res.TrackID, artistID); err != nil {
-				return res, err
-			}
+		if err := credit(ctx, tx, res.TrackID); err != nil {
+			return res, err
 		}
-		if err := index(ctx, tx, "track", res.TrackID, in.Title, in.Artist); err != nil {
+		if err := index(ctx, tx, "track", res.TrackID, in.Title, in.Artist, in.Composer, in.Lyricist, in.Arranger); err != nil {
 			return res, err
 		}
 	case err != nil:

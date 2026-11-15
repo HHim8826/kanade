@@ -217,6 +217,7 @@ type TrackItem struct {
 	Kind    string     `json:"kind"`              // music | spoken
 	Variant string     `json:"variant,omitempty"` // instrumental | short (Variant)
 	Asset   AssetBrief `json:"asset"`             // the track's first verified file
+	As      string     `json:"as,omitempty"`      // on an artist's page: the character it voiced in this song
 }
 
 // trackSQL picks one verified asset per track and the first album it appears on.
@@ -276,12 +277,14 @@ func (s *Store) Tracks(ctx context.Context, limit, offset int, filter string) ([
 type Artist struct {
 	ID     int64  `json:"id"`
 	Name   string `json:"name"`
+	Kind   string `json:"kind,omitempty"` // person | character, when known (D13)
 	Tracks int    `json:"tracks"`
 }
 
+// Artists are those who sang (or voiced the characters who sang) songs of the library (D13).
 func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, count(ta.track_id) FROM artists ar
-		JOIN track_artists ta ON ta.artist_id = ar.id GROUP BY ar.id ORDER BY ar.name, ar.id LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, ar.kind, count(DISTINCT c.track_id) FROM artists ar
+		JOIN credits c ON c.artist_id = ar.id AND c.role IN ('artist', 'voice') GROUP BY ar.id ORDER BY ar.name, ar.id LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +292,7 @@ func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error
 	out := []Artist{}
 	for rows.Next() {
 		var a Artist
-		if err := rows.Scan(&a.ID, &a.Name, &a.Tracks); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Kind, &a.Tracks); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -300,13 +303,25 @@ func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error
 type ArtistDetail struct {
 	Artist
 	Aliases []string    `json:"aliases"`
-	Items   []TrackItem `json:"items"`
+	Items   []TrackItem `json:"items"` // the songs it sang, as credited
+	// The songs it is credited otherwise (D13): the characters it voiced (each song's As says which),
+	// what it composed, wrote the words of and arranged; the roles it has none in are left out.
+	Roles []RoleItems `json:"roles"`
+	// For a character, who voiced it; for one who voices, the characters.
+	Voices     []Artist `json:"voices,omitempty"`
+	Characters []Artist `json:"characters,omitempty"`
+}
+
+// RoleItems are the songs an artist is credited in one role.
+type RoleItems struct {
+	Role  string      `json:"role"`
+	Items []TrackItem `json:"items"`
 }
 
 // ArtistDetail is an artist with its other names and songs; nil when there is no such artist.
 func (s *Store) ArtistDetail(ctx context.Context, id int64) (*ArtistDetail, error) {
-	d := &ArtistDetail{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, name FROM artists WHERE id = ?`, id).Scan(&d.ID, &d.Name)
+	d := &ArtistDetail{Roles: []RoleItems{}}
+	err := s.db.QueryRowContext(ctx, `SELECT id, name, kind FROM artists WHERE id = ?`, id).Scan(&d.ID, &d.Name, &d.Kind)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -316,9 +331,61 @@ func (s *Store) ArtistDetail(ctx context.Context, id int64) (*ArtistDetail, erro
 	if d.Aliases, err = aliasNames(ctx, s.db, "artist", id); err != nil {
 		return nil, err
 	}
-	d.Items, err = scanTracks(s.db.QueryContext(ctx, trackSQL+` JOIN track_artists ta2 ON ta2.track_id = t.id
-		WHERE ta2.artist_id = ? ORDER BY t.title`, id))
+	songs := func(role string) ([]TrackItem, error) {
+		rows, err := s.db.QueryContext(ctx, `SELECT c.credited_as, `+strings.TrimPrefix(trackSQL, "SELECT ")+`
+			JOIN credits c ON c.track_id = t.id WHERE c.artist_id = ? AND c.role = ? ORDER BY t.title, t.id`, id, role)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		out := []TrackItem{}
+		for rows.Next() {
+			var t TrackItem
+			if err := rows.Scan(append([]any{&t.As, &t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind, &t.Variant},
+				t.Asset.dest()...)...); err != nil {
+				return nil, err
+			}
+			out = append(out, t)
+		}
+		return out, rows.Err()
+	}
+	if d.Items, err = songs(RoleArtist); err != nil {
+		return nil, err
+	}
+	for _, role := range []string{RoleVoice, RoleComposer, RoleLyricist, RoleArranger} {
+		items, err := songs(role)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) > 0 {
+			d.Roles = append(d.Roles, RoleItems{role, items})
+		}
+	}
 	d.Tracks = len(d.Items)
+	// A character and its voice are credited at the same position of a song.
+	pair := func(mine, theirs string) ([]Artist, error) {
+		rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, ar.kind, count(DISTINCT o.track_id) FROM credits c
+			JOIN credits o ON o.track_id = c.track_id AND o.position = c.position AND o.role = ?
+			JOIN artists ar ON ar.id = o.artist_id WHERE c.artist_id = ? AND c.role = ? GROUP BY ar.id ORDER BY count(*) DESC, ar.name`,
+			theirs, id, mine)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []Artist
+		for rows.Next() {
+			var a Artist
+			if err := rows.Scan(&a.ID, &a.Name, &a.Kind, &a.Tracks); err != nil {
+				return nil, err
+			}
+			out = append(out, a)
+		}
+		return out, rows.Err()
+	}
+	if d.Voices, err = pair(RoleArtist, RoleVoice); err != nil {
+		return nil, err
+	}
+	d.Characters, err = pair(RoleVoice, RoleArtist)
 	return d, err
 }
 
@@ -344,6 +411,10 @@ type TrackDetail struct {
 	TrackItem
 	Version     string       `json:"version"`
 	MBRecording string       `json:"mb_recording,omitempty"`
+	Composer    string       `json:"composer"` // the names as written (D13)
+	Lyricist    string       `json:"lyricist"`
+	Arranger    string       `json:"arranger"`
+	Credits     []Credit     `json:"credits"` // each name an artist of its own
 	Aliases     []string     `json:"aliases"`
 	Entries     []TrackEntry `json:"entries"`           // every album the track is on
 	Missing     bool         `json:"missing,omitempty"` // its file is gone from where it was
@@ -357,12 +428,15 @@ func (s *Store) Track(ctx context.Context, id int64) (*TrackDetail, error) {
 		return nil, err
 	}
 	d := &TrackDetail{TrackItem: items[0], Entries: []TrackEntry{}}
-	if err := s.db.QueryRowContext(ctx, `SELECT t.version, t.mb_recording, a.state = ?, coalesce(a.file_ref, '')
+	if err := s.db.QueryRowContext(ctx, `SELECT t.version, t.mb_recording, t.composer, t.lyricist, t.arranger, a.state = ?, coalesce(a.file_ref, '')
 		FROM tracks t, assets a WHERE t.id = ? AND a.id = ?`,
-		AssetMissing, id, d.Asset.ID).Scan(&d.Version, &d.MBRecording, &d.Missing, &d.Ref); err != nil {
+		AssetMissing, id, d.Asset.ID).Scan(&d.Version, &d.MBRecording, &d.Composer, &d.Lyricist, &d.Arranger, &d.Missing, &d.Ref); err != nil {
 		return nil, err
 	}
 	if d.Aliases, err = aliasNames(ctx, s.db, "track", id); err != nil {
+		return nil, err
+	}
+	if d.Credits, err = trackCredits(ctx, s.db, id); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT e.id, al.id, al.title, e.disc_no, e.track_no FROM album_entries e
@@ -455,15 +529,15 @@ func (s *Store) Search(ctx context.Context, q string, limit int) (*SearchResult,
 		inOrder(res.Albums, v, func(a AlbumSummary) int64 { return a.ID })
 	}
 	if v := ids["artist"]; len(v) > 0 {
-		rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, count(ta.track_id) FROM artists ar
-			JOIN track_artists ta ON ta.artist_id = ar.id WHERE ar.id IN (`+in(len(v))+`) GROUP BY ar.id`, v...)
+		rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, ar.kind, count(DISTINCT c.track_id) FROM artists ar
+			JOIN credits c ON c.artist_id = ar.id WHERE ar.id IN (`+in(len(v))+`) GROUP BY ar.id`, v...)
 		if err != nil {
 			return nil, err
 		}
 		defer rows.Close()
 		for rows.Next() {
 			var a Artist
-			if err := rows.Scan(&a.ID, &a.Name, &a.Tracks); err != nil {
+			if err := rows.Scan(&a.ID, &a.Name, &a.Kind, &a.Tracks); err != nil {
 				return nil, err
 			}
 			res.Artists = append(res.Artists, a)

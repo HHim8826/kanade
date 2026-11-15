@@ -341,6 +341,35 @@ func (s *Server) artist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
+// artistSplits are the credited names that look like several artists, for the user to say how they
+// divide, and what the user said so far (D13).
+func (s *Server) artistSplits(w http.ResponseWriter, r *http.Request) {
+	proposals, decided, err := s.lib.Splits(r.Context())
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"proposals": proposals, "decided": decided})
+}
+
+// decideSplits stores how names divide ({items: [{name, parts}]}, parts [] for one artist and null
+// to take it back), as one change in the edit log.
+func (s *Server) decideSplits(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Items []library.SplitDecision `json:"items"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	g, err := s.lib.DecideSplits(r.Context(), req.Items)
+	if err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"group": g})
+}
+
 // editArtist renames an artist (every track and album using exactly that name) and/or sets its
 // aliases; each is its own entry in the edit log.
 func (s *Server) editArtist(w http.ResponseWriter, r *http.Request) {

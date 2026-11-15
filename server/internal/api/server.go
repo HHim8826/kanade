@@ -349,6 +349,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /api/v1/albums/{id}/vgmdb", s.authed(s.vgmdbPropose))
 	mux.Handle("POST /api/v1/albums/{id}/vgmdb/apply", s.authed(s.vgmdbApply))
 	mux.Handle("PATCH /api/v1/artists/{id}", s.authed(s.editArtist))
+	mux.Handle("GET /api/v1/artists/splits", s.authed(s.artistSplits))
+	mux.Handle("POST /api/v1/artists/splits", s.authed(s.decideSplits))
 	mux.Handle("GET /api/v1/organize/folders", s.authed(s.folderAlbums))
 	mux.Handle("POST /api/v1/organize/folders", s.authed(s.makeFolderAlbums))
 	mux.Handle("GET /api/v1/edits", s.authed(s.editGroups))

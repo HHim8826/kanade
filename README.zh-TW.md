@@ -8,11 +8,11 @@
 
 ## 功能
 
-- **取得音樂**：透過 aria2 下載磁力連結、`.torrent` 檔與 RSS 訂閱（可設規則、自動下載），也可以直接下載音檔或 zip 的 HTTP/HTTPS 連結。種子的檔案由你挑選；下載比伺服器的暫存空間大時分批進行，每批匯入並清掉後才下載下一批。做種依分享率或時間停止。
-- **匯入與整理**：讀取標籤（並判斷文字編碼），依 CUE 切割整軌映像、把其他無損格式轉成 FLAC（FFmpeg），CUE 與 log 檔跟著專輯保存，專輯附的掃描圖（封面、內頁、光碟、側標，TIFF、BMP 也可以）在專輯頁以圖庫瀏覽，標籤沒寫專輯時以資料夾為一張專輯；整份下載也可以變成一張專輯，每個資料夾一個分區。另外有 MusicBrainz 查詢、貼上 VGMdb 頁面讀取資料、單張或多張專輯一起編輯、分類、關聯專輯所屬的作品（動畫、遊戲、書籍，以 [Bangumi](https://bgm.tv) 的資料為準，並標註每首歌的用途：片頭曲、片尾曲、插曲…；多選的專輯可以一次關聯）、專輯自己的 Bangumi 條目（連結 Bangumi 帳號後，可以在專輯頁管理你的收藏：狀態、評分、標籤、吐槽），以及每一筆修改都能撤回的修改紀錄。
+- **取得音樂**：透過 aria2 下載磁力連結、`.torrent` 檔與 RSS 訂閱（可設規則、自動下載），也可以直接下載音檔或 zip 的 HTTP/HTTPS 連結。RSS 與貼上的連結不會連到伺服器本身或它所在的區網（區網裡的 NAS 可以在下載設定開放）。種子的檔案由你挑選；下載比伺服器的暫存空間大時分批進行，每批匯入並清掉後才下載下一批。做種依分享率或時間停止。
+- **匯入與整理**：讀取標籤（並判斷文字編碼），依 CUE 切割整軌映像、把其他無損格式轉成 FLAC（FFmpeg），CUE 與 log 檔跟著專輯保存，專輯附的掃描圖（封面、內頁、光碟、側標，TIFF、BMP 也可以）在專輯頁以圖庫瀏覽，標籤沒寫專輯時以資料夾為一張專輯；整份下載也可以變成一張專輯，每個資料夾一個分區。另外有 MusicBrainz 查詢、貼上 VGMdb 頁面讀取資料、單張或多張專輯一起編輯、分類、關聯專輯所屬的作品（動畫、遊戲、書籍，以 [Bangumi](https://bgm.tv) 的資料為準，並標註每首歌的用途：片頭曲、片尾曲、插曲…；多選的專輯可以一次關聯）、專輯自己的 Bangumi 條目（連結 Bangumi 帳號後，可以在專輯頁管理你的收藏：狀態、評分、標籤、吐槽），以及每一筆修改都能撤回的修改紀錄。每首歌照標籤記下歌手、作曲、作詞、編曲；一個名稱其實是幾位歌手時（「A & B」、「角色（CV：聲優）」），你確認怎麼拆之後，每個名字有自己的頁面，角色和聲優互相連結。
 - **儲存**：每個檔案都存進你自己的 Google Drive，上傳後以 SHA-256 核對；丟進 Drive 收件匣資料夾的檔案會自動匯入。新匯入的音樂也可以改存到伺服器上的資料夾（或掛載在上面的 NAS）、Cloudflare R2 或其他 S3 相容的 bucket，或 OneDrive；已經放在資料夾、bucket 或 OneDrive 裡的收藏，也可以原位、只讀匯入，之後的新檔案會自動匯入。每個檔案都會和儲存服務提供的資訊核對，但 SHA-256 一律由 Kanade 自己計算。伺服器只保留播放快取，小 VPS 就夠用。
-- **播放**：播放佇列、隨機、重複、全曲庫隨機或自動接續播放、無縫播放（現場錄音、組曲這類連續的專輯，歌與歌之間不會斷）、廣播劇從上次停下的地方繼續、同步歌詞（來自檔案、LRC，或從 LRCLIB 找）、書籤、睡眠定時、鎖定畫面控制、省流模式（以 Opus 128k 串流，流量約為 FLAC 的六分之一）、你的裝置（在手機接續電腦正在播的歌，連同佇列與位置，或把一台裝置當成另一台的遙控器），以及把正在聽的歌顯示成你的 Discord 狀態（「正在聽 Kanade」）：連結 Discord 帳號後由伺服器回報，電腦和手機都不用另外安裝程式。
-- **收藏**：我的最愛、歌單、依規則挑歌的智慧歌單（分類、歌手、播放次數、上次播放…）。這些都在「我的」頁，和書籤、播放記錄、聆聽統計與 Bangumi 收藏放在一起；曲庫只放音樂本身。
+- **播放**：播放佇列、隨機、重複、全曲庫隨機或自動接續播放（預設略過伴奏、卡拉 OK 與 TV size 版本）、無縫播放（現場錄音、組曲這類連續的專輯，歌與歌之間不會斷）、廣播劇從上次停下的地方繼續、同步歌詞（來自檔案、LRC，或從 LRCLIB 找）、書籤、睡眠定時、鎖定畫面控制、省流模式（以 Opus 128k 串流，流量約為 FLAC 的六分之一）、你的裝置（在手機接續電腦正在播的歌，連同佇列與位置，或把一台裝置當成另一台的遙控器），以及把正在聽的歌顯示成你的 Discord 狀態（「正在聽 Kanade」）：連結 Discord 帳號後由伺服器回報，電腦和手機都不用另外安裝程式。
+- **收藏**：我的最愛、歌單、依規則挑歌的智慧歌單（分類、歌手、作曲、播放次數、上次播放…）。這些都在「我的」頁，和書籤、播放記錄、聆聽統計與 Bangumi 收藏放在一起；曲庫只放音樂本身。
 - **我的聆聽**：每天實際聽了多久的年度熱圖、任意期間的排行與趨勢，可匯出 CSV 或 JSON。
 - **你的網站**：用密碼或 passkey 登入；站名和圖示可以自訂（分頁、安裝的 App、登入頁和 Discord 狀態都跟著改），分頁標題也可以顯示正在播的歌和進度。單一個 Go 執行檔，以 1.5 GB 記憶體的 VPS 為準設計。
 
@@ -54,7 +54,7 @@ curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh
 | `kanade-manager autostart [on\|off]` | 是否開機啟動（依機器使用 systemd、OpenRC、SysV 或 cron）；不加參數時顯示目前設定並詢問。 |
 | `kanade-manager password` | 重設密碼（隨機或自訂），該帳號的所有登入都會結束。 |
 | `kanade-manager config` | 修改公開網址、監聽位址，以及前面的代理（Cloudflare，或同一台機器上的 Nginx、Caddy）：只相信這裡指定的代理所轉送的用戶端位址，登入節流依這個位址計算。 |
-| `kanade-manager backup` / `restore` | 備份放在 `data/backups/`；還原前會先備份目前的資料庫。連上 Drive 後，伺服器每天也會把資料庫複製到 Drive 的 `Kanade/backups`（保留最近 14 份）；要還原其中一份，下載到 `data/backups/` 再執行 `restore`。更新前自動做的備份保留最近 5 份。 |
+| `kanade-manager backup` / `restore` | 備份放在 `data/backups/`；還原前會先備份目前的資料庫。伺服器每天也會把資料庫複製到 Google Drive 的 `Kanade/backups`，或在設定裡選的儲存位置的 `backups` 資料夾（保留最近 14 份）；要還原其中一份，下載到 `data/backups/` 再執行 `restore`。更新前自動做的備份保留最近 5 份。 |
 | `kanade-manager tools` | 之後再安裝 aria2 與 FFmpeg（安裝時跳過，或系統套件裡沒有時）。 |
 
 不詢問的安裝（自動化用）：`sudo env KANADE_YES=1 KANADE_PUBLIC_URL=https://music.example.com KANADE_TRUSTED_PROXY=cloudflare bash kanade.sh install`；其他設定（例如 `KANADE_INIT=systemd|openrc|sysv|none`）列在 `scripts/kanade.sh` 的開頭。
@@ -89,7 +89,7 @@ curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh
 | `scripts/kanade.sh` | 安裝與管理腳本（`kanade-manager`） |
 | `.github/workflows/ci.yml` | 推送到 main 與 pull request 的 CI：gofmt、vet、開 race detector 的測試（含 aria2 與 FFmpeg）、網頁端檢查（`server/scripts/check-web.mjs`）、shellcheck 與 actionlint |
 | `.github/workflows/release.yml` | 每個版本標籤先跑 CI，再建置並發佈 release |
-| `docs/` | 計畫、決策（D1–D12，優先於計畫）、含 API 與實作紀錄的後端設計、P0 驗證結果、曲庫調查；`docs/images/` 是上面的截圖 |
+| `docs/` | 計畫、決策（D1–D13，優先於計畫）、含 API 的現行後端設計、記錄每一版做了什麼與怎麼驗證的變更紀錄、P0 驗證結果、曲庫調查；`docs/images/` 是上面的截圖 |
 
 ## 建置與執行
 

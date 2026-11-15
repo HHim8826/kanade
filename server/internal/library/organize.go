@@ -38,11 +38,12 @@ func Str(s string) *string { return &s }
 func num(n int64) *string  { return Str(strconv.FormatInt(n, 10)) }
 
 var tables = map[string]string{"track": "tracks", "album": "albums", "entry": "album_entries", "artist": "artists",
-	"download": "downloads", "scope": "album_scopes", "category": "categories"}
+	"download": "downloads", "scope": "album_scopes", "category": "categories", "split": "artist_splits"}
 
 // fields maps each editable field to its column; "aliases" and "row" are handled separately.
 var fields = map[string]map[string]string{
 	"track": {"title": "title", "artist": "artist", "version": "version", "kind": "kind", "mb_recording": "mb_recording",
+		"composer": "composer", "lyricist": "lyricist", "arranger": "arranger", // decision D13
 		"aliases": "",
 		"works":   ""}, // review #94: what it is to works, as JSON
 	"album": {"title": "title", "album_artist": "album_artist", "date": "date", "catalog": "catalog", "edition": "edition",
@@ -57,7 +58,8 @@ var fields = map[string]map[string]string{
 	// by a user's change: its grouping, and the album a scope of it goes to ("source").
 	"download": {"grouping": "grouping"},
 	"scope":    {"source": ""},
-	"category": {"row": ""}, // a category made or deleted, with the albums it held
+	"category": {"row": ""},        // a category made or deleted, with the albums it held
+	"split":    {"parts": "parts"}, // how a credited name divides (D13), as JSON
 }
 
 // scopeSource is an album_scopes row as a "source" edit stores it: the scope and its album. What
@@ -266,6 +268,11 @@ func (e *editor) check(c Change) (*string, error) {
 		return n, nil
 	}
 	switch c.Field {
+	case "parts":
+		if c.Value == nil {
+			return nil, nil // nothing said
+		}
+		return checkParts(v)
 	case "aliases":
 		return Str(strings.Join(cleanAliases(strings.Split(v, "\n")), "\n")), nil
 	case "sections":
@@ -449,11 +456,17 @@ func (e *editor) write(target string, id int64, field string, v *string) error {
 		return err
 	}
 	switch {
-	case target == "track" && field == "artist":
-		if err := linkArtist(ctx, tx, id, deref(v)); err != nil {
+	case target == "track" && (field == "artist" || field == "composer" || field == "lyricist" || field == "arranger"):
+		if err := credit(ctx, tx, id); err != nil {
 			return err
 		}
 		e.markIndex("track", id)
+	case target == "split":
+		var name string
+		if err := tx.QueryRowContext(ctx, `SELECT name FROM artist_splits WHERE id = ?`, id).Scan(&name); err != nil {
+			return err
+		}
+		return creditTracksNamed(ctx, tx, name)
 	case target == "track" && field == "title", target == "album" && (field == "title" || field == "album_artist"):
 		e.markIndex(target, id)
 	case target == "track" && field == "version": // what the song is (Variant) goes by its note too
@@ -467,23 +480,6 @@ func deref(v *string) string {
 		return ""
 	}
 	return *v
-}
-
-// linkArtist points a track at the artist named by its artist string. Artists left without tracks
-// stay (with their aliases) and are simply not listed.
-func linkArtist(ctx context.Context, tx *sql.Tx, trackID int64, name string) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM track_artists WHERE track_id = ?`, trackID); err != nil {
-		return err
-	}
-	if name == "" {
-		return nil
-	}
-	artistID, err := upsertArtist(ctx, tx, name)
-	if err != nil {
-		return err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO track_artists (track_id, artist_id) VALUES (?, ?)`, trackID, artistID)
-	return err
 }
 
 func aliasNames(ctx context.Context, q querier, target string, id int64) ([]string, error) {
@@ -527,9 +523,10 @@ func indexParts(ctx context.Context, tx *sql.Tx, kind string, id int64) ([]strin
 	var err error
 	switch kind {
 	case "track":
-		var title, artist string
-		err = tx.QueryRowContext(ctx, `SELECT title, artist FROM tracks WHERE id = ?`, id).Scan(&title, &artist)
-		parts = []string{title, artist}
+		var title, artist, composer, lyricist, arranger string
+		err = tx.QueryRowContext(ctx, `SELECT title, artist, composer, lyricist, arranger FROM tracks WHERE id = ?`, id).
+			Scan(&title, &artist, &composer, &lyricist, &arranger)
+		parts = []string{title, artist, composer, lyricist, arranger}
 	case "album":
 		var title, artist string
 		err = tx.QueryRowContext(ctx, `SELECT title, album_artist FROM albums WHERE id = ?`, id).Scan(&title, &artist)
@@ -553,7 +550,7 @@ func indexParts(ctx context.Context, tx *sql.Tx, kind string, id int64) ([]strin
 
 // name is an object's title or name, for summaries.
 func (s *Store) name(ctx context.Context, target string, id int64) (string, error) {
-	col := map[string]string{"track": "title", "album": "title", "artist": "name", "download": "name", "category": "name"}[target]
+	col := map[string]string{"track": "title", "album": "title", "artist": "name", "download": "name", "category": "name", "split": "name"}[target]
 	var n string
 	err := s.db.QueryRowContext(ctx, `SELECT `+col+` FROM `+tables[target]+` WHERE id = ?`, id).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -566,18 +563,22 @@ func (s *Store) name(ctx context.Context, target string, id int64) (string, erro
 
 // TrackEdit changes a track; nil fields stay as they are.
 type TrackEdit struct {
-	Title   *string   `json:"title"`
-	Artist  *string   `json:"artist"`
-	Version *string   `json:"version"`
-	Kind    *string   `json:"kind"`
-	Aliases *[]string `json:"aliases"`
+	Title    *string   `json:"title"`
+	Artist   *string   `json:"artist"`
+	Version  *string   `json:"version"`
+	Kind     *string   `json:"kind"`
+	Composer *string   `json:"composer"` // D13
+	Lyricist *string   `json:"lyricist"`
+	Arranger *string   `json:"arranger"`
+	Aliases  *[]string `json:"aliases"`
 }
 
 func (e *editor) track(id int64, in TrackEdit) error {
 	for _, f := range []struct {
 		field string
 		v     *string
-	}{{"title", in.Title}, {"artist", in.Artist}, {"version", in.Version}, {"kind", in.Kind}} {
+	}{{"title", in.Title}, {"artist", in.Artist}, {"version", in.Version}, {"kind", in.Kind},
+		{"composer", in.Composer}, {"lyricist", in.Lyricist}, {"arranger", in.Arranger}} {
 		if f.v != nil {
 			if err := e.set(Change{"track", id, f.field, f.v}); err != nil {
 				return err
@@ -734,17 +735,21 @@ func (s *Store) RenameArtist(ctx context.Context, id int64, name string) (int64,
 		return 0, invalid("name cannot be empty")
 	}
 	return s.edit(ctx, SourceUser, fmt.Sprintf("歌手改名：%s → %s", old, name), func(e *editor) error {
-		for _, q := range []struct{ target, sql string }{
-			{"track", `SELECT id FROM tracks WHERE artist = ?`},
-			{"album", `SELECT id FROM albums WHERE album_artist = ?`},
+		// The name where a credited string divides into it, then the strings that are it whole, in
+		// every role (D13).
+		if err := renameInSplits(e, old, name); err != nil {
+			return err
+		}
+		for _, q := range []struct{ target, field string }{
+			{"track", "artist"}, {"track", "composer"}, {"track", "lyricist"}, {"track", "arranger"},
+			{"album", "album_artist"},
 		} {
-			ids, err := idsTx(e.ctx, e.tx, q.sql, old)
+			ids, err := idsTx(e.ctx, e.tx, `SELECT id FROM `+tables[q.target]+` WHERE `+q.field+` = ?`, old)
 			if err != nil {
 				return err
 			}
-			field := map[string]string{"track": "artist", "album": "album_artist"}[q.target]
 			for _, oid := range ids {
-				if err := e.set(Change{q.target, oid, field, &name}); err != nil {
+				if err := e.set(Change{q.target, oid, q.field, &name}); err != nil {
 					return err
 				}
 			}
@@ -1061,7 +1066,8 @@ func (e *editor) restoreTrack(id int64, o *EntryInput) error {
 	if kind == "" {
 		kind = "music"
 	}
-	if err := e.track(id, TrackEdit{Title: &o.Title, Artist: &o.Artist, Version: Str(""), Kind: &kind}); err != nil {
+	if err := e.track(id, TrackEdit{Title: &o.Title, Artist: &o.Artist, Version: Str(""), Kind: &kind,
+		Composer: &o.Composer, Lyricist: &o.Lyricist, Arranger: &o.Arranger}); err != nil {
 		return err
 	}
 	return e.set(Change{"track", id, "mb_recording", Str("")}) // only identification sets it

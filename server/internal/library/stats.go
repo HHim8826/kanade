@@ -196,12 +196,12 @@ func (s *Store) ListeningTop(ctx context.Context, from, to int64, kind, group, b
 		args = append(append(append([]any{}, period...), period...), limit)
 		q = `SELECT id, name, '', 0, ms, plays, n FROM (
 			SELECT ar.id AS id, ar.name AS name, sum(l.ms) AS ms, sum(l.counted) AS plays, count(DISTINCT l.track_id) AS n
-				FROM listening l JOIN track_artists ta ON ta.track_id = l.track_id JOIN artists ar ON ar.id = ta.artist_id
+				FROM listening l JOIN credits ta ON ta.track_id = l.track_id AND ta.role = 'artist' JOIN artists ar ON ar.id = ta.artist_id
 				WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` GROUP BY ar.id
 			UNION ALL
 			SELECT 0, t.artist, sum(l.ms), sum(l.counted), count(DISTINCT l.track_id) FROM listening l JOIN tracks t ON t.id = l.track_id
 				WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` AND t.artist != ''
-				AND NOT EXISTS (SELECT 1 FROM track_artists ta WHERE ta.track_id = t.id) GROUP BY t.artist
+				AND NOT EXISTS (SELECT 1 FROM credits ta WHERE ta.track_id = t.id AND ta.role = 'artist') GROUP BY t.artist
 		) ORDER BY ` + order + `, name LIMIT ?`
 	case "albums":
 		args = append([]any{from, to}, args...) // the period's albums, for albumRoots

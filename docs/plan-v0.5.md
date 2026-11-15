@@ -2,7 +2,7 @@
 
 版本：v0.5｜日期：2026-10-02（Asia/Taipei）｜狀態：需求與架構規劃，尚未開發
 
-> 這是 2026-10-02 的原始計畫，保留作為紀錄，之後沒有隨開發更新。之後的決定見 [decisions.md](decisions.md)（D1–D12），例如 Google Drive 比照 OpenList 直接呼叫 API、不嵌入 rclone（D1），網頁端先行、Kotlin 客戶端延後（D3、D8）；兩者不同時以 decisions.md 為準。現在的實作見 [backend-design.md](backend-design.md)。
+> 這是 2026-10-02 的原始計畫，保留作為紀錄，之後沒有隨開發更新。之後的決定見 [decisions.md](decisions.md)（D1–D13），例如 Google Drive 比照 OpenList 直接呼叫 API、不嵌入 rclone（D1），網頁端先行、Kotlin 客戶端延後（D3、D8）；兩者不同時以 decisions.md 為準。現在的實作見 [backend-design.md](backend-design.md)。
 
 ## 1. 目標與已確認需求
 

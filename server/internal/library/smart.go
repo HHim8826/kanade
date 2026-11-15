@@ -34,6 +34,7 @@ type Rules struct {
 //
 //	category, album   is / not   IDs     on an album in one of these (not: on none)
 //	artist            contains / not  Value
+//	composer, lyricist, arranger  contains / not  Value  (D13)
 //	kind              is         Value   music or spoken
 //	favorite          is / not
 //	plays             gte / lte  N       counted plays ever
@@ -48,6 +49,9 @@ type Condition struct {
 	N     int     `json:"n,omitempty"`
 }
 
+// nameFields are the fields of names as written, matched by what they contain.
+var nameFields = map[string]bool{"artist": true, "composer": true, "lyricist": true, "arranger": true}
+
 const maxSmart = 1000 // songs a smart playlist lists at most
 
 // where turns the rules into an SQL condition on tracks t.
@@ -59,7 +63,7 @@ func (r *Rules) where(now int64) (string, []any, error) {
 	var args []any
 	for _, c := range r.Conditions {
 		not := c.Op == "not"
-		if c.Op != "is" && c.Op != "not" && !(c.Field == "artist" && c.Op == "contains") && !(c.Field == "plays" && (c.Op == "gte" || c.Op == "lte")) {
+		if c.Op != "is" && c.Op != "not" && !(nameFields[c.Field] && c.Op == "contains") && !(c.Field == "plays" && (c.Op == "gte" || c.Op == "lte")) {
 			return "", nil, invalid("%s cannot be %q", c.Field, c.Op)
 		}
 		var q string
@@ -79,12 +83,12 @@ func (r *Rules) where(now int64) (string, []any, error) {
 			for _, id := range c.IDs {
 				args = append(args, id)
 			}
-		case "artist":
+		case "artist", "composer", "lyricist", "arranger":
 			v := strings.TrimSpace(c.Value)
 			if v == "" {
-				return "", nil, invalid("give an artist")
+				return "", nil, invalid("give a name")
 			}
-			q = `t.artist LIKE ? ESCAPE '\'`
+			q = `t.` + c.Field + ` LIKE ? ESCAPE '\'`
 			args = append(args, "%"+strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(v)+"%")
 		case "kind":
 			if c.Value != "music" && c.Value != "spoken" {

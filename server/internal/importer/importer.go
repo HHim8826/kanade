@@ -985,6 +985,8 @@ func (im *Importer) process(ctx context.Context, it *item) (outcome, error) {
 	var in library.EntryInput
 	if it.plan != nil {
 		in = it.plan.input()
+		// The preview does not change who wrote a song: the file says (D13), for a plan made before too.
+		in.Composer, in.Lyricist, in.Arranger = info.Tags.Composer, info.Tags.Lyricist, info.Tags.Arranger
 		in.AlbumID = im.groupAlbum(ctx, it.batchID, it.plan.Group)
 		if in.AlbumID == 0 {
 			in.AlbumID = im.sourceAlbum(ctx, it)
@@ -1128,7 +1130,7 @@ func entryInput(rel string, info *media.Info) library.EntryInput {
 	base := strings.TrimSuffix(filepath.Base(rel), filepath.Ext(rel))
 	in := library.EntryInput{
 		Title: t.Title, Artist: t.Artist, Album: t.Album, AlbumArtist: t.AlbumArtist,
-		Date: t.Date, DiscNo: t.DiscNo, TrackNo: t.TrackNo,
+		Date: t.Date, DiscNo: t.DiscNo, TrackNo: t.TrackNo, Composer: t.Composer, Lyricist: t.Lyricist, Arranger: t.Arranger,
 	}
 	if in.Title == "" {
 		in.Title = strings.TrimSpace(leadingNum.ReplaceAllString(base, ""))
@@ -1341,6 +1343,9 @@ func (im *Importer) Original(ctx context.Context, trackID int64) (*library.Entry
 	var o batchOptions
 	if json.Unmarshal([]byte(opts), &o) == nil && o.Encoding != "" {
 		info.Redecode(o.Encoding) // the encoding the preview chose is part of how the tags were read
+	}
+	if t := info.Tags; t.Composer == "" && t.Lyricist == "" && t.Arranger == "" {
+		info.FillCredits() // read before the tags kept them (D13)
 	}
 	in := entryInput(rel, &info)
 	return &in, nil

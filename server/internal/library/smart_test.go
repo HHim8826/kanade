@@ -22,6 +22,7 @@ func TestSmartRules(t *testing.T) {
 	c := f.song("c", "C", "Drama Box", 1, 1)
 	d := f.song("d", "D", "Other Album", 1, 2)
 	s.db.Exec(`UPDATE tracks SET kind = 'spoken' WHERE id = ?`, c.TrackID)
+	s.db.Exec(`UPDATE tracks SET composer = '梶浦由記', lyricist = 'Yuki%' WHERE id = ?`, d.TrackID)
 	_, aria, _ := s.Categorize(ctx, CategorizeRequest{Albums: []int64{f.albumOf(a.EntryID)}, Create: "ARIA"})
 	s.SetFavorite(ctx, "track", a.TrackID, true)
 	now := db.Now()
@@ -68,6 +69,9 @@ func TestSmartRules(t *testing.T) {
 		{"in no category of these", Rules{Conditions: []Condition{{Field: "category", Op: "not", IDs: []int64{aria.ID}}}}, "BCD"},
 		{"on an album", Rules{Conditions: []Condition{{Field: "album", Op: "is", IDs: []int64{f.albumOf(b.EntryID)}}}}, "BD"},
 		{"artist", Rules{Conditions: []Condition{{Field: "artist", Op: "contains", Value: "xc"}}}, "C"},
+		{"composer", Rules{Conditions: []Condition{{Field: "composer", Op: "contains", Value: "梶浦"}}}, "D"},
+		{"lyricist, % as itself", Rules{Conditions: []Condition{{Field: "lyricist", Op: "contains", Value: "i%"}}}, "D"},
+		{"not this arranger", Rules{Conditions: []Condition{{Field: "arranger", Op: "not", Value: "x"}}}, "ABCD"},
 		{"drama and talk", Rules{Conditions: []Condition{{Field: "kind", Op: "is", Value: "spoken"}}}, "C"},
 		{"favorites", Rules{Conditions: []Condition{{Field: "favorite", Op: "is"}}}, "A"},
 		{"played at least twice", Rules{Conditions: []Condition{{Field: "plays", Op: "gte", N: 2}}}, "A"},

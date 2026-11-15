@@ -74,6 +74,13 @@ func toVersion22(t *testing.T, d *sql.DB) {
 		}
 	}
 	exec(`PRAGMA foreign_keys = OFF`)
+	// Folded into credits by migration 49: back as it was, from the credits that came of it.
+	exec(`CREATE TABLE track_artists (
+		track_id  INTEGER NOT NULL REFERENCES tracks (id) ON DELETE CASCADE,
+		artist_id INTEGER NOT NULL REFERENCES artists (id),
+		PRIMARY KEY (track_id, artist_id)) STRICT`)
+	exec(`CREATE INDEX track_artists_artist ON track_artists (artist_id)`)
+	exec(`INSERT OR IGNORE INTO track_artists SELECT track_id, artist_id FROM credits WHERE role = 'artist'`)
 	for _, q := range []string{ // renamed by migration 39: the old names first
 		`ALTER TABLE assets RENAME COLUMN file_ref TO drive_file_id`,
 		`ALTER TABLE covers RENAME COLUMN file_ref TO drive_file_id`,

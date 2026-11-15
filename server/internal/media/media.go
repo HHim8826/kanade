@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -33,6 +35,10 @@ type Tags struct {
 	DiscNo      int    `json:"disc_no,omitempty"`
 	DiscTotal   int    `json:"disc_total,omitempty"`
 	Lyrics      string `json:"lyrics,omitempty"` // embedded lyrics, synced (LRC-style) or plain
+	// Who wrote the song (decision D13): each field's values joined with "、".
+	Composer string `json:"composer,omitempty"`
+	Lyricist string `json:"lyricist,omitempty"`
+	Arranger string `json:"arranger,omitempty"`
 }
 
 type Info struct {
@@ -189,6 +195,15 @@ func (t *Tags) applyField(key, value string) {
 			*dst = value
 		}
 	}
+	// A credit can be given more than once (two composers): each value is kept.
+	add := func(dst *string) {
+		switch {
+		case *dst == "":
+			*dst = value
+		case !slices.Contains(strings.Split(*dst, "、"), value):
+			*dst += "、" + value
+		}
+	}
 	switch strings.ToUpper(key) {
 	case "TITLE":
 		setIfEmpty(&t.Title)
@@ -228,6 +243,31 @@ func (t *Tags) applyField(key, value string) {
 		}
 	case "LYRICS", "UNSYNCEDLYRICS", "UNSYNCED LYRICS":
 		setIfEmpty(&t.Lyrics)
+	case "COMPOSER":
+		add(&t.Composer)
+	case "LYRICIST", "WRITER":
+		add(&t.Lyricist)
+	case "ARRANGER":
+		add(&t.Arranger)
+	}
+}
+
+// FillCredits reads the composer, lyricist and arranger again from the fields as read (Raw): for
+// what was read before Tags had them (decision D13).
+func (info *Info) FillCredits() {
+	info.Tags.Composer, info.Tags.Lyricist, info.Tags.Arranger = "", "", ""
+	keys := make([]string, 0, len(info.Raw))
+	for k := range info.Raw {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // the same each time
+	for _, k := range keys {
+		switch name := strings.ToUpper(legacyField(k)); name {
+		case "COMPOSER", "LYRICIST", "WRITER", "ARRANGER":
+			for _, v := range info.Raw[k] {
+				info.Tags.applyField(name, v)
+			}
+		}
 	}
 }
 

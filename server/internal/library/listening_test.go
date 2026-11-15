@@ -159,7 +159,7 @@ func TestListeningStatistics(t *testing.T) {
 		t.Fatalf("artist page of the top artist: %+v", d)
 	}
 	// A song named with an artist but linked to none still ranks, under the name and with no page.
-	s.db.Exec(`DELETE FROM track_artists WHERE track_id IN (SELECT id FROM tracks WHERE artist = 'xSong A')`)
+	s.db.Exec(`DELETE FROM credits WHERE role = 'artist' AND track_id IN (SELECT id FROM tracks WHERE artist = 'xSong A')`)
 	if artists, _ := s.ListeningTop(ctx, from, to, "music", "artists", "plays", 10); len(artists) != 2 || artists[0].Name != "xSong A" || artists[0].ID != 0 {
 		t.Fatalf("top artists without a link %+v", artists)
 	}

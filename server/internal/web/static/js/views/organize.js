@@ -5,7 +5,7 @@ import { go, href } from '../router.js';
 import { driveOnly, missingNote, places, trashName, trashNote } from '../places.js';
 import { createStore, useStore } from '../store.js';
 import { siteName } from '../site.js';
-import { Cover, Dialog, Empty, ErrorBox, Icon, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
+import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { hasKana, parseVGMdb } from '../vgmdb.js';
 
 // Organizing the library (P2-2): edit dialogs, merge / split / remove, MusicBrainz identification,
@@ -47,6 +47,7 @@ const fieldNames = {
   date: '日期', catalog: '型號', edition: '版本', cover_id: '封面', merged_into: '合併到', mb_release: 'MusicBrainz 發行',
   album_id: '所屬專輯', disc_no: '碟號', track_no: '曲序', row: '收錄', sections: '區段名稱', grouping: '下載的分組方式',
   source: '之後批次歸入', categories: '分類', favorite: '收藏', works: '作品', subject: 'Bangumi 條目',
+  composer: '作曲', lyricist: '作詞', arranger: '編曲', parts: '拆分方式',
 };
 const fieldName = (target, field) => (field === 'title' ? (target === 'album' ? '專輯名稱' : '曲名')
   : field === 'works' && target === 'track' ? '作品用途' : fieldNames[field] || field);
@@ -58,6 +59,7 @@ function shown(v, field, label) {
   if (field === 'kind') return v === 'spoken' ? '廣播劇／談話' : '音樂';
   if (field === 'aliases') return v.split('\n').join('、');
   if (field === 'cover_id') return '另一張封面';
+  if (field === 'parts') return partsText(v); // how a credited name divides (D13)
   if (field === 'sections') { // {"1": "Episode 1", …}
     try {
       const names = Object.entries(JSON.parse(v));
@@ -163,13 +165,14 @@ function TrackEditor({ id, close }) {
   const [form, setForm] = useState(null);
   const [busy, run] = useRunner();
   const d = t.data;
-  const init = d && { title: d.title, artist: d.artist, version: d.version, kind: d.kind, aliases: d.aliases.join('\n') };
+  const init = d && { title: d.title, artist: d.artist, version: d.version, kind: d.kind, composer: d.composer || '', lyricist: d.lyricist || '',
+    arranger: d.arranger || '', aliases: d.aliases.join('\n') };
   const f = form || init;
   const set = (k) => (v) => setForm({ ...f, [k]: v });
   const save = () => run(async () => {
     if (!f.title.trim()) throw new Error('曲名不能是空白');
     const body = {};
-    for (const k of ['title', 'artist', 'version', 'kind']) if (f[k] !== init[k]) body[k] = f[k];
+    for (const k of ['title', 'artist', 'version', 'kind', 'composer', 'lyricist', 'arranger']) if (f[k] !== init[k]) body[k] = f[k];
     if (f.aliases !== init.aliases) body.aliases = lines(f.aliases);
     const res = await api('PATCH', '/tracks/' + id, body);
     done(res, '已更新歌曲資訊');
@@ -177,7 +180,7 @@ function TrackEditor({ id, close }) {
   });
   const restore = () => confirmDialog({
     title: '恢復原標籤', action: '恢復',
-    children: html`<p>把「${d.title}」的曲名、歌手、類型改回匯入時音檔標籤的值。別名不變。可在修改紀錄撤回。</p>`,
+    children: html`<p>把「${d.title}」的曲名、歌手、類型、作曲、作詞、編曲改回匯入時音檔標籤的值。別名不變。可在修改紀錄撤回。</p>`,
     onConfirm: async () => done(await post(`/tracks/${id}/restore`), '已恢復原標籤'),
   });
   const destroy = () => confirmDialog({
@@ -203,10 +206,27 @@ function TrackEditor({ id, close }) {
       <${Field} label="歌手" value=${f.artist} onInput=${set('artist')} />
       <${Field} label="版本說明" value=${f.version} onInput=${set('version')} placeholder="Live、Remix、TV size…" />
       <${KindPicker} value=${f.kind} onChange=${set('kind')} />
+      <${Field} label="作曲" value=${f.composer} onInput=${set('composer')} />
+      <${Field} label="作詞" value=${f.lyricist} onInput=${set('lyricist')} />
+      <${Field} label="編曲" value=${f.arranger} onInput=${set('arranger')} />
       <${Field} label="別名（每行一個，搜尋時也找得到）" value=${f.aliases} onInput=${set('aliases')} multiline wide />
     </div>
+    <${CreditLine} credits=${d.credits || []} onGo=${close} />
     ${d.entries.length > 0 && html`<p class="hint">收錄於：${d.entries.map((e, i) => html`${i ? '、' : ''}<a class="link" href=${href('album/' + e.album_id)} onClick=${close}>${e.album}</a>`)}</p>`}`}
   <//>`;
+}
+
+// CreditLine says who a song is credited to, each name a link to its page (D13): the names as
+// written above are what they come from, divided as the user said on the page of names.
+const roleNames = { artist: '演唱', voice: '聲優', composer: '作曲', lyricist: '作詞', arranger: '編曲' };
+
+export function CreditLine({ credits, onGo }) {
+  if (!credits.length) return null;
+  const roles = [...new Set(credits.map((c) => c.role))];
+  return html`<dl class="credit-line">${roles.map((r) => html`<div key=${r}><dt>${roleNames[r] || r}</dt><dd>
+    ${credits.filter((c) => c.role === r).map((c, i) => html`${i ? '、' : ''}<a class="link" href=${href(`artist/${c.artist_id}?name=${encodeURIComponent(c.name)}`)}
+      onClick=${onGo}>${c.name}</a>${c.credited_as ? `（${c.credited_as}）` : ''}`)}</dd></div>`)}</dl>
+    <p class="hint">一個名稱其實是幾位歌手時，到<a class="link" href=${href('splits')} onClick=${onGo}>拆分歌手名稱</a>確認。</p>`;
 }
 
 // ---- albums ----
@@ -818,4 +838,81 @@ function EditDetails({ id }) {
       ? html`<span>${e.target === 'category' ? (e.new ? '建立分類' : '刪除分類') : e.new ? '加入專輯' : '從專輯移除'}</span>`
       : html`<span class="diff-values"><span class="old">${shown(e.old, e.field, e.old_label)}</span><span class="arrow">→</span><span class="new">${shown(e.new, e.field, e.new_label)}</span></span>`}
   </li>`)}</ul>`;
+}
+
+// ---- names that are several artists (D13) ----
+
+// partsText says how a credited name divides, as stored (JSON).
+export function partsText(v) {
+  try {
+    const parts = JSON.parse(v);
+    return parts.length ? parts.map((p) => (p.cv ? `${p.name}（CV：${p.cv}）` : p.name)).join('、') : '保持完整，是一位歌手';
+  } catch { return v; }
+}
+
+const creditRoles = { artist: '演唱', composer: '作曲', lyricist: '作詞', arranger: '編曲' };
+const SHOWN = 30;
+
+// Splits are the names in the songs' tags that look like several artists ("A & B", "角色 (CV: 聲優)"),
+// for the user to say how each divides; nothing is divided until then. What was said holds for
+// songs imported later too, and is one edit to undo.
+export function Splits() {
+  const rev = useLibRev();
+  const data = useLoad(() => get('/artists/splits'), [], rev);
+  const [tab, setTab] = useState('proposals');
+  const [count, setCount] = useState(SHOWN);
+  const [busy, run] = useRunner();
+  const d = data.data;
+  const list = d ? d[tab] : [];
+  const decide = (items, message) => run(async () => done(await post('/artists/splits', { items }), message));
+  const all = () => confirmDialog({
+    title: '全部照建議拆分', action: '全部拆分',
+    children: html`<p>把 ${d.proposals.length} 個名稱都照建議拆成個別歌手。歌曲標籤的文字不會改；可在修改紀錄一次撤回。</p>`,
+    onConfirm: () => decide(d.proposals.map((p) => ({ name: p.name, parts: p.parts })), `已拆分 ${d.proposals.length} 個名稱`),
+  });
+  return html`<section>
+    <div class="page-head">
+      <h1 class="page-title">拆分歌手名稱</h1>
+      ${d && tab === 'proposals' && d.proposals.length > 1 && html`<button class="btn tonal" disabled=${busy} onClick=${all}>全部照建議拆分</button>`}
+    </div>
+    <p class="hint">標籤裡的歌手有時是幾位合寫在一起，例如「A & B」或「角色（CV：聲優）」。確認拆分後，每個名字各自成為一位歌手，有自己的頁面；之後匯入的歌曲也照這樣拆。歌曲標籤的文字不會改，可在修改紀錄撤回。</p>
+    ${d && html`<nav class="seg filter-seg" aria-label="名稱">${[['proposals', `待確認（${d.proposals.length}）`], ['decided', `已確認（${d.decided.length}）`]]
+      .map(([k, label]) => html`<button key=${k} class=${tab === k ? 'on' : ''} aria-pressed=${tab === k}
+        onClick=${() => { setTab(k); setCount(SHOWN); }}>${label}</button>`)}</nav>`}
+    ${data.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
+    ${d && !list.length && html`<${Empty} icon="person">${tab === 'proposals' ? '沒有看起來是多位歌手的名稱。' : '還沒有確認過任何名稱。'}<//>`}
+    <ul class="split-list">${list.slice(0, count).map((s) => html`<${SplitItem} key=${s.name + rev} s=${s} decided=${tab === 'decided'} busy=${busy} decide=${decide} />`)}</ul>
+    ${list.length > count && html`<div class="actions center"><button class="btn tonal" onClick=${() => setCount(count + SHOWN)}>顯示更多（還有 ${list.length - count} 個）</button></div>`}
+  </section>`;
+}
+
+function SplitItem({ s, decided, busy, decide }) {
+  const [editing, setEditing] = useState(!decided);
+  const [parts, setParts] = useState(() => (s.parts.length ? s.parts : [{ name: s.name }]).map((p) => ({ name: p.name, cv: p.cv || '' })));
+  const set = (i, patch) => setParts(parts.map((p, j) => (j === i ? { ...p, ...patch } : p)));
+  const clean = parts.map((p) => ({ name: p.name.trim(), cv: p.cv.trim() })).filter((p) => p.name);
+  const roles = s.roles.map((r) => creditRoles[r] || r).join('、');
+  const head = html`<span class="grow track-text"><span class="title">${s.name}</span>
+    <span class="sub">${s.tracks} 首 · ${roles}${decided && !editing ? ` · ${partsText(JSON.stringify(s.parts))}` : ''}</span></span>`;
+  if (!editing) {
+    return html`<li class="card pad split-item"><div class="split-head">${head}
+      <button class="btn text" onClick=${() => setEditing(true)}>修改</button>
+      <button class="btn text" disabled=${busy} onClick=${() => decide([{ name: s.name, parts: null }], `已取消「${s.name}」的拆分`)}>取消確認</button></div></li>`;
+  }
+  return html`<li class="card pad split-item">
+    <div class="split-head">${head}</div>
+    <ol class="split-parts">${parts.map((p, i) => html`<li key=${i}>
+      <input value=${p.name} aria-label=${`第 ${i + 1} 位歌手`} placeholder="名字" onInput=${(e) => set(i, { name: e.target.value })} />
+      <input value=${p.cv} aria-label=${`${p.name || `第 ${i + 1} 位`}的聲優（選填）`} placeholder="聲優（角色才填）" onInput=${(e) => set(i, { cv: e.target.value })} />
+      ${parts.length > 1 && html`<${IconButton} icon="close" label=${`移除「${p.name}」`} onClick=${() => setParts(parts.filter((_, j) => j !== i))} />`}
+    </li>`)}</ol>
+    <div class="actions">
+      <button class="btn text" onClick=${() => setParts([...parts, { name: '', cv: '' }])}><${Icon} name="add" />加一位</button>
+      <span class="grow"></span>
+      ${decided && html`<button class="btn text" onClick=${() => setEditing(false)}>取消</button>`}
+      <button class="btn text" disabled=${busy} onClick=${() => decide([{ name: s.name, parts: [] }], `「${s.name}」保持完整`)}>保持完整</button>
+      <button class="btn filled" disabled=${busy || !clean.length || (clean.length === 1 && !clean[0].cv && clean[0].name === s.name)}
+        onClick=${() => decide([{ name: s.name, parts: clean }], `已拆分「${s.name}」`)}>拆分</button>
+    </div>
+  </li>`;
 }

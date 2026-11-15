@@ -10,15 +10,18 @@ import { Field, changed, useRunner } from './organize.js';
 // within limits. Played as they are now, or on and on: every pick asks the rules again.
 
 export const fields = [
-  ['category', '分類'], ['album', '專輯'], ['artist', '歌手'], ['kind', '類型'], ['favorite', '收藏'],
-  ['plays', '播放次數'], ['played_within', '最近播放'], ['never_played', '播放紀錄'], ['finished', '播完紀錄'],
+  ['category', '分類'], ['album', '專輯'], ['artist', '歌手'], ['composer', '作曲'], ['lyricist', '作詞'], ['arranger', '編曲'],
+  ['kind', '類型'], ['favorite', '收藏'], ['plays', '播放次數'], ['played_within', '最近播放'], ['never_played', '播放紀錄'], ['finished', '播完紀錄'],
 ];
 const ops = {
   category: [['is', '在其中之一'], ['not', '不在']], album: [['is', '是其中之一'], ['not', '不是']],
-  artist: [['contains', '包含'], ['not', '不包含']], kind: [['is', '是']], favorite: [['is', '已收藏'], ['not', '沒收藏']],
+  artist: [['contains', '包含'], ['not', '不包含']], composer: [['contains', '包含'], ['not', '不包含']],
+  lyricist: [['contains', '包含'], ['not', '不包含']], arranger: [['contains', '包含'], ['not', '不包含']], kind: [['is', '是']], favorite: [['is', '已收藏'], ['not', '沒收藏']],
   plays: [['gte', '至少'], ['lte', '至多']], played_within: [['is', '最近幾天聽過'], ['not', '最近幾天沒聽過']],
   never_played: [['is', '從未播放'], ['not', '播放過']], finished: [['is', '播完過'], ['not', '從沒播完']],
 };
+// The fields of names, matched by what they contain.
+const nameFields = { artist: '歌手', composer: '作曲', lyricist: '作詞', arranger: '編曲' };
 export const sorts = [['random', '隨機'], ['least_recent', '最久沒聽的先'], ['recent_added', '最近入庫的先'], ['most_played', '播放最多的先'],
   ['album', '依專輯曲序']];
 const blank = (field) => ({ field, op: ops[field][0][0], ids: [], value: field === 'kind' ? 'music' : '', n: field === 'plays' ? 3 : 30 });
@@ -32,7 +35,7 @@ export function describe(r, names = {}) {
         const list = (c.ids || []).map((id) => names[c.field + id] || `#${id}`).join('、');
         return `${c.field === 'category' ? '分類' : '專輯'}${c.op === 'not' ? '不在' : '在'}「${list}」`;
       }
-      case 'artist': return `歌手${op}「${c.value}」`;
+      case 'artist': case 'composer': case 'lyricist': case 'arranger': return `${nameFields[c.field]}${op}「${c.value}」`;
       case 'kind': return c.value === 'spoken' ? '廣播劇／談話' : '音樂';
       case 'plays': return `播放${op} ${c.n} 次`;
       case 'played_within': return c.op === 'not' ? `${c.n} 天內沒聽過` : `${c.n} 天內聽過`;
@@ -55,7 +58,7 @@ export function SmartEditor({ playlist, close }) {
   const rules = { ...r, conditions: r.conditions.map(({ field, op, ids, value, n }) => ({ field, op, ids: ids || [], value, n: Number(n) || 0 })) };
   const key = JSON.stringify(rules);
   const [preview, setPreview] = useState({ key: null });
-  const incomplete = r.conditions.some((c) => ((c.field === 'category' || c.field === 'album') && !c.ids.length) || (c.field === 'artist' && !c.value.trim()));
+  const incomplete = r.conditions.some((c) => ((c.field === 'category' || c.field === 'album') && !c.ids.length) || (nameFields[c.field] && !c.value.trim()));
   useEffect(() => { // only the preview of the rules shown now lands, not a late one (review #107)
     if (incomplete) return;
     let alive = true;
@@ -97,7 +100,7 @@ export function SmartEditor({ playlist, close }) {
             onChange=${(e) => set(i, { ids: e.target.checked ? [...c.ids, x.id] : c.ids.filter((y) => y !== x.id) })} />${x.name}</label>`)
         : html`<span class="sub">還沒有分類，先到曲庫的「分類」建立。</span>` : html`<${Spinner} />`}</span>`}
       ${c.field === 'album' && html`<${AlbumPicker} ids=${c.ids} names=${c.names || {}} onChange=${(ids, names) => set(i, { ids, names })} />`}
-      ${c.field === 'artist' && html`<input value=${c.value} placeholder="歌手名稱" aria-label="歌手" onInput=${(e) => set(i, { value: e.target.value })} />`}
+      ${nameFields[c.field] && html`<input value=${c.value} placeholder="名稱" aria-label=${nameFields[c.field]} onInput=${(e) => set(i, { value: e.target.value })} />`}
       ${c.field === 'kind' && html`<select value=${c.value} aria-label="類型" onChange=${(e) => set(i, { value: e.target.value })}>
         <option value="music">音樂</option><option value="spoken">廣播劇／談話</option></select>`}
       ${(c.field === 'plays' || c.field === 'played_within') && html`<span class="rule-n"><input type="number" min="0" max="3650" value=${c.n}

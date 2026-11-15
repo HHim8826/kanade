@@ -40,6 +40,7 @@ var id3FieldNames = map[string]string{
 	"TCON": "GENRE", "TCO": "GENRE",
 	"TRCK": "TRACKNUMBER", "TRK": "TRACKNUMBER",
 	"TPOS": "DISCNUMBER", "TPA": "DISCNUMBER",
+	"TCOM": "COMPOSER", "TCM": "COMPOSER", "TEXT": "LYRICIST", "TXT": "LYRICIST",
 }
 
 // decodeID3Text decodes a text payload whose first byte is the ID3 encoding marker.

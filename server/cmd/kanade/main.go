@@ -211,6 +211,9 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	// Every place the library's files are: Google Drive, and folders, buckets and OneDrives (#99).
 	files := &storage.Set{DB: d, Drive: drive, Log: log, DataDir: cfg.DataDir}
 	imp := importer.New(d, lib, drive, cfg.Path(config.DirStaging), log)
+	if err := imp.BackfillCredits(ctx); err != nil { // composers, lyricists, arrangers of songs already in (D13)
+		return err
+	}
 	imp.Stores = files
 	if imp.FFmpeg = ffmpeg.Find(cfg.DataDir); imp.FFmpeg != nil {
 		log.Info("ffmpeg ready", "path", imp.FFmpeg.Path())
