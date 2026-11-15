@@ -1,0 +1,13 @@
+{
+  "name": "kanade-webtest",
+  "private": true,
+  "description": "The web client in a browser: a demo library, axe-core on its pages, keyboard and behaviour checks (run.mjs)",
+  "type": "module",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "devDependencies": {
+    "axe-core": "4.10.3",
+    "puppeteer-core": "24.10.2"
+  }
+}

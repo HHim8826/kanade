@@ -5,3 +5,4 @@ cache-p0/
 server/bin/
 spikes/*/bin/
 *.log
+server/scripts/webtest/node_modules/

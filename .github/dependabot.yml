@@ -1,5 +1,5 @@
-# Proposes newer actions (pinned to commits in the workflows) and Go modules, once a week, each kind
-# in one pull request that CI checks (review #263).
+# Proposes newer actions (pinned to commits in the workflows), Go modules and the browser test's npm
+# packages, once a week, each kind in one pull request that CI checks (review #263).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -15,4 +15,11 @@ updates:
       interval: weekly
     groups:
       go-modules:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /server/scripts/webtest
+    schedule:
+      interval: weekly
+    groups:
+      webtest:
         patterns: ["*"]

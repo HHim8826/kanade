@@ -3,6 +3,8 @@
 #   go:      gofmt, go vet, and the tests with the race detector, with aria2 and FFmpeg installed
 #            so the download and conversion tests run instead of skipping
 #   web:     the web client (no build step): modules parse, imports exist and are used
+#   browser: the web client in Chrome on a demo library made with FFmpeg: no script errors, no
+#            axe-core violations in a light and a dark look, the keyboard, the credits pages
 #   scripts: the install and release scripts (shellcheck) and the workflows (actionlint)
 # Actions are pinned to commits, their versions beside them; Dependabot proposes newer ones (review #263).
 
@@ -70,6 +72,29 @@ jobs:
         with:
           node-version: 22
       - run: node server/scripts/check-web.mjs
+
+  browser:
+    name: Web client in a browser
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: FFmpeg for the demo library
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+      - name: puppeteer-core and axe-core
+        working-directory: server/scripts/webtest
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Pages, accessibility and keyboard (the runner's Chrome)
+        working-directory: server/scripts/webtest
+        run: node run.mjs
 
   scripts:
     name: Scripts and workflows

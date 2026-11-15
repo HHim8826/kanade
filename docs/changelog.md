@@ -722,6 +722,21 @@
 - 驗證：示範曲庫（兩張專輯，一張沒有封面，一首有 LRC）上用 axe-core 4.10.3（wcag2a／2aa／21a／21aa／22aa 與 best-practice）跑 11 個頁面（首頁、專輯列表、兩張專輯、搜尋、歌單、聆聽、設定、RSS、作品、播放頁的歌詞），藍紫淺色、藍紫深色、玫瑰深色與青綠淺色的手機寬度：v0.2.23 有 `aria-allowed-role` 244、`aria-required-children` 4、`link-in-text-block` 8、`region` 100、`role-img-alt` 8、`target-size` 10 個節點，修正後沒有任何違規。另以 Chromium 實測鍵盤與樣式 21 項（單選群組的停點與方向鍵、搜尋框外框、連結底線、分頁的 `aria-current`、熱度圖與長條圖的方向鍵、佔位圖、各主題星星的對比與寬度）。`release-notes.sh` 對 v0.2.21–v0.2.23 產生的內容核對過；README 的 `SHA256SUMS` 核對指令對 v0.2.23 實際執行通過；用腳本的 `static_ffmpeg` 實際下載、校驗、安裝固定版本的 amd64 FFmpeg 並執行（arm64 以 GitHub 記錄的 SHA-256、`checksums.sha256` 與封存檔開頭的目錄名稱核對）。actionlint、shellcheck 通過。
 - 限制：評分星星只在連結 Bangumi 後的對話框出現，以同樣的 class 放在頁面上量測，沒有在真的對話框裡看。熱度圖選了不宣告 grid，螢幕閱讀器不會報出行列位置（每格名稱有完整日期）。選單（`role="menu"`）彈出時仍在 landmark 之外。Dependabot 開始送 PR 之後要有人合併。
 
+### v0.3.0：外部審查的整併（2026-11-15，遷移 48：`tracks.variant`；遷移 49：`credits`、`artist_splits`）
+
+依外部審查 `kanade-review-2026-11-15` 中同意的項目；沒有開 issue。
+
+- 外來網址（`netguard`）：RSS、其中的連結、貼上的下載連結只能連到公開位址。解析出的每個位址都檢查，連的就是檢查過的位址（DNS rebinding 也擋得住）；本機、link-local（雲端的 metadata 服務）、保留位址一律不行，區網與 CGNAT 位址可在下載設定「允許從區網下載」開放。經 HTTP_PROXY 時檢查請求的主機，proxy 本身不擋。
+- 資料庫：開啟時與每天執行 `PRAGMA optimize`。記憶體：沒有設 `GOMEMLIMIT` 時，上限是機器（或 cgroup）記憶體的四分之一，至少 128 MiB。
+- 搜尋排序：每一類依「名稱完全相同 > 開頭相同 > 包含」，歌曲再依播放次數，然後名稱短的在前。
+- 伴奏與短版（遷移 48）：從曲名與版本說明判斷 instrumental、off vocal、karaoke、カラオケ、TV size、short ver. 等；隨機播放（全曲庫隨機與接續）預設略過，只剩它們時才挑。設定可關。
+- Google Drive 併入儲存位置清單（一列，可設為新匯入的位置、搬移）；資料庫備份可存到 Drive 或任一存放位置的 `backups/`，Drive 沒連線也能備份。Drive 的檔案位置沒有改寫（正式環境有 2,006 首在 Drive 上，不值得冒險）。
+- 作詞作曲與歌手拆分（D13，遷移 49）：見 `decisions.md`。`track_artists` 併入 `credits`；既有歌曲的作曲等欄位在第一次啟動時從匯入紀錄補上。歌手改名會一併改各角色的原文與拆分決定。
+- 文件：`backend-design.md` 只留現在的架構（補上之後加的套件與資料表），歷次紀錄移到這份 `changelog.md`。
+- CI 加上瀏覽器測試（`server/scripts/webtest/run.mjs`）：用 FFmpeg 產生示範曲庫、建置並啟動 Kanade、在 Chrome 跑 17 個頁面的 axe-core（淺色與深色）、鍵盤與焦點、拆分歌手名稱與歌手頁的完整流程、隨機略過伴奏，以及頁面沒有任何腳本錯誤。Dependabot 也更新它的 npm 套件。
+- 實測中修正：手機寬度的對話框按鈕列超出邊框（改為可換行）；拆分頁的長名稱被截斷。
+- 不做：OpenSubsonic（使用者決定）、設定裡的祕密加密、`blob_locations` 與工作佇列套件。
+
 ### 網頁端（2026-10-02，D8）
 
 - 頁面：首頁（最近加入）、搜尋、曲庫（專輯／歌手／歌曲）、專輯、歌手、正在播放與佇列、任務中心（下載：新增、選檔、暫停、繼續、取消；匯入：逐檔狀態、重試）、上傳音樂（檔案或資料夾）、設定（Drive 狀態與重新連線、登出）。

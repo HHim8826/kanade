@@ -292,7 +292,7 @@ div.track { padding: 0 0 0 4px; gap: 0; cursor: default; }
 /* The scrolling part reserves its scrollbar's room and pads its edges, so focus rings, corners and
    resize handles are never cut off (review #29). */
 .dialog-body { overflow: auto; flex: 1; scrollbar-gutter: stable; padding: 4px 6px; margin: -4px -6px; }
-.dialog-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.dialog-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; font-size: 13px; color: var(--on-surface-variant); }
 .field input:not([type=file]), .field textarea {
   font: inherit; font-size: 15px; color: var(--on-surface); padding: 12px; border-radius: var(--radius-s);
@@ -578,7 +578,7 @@ body.locked .content { overflow: hidden; }
 /* Names that are several artists (D13) */
 .split-list { list-style: none; margin: 16px 0 0; padding: 0; }
 .split-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.split-head .title { overflow-wrap: anywhere; }
+.split-head .track-text .title, .split-head .track-text .sub { white-space: normal; overflow-wrap: anywhere; }
 .split-parts { list-style: none; margin: 12px 0 4px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
 .split-parts li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .split-parts input { flex: 1 1 10em; min-width: 0; padding: 10px 12px; border: 1px solid var(--outline); border-radius: var(--radius-s);
