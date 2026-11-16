@@ -69,7 +69,7 @@ func (s *Server) beginBgmLink(w http.ResponseWriter, r *http.Request) {
 // cookie does not come along).
 func (s *Server) bgmCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	back := func(result string) { http.Redirect(w, r, "/app/#/settings?bangumi="+result, http.StatusFound) }
+	back := func(result string) { http.Redirect(w, r, "/app/#/settings?s=linked&bangumi="+result, http.StatusFound) }
 	if q.Get("error") != "" || q.Get("code") == "" {
 		back("denied")
 		return

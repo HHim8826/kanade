@@ -215,7 +215,7 @@ async function credits(page, token) {
 async function shuffle(page, token) {
   const picks = await api('GET', '/tracks/random?n=50&kind=all&plain=1', undefined, token);
   ok(picks.length === 4 && !picks.some((t) => t.title.includes('Instrumental')), 'plain shuffle: ' + picks.map((t) => t.title).join(', '));
-  await at(page, 'settings');
+  await at(page, 'settings?s=playback');
   const on = await page.evaluate(() => {
     const l = [...document.querySelectorAll('label')].find((x) => x.textContent.includes('隨機播放時略過伴奏與短版'));
     return l && l.querySelector('input').checked;
@@ -243,7 +243,7 @@ async function leftOpen(page) {
   const v = await page.evaluate(async () => (await axe.run('.update-bar', { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } })).violations.map((x) => x.id));
   ok(v.length === 0, 'the offer passes axe-core ' + v.join(','));
 
-  await at(page, 'settings');
+  await at(page, 'settings?s=storage');
   const backupTo = () => page.evaluate(() => {
     const s = [...document.querySelectorAll('label.field')].find((l) => l.textContent.includes('備份存到'))?.querySelector('select');
     return s ? { value: s.value, options: [...s.options].map((o) => o.value), disabled: s.disabled } : null;
@@ -269,7 +269,7 @@ async function leftOpen(page) {
 async function flows(page, token) {
   const content = () => page.evaluate(() => document.getElementById('content').scrollTop);
   await page.setViewport({ width: 390, height: 700, isMobile: true, hasTouch: true });
-  await at(page, 'settings');
+  await at(page, 'settings?s=playback');
   await page.evaluate(() => document.getElementById('content').scrollTo(0, 1500));
   await sleep(500);
   const y0 = await content();
@@ -346,10 +346,95 @@ async function flows(page, token) {
   await page.keyboard.press('Escape');
 }
 
+// The second round of the UI review (2.2, 2.8, 2.9, 2.11) and one artist under two names (D13).
+async function second(page, token) {
+  await page.setViewport({ width: 1280, height: 900 });
+  // Settings: the sections, one's own and the server's.
+  await at(page, 'settings');
+  ok((await texts(page, 'main .section-title')).join(',') === '我的偏好,伺服器管理' && (await page.$$('.settings-list a')).length === 6,
+    'settings lists its sections: ' + (await texts(page, 'main .section-title')).join(','));
+  await page.evaluate(() => [...document.querySelectorAll('.settings-list a')].find((a) => a.textContent.includes('播放')).click());
+  await sleep(1500);
+  ok((await page.evaluate(() => location.hash)) === '#/settings?s=playback' && (await texts(page, 'main h1')).includes('播放'), 'a section is a page of its own');
+
+  // The library: an order kept for the tab, and finding in the list.
+  await at(page, 'library/albums');
+  const titles = () => texts(page, 'main .album-card .title');
+  const recent = (await api('GET', '/albums?limit=50&sort=recent', undefined, token)).map((a) => a.title);
+  await page.select('.library-tools select', 'recent');
+  await sleep(1200);
+  ok((await titles()).join() === recent.join(), 'albums, the latest first: ' + (await titles()).join(', '));
+  await at(page, 'library/albums');
+  ok((await page.$eval('.library-tools select', (x) => x.value)) === 'recent' && (await titles()).join() === recent.join(), 'the order is kept');
+  await page.select('.library-tools select', 'artist');
+  await page.type('.library-tools input', 'quiet');
+  await sleep(1200);
+  ok((await titles()).join() === 'Quiet Rooms' && (await page.evaluate(() => location.hash)).includes('q=quiet'), 'finding in the list: ' + (await titles()).join(', '));
+
+  // Search: / goes there, the best result first, the arrows and Enter, the searches made.
+  await at(page, 'library/tracks');
+  await page.evaluate(() => localStorage.removeItem('kanade.searches'));
+  await page.keyboard.press('/');
+  await sleep(800);
+  ok((await page.evaluate(() => [location.hash, document.activeElement.type])).join() === '#/search,search', '/ goes to the search, ready to type');
+  await page.keyboard.type('Nao Ito');
+  await sleep(1200);
+  ok((await texts(page, '.best-result .title')).join() === 'Nao Ito', 'the best result is the artist named so');
+  ok((await texts(page, '.search-results .section-title')).join(',') === '最佳結果,歌曲,歌手,專輯', 'results in kinds: ' + (await texts(page, '.search-results .section-title')).join(','));
+  await page.keyboard.press('ArrowDown');
+  ok(await page.evaluate(() => document.activeElement.classList.contains('best-result')), '↓ goes to the first result');
+  await page.keyboard.press('ArrowUp');
+  ok(await page.evaluate(() => document.activeElement.type === 'search'), '↑ goes back to the box');
+  await page.keyboard.press('Enter');
+  await sleep(1200);
+  ok((await page.evaluate(() => location.hash)).startsWith('#/artist/'), 'Enter opens the first result');
+  await at(page, 'search');
+  ok((await texts(page, '.past-search .grow')).join() === 'Nao Ito', 'the search made is offered again');
+
+  // Shuffle and repeat are two switches.
+  const tracks = await api('GET', '/tracks?limit=10', undefined, token);
+  await page.evaluate(() => [...document.querySelectorAll('.past-search .row')][0].click());
+  await sleep(1200);
+  await page.evaluate(() => document.querySelector('.search-results .track-main').click());
+  await sleep(1200);
+  const mode = () => page.evaluate(() => JSON.parse(localStorage.getItem('kanade.player')).mode);
+  const bar = (label) => page.evaluate((l) => document.querySelector(`.player-bar [aria-label^="${l}"]`).click(), label);
+  await bar('隨機播放');
+  await sleep(300);
+  const shuffleOnly = await mode();
+  await bar('循環');
+  await sleep(300);
+  const both = await mode();
+  const pressed = await page.$eval('.player-bar [aria-label="隨機播放"]', (b) => b.getAttribute('aria-pressed'));
+  await bar('隨機播放');
+  await bar('循環');
+  await bar('循環');
+  await sleep(300);
+  ok([shuffleOnly, both, pressed, await mode()].join() === 'shuffle-off,shuffle,true,order', 'shuffle and repeat: ' + [shuffleOnly, both, pressed, await mode()].join());
+
+  // One artist under two names: proposed, merged, the song's tag as it was, found by either name.
+  const stair = tracks.find((t) => t.title === 'Stairwell');
+  await api('PATCH', '/tracks/' + stair.id, { artist: 'イトウナオ' }, token);
+  const same = await api('GET', '/artists/same', undefined, token);
+  ok(same.pairs.length === 1 && same.pairs[0].reason === 'reading' && [same.pairs[0].a.name, same.pairs[0].b.name].sort().join() === 'Nao Ito,イトウナオ',
+    'names read alike are proposed: ' + JSON.stringify(same.pairs));
+  await at(page, 'organize');
+  ok((await texts(page, '.summary-card .title')).some((t) => t.includes('組歌手看起來是同一位')), 'the page to sort out says so');
+  await at(page, 'same');
+  await page.evaluate(() => [...document.querySelectorAll('.same-pair button')].find((b) => b.textContent.includes('保留「Nao Ito」')).click());
+  await sleep(1500);
+  const after = await api('GET', '/artists?limit=50', undefined, token);
+  const nao = after.find((a) => a.name === 'Nao Ito');
+  ok(nao && nao.tracks === 2 && !after.some((a) => a.name === 'イトウナオ'), 'merged: ' + after.map((a) => a.name + '/' + a.tracks).join(', '));
+  ok((await api('GET', '/tracks/' + stair.id, undefined, token)).artist === 'イトウナオ', 'the song says what it said');
+  ok((await api('GET', '/search?q=' + encodeURIComponent('イトウ'), undefined, token)).artists.map((a) => a.name).join() === 'Nao Ito', 'and either name finds the artist');
+  ok((await texts(page, '.toast')).some((t) => t.includes('已合併')), 'the merge can be undone from its note');
+}
+
 // Keyboard and focus (review #265–#271).
 async function keyboard(page) {
   await look(page, 'violet', 'light');
-  await at(page, 'settings');
+  await at(page, 'settings?s=look');
   const g = await page.$$eval('[role=radiogroup][aria-label="配色"] [role=radio]', (r) => r.map((b) => [b.tabIndex, b.getAttribute('aria-checked')]));
   ok(g.length > 1 && g.filter((x) => x[0] === 0).length === 1 && g.find((x) => x[0] === 0)[1] === 'true', '配色: one tab stop, on the chosen one');
   await page.focus('[role=radiogroup][aria-label="配色"] [role=radio][tabindex="0"]');
@@ -364,6 +449,7 @@ async function keyboard(page) {
   const stops = await page.evaluate(() => [...document.querySelectorAll('[role=radiogroup]')].filter((x) => x.querySelector('button[role=radio]'))
     .map((x) => x.querySelectorAll('[role=radio][tabindex="0"]').length));
   ok(stops.length > 0 && stops.every((n) => n === 1), 'each radio group is one tab stop: ' + stops.join(','));
+  await at(page, 'settings?s=service'); // the link to the releases
   const deco = await page.$$eval('.link', (l) => l.map((a) => getComputedStyle(a).textDecorationLine));
   ok(deco.length > 0 && deco.every((d) => d === 'underline'), 'links in sentences are underlined');
   await look(page, 'violet', 'light');
@@ -392,8 +478,9 @@ async function keyboard(page) {
   ok(ph.length > 0 && ph.every((x) => x === 'true'), 'cover placeholders are hidden from screen readers');
 }
 
-const routes = ['', 'library/albums', 'library/artists', 'library/tracks', '@album', '@artist', 'splits', 'search?q=Tide', 'me/playlists',
-  'me/stats', 'me/history', 'settings', 'feeds', 'works', 'edits', 'organize', 'tasks', '@np'];
+const routes = ['', 'library/albums', 'library/artists', 'library/tracks', '@album', '@artist', 'splits', 'same', 'search?q=Tide', 'search',
+  'me/playlists', 'me/stats', 'me/history', 'settings', 'settings?s=playback', 'settings?s=storage', 'settings?s=look', 'feeds', 'works', 'edits',
+  'organize', 'tasks', '@np'];
 
 async function accessibility(page, token) {
   const firstAlbum = (await api('GET', '/albums?limit=10', undefined, token)).find((a) => a.title === 'Quiet Rooms');
@@ -433,6 +520,7 @@ try {
   await shuffle(o.page, token);
   await leftOpen(o.page);
   await flows(o.page, token);
+  await second(o.page, token);
   await keyboard(o.page);
   await accessibility(o.page, token);
   const seen = [...new Set(errors)];

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get } from '../api.js';
 import {
-  adopt, cycleMode, fromEntry, generation, next, player, playQueue, prev, seek, setVolume, toggle, toggleMute,
+  adopt, cycleRepeat, fromEntry, generation, next, parseMode, player, playQueue, prev, seek, setVolume, toggle, toggleMute, toggleShuffle,
 } from '../player.js';
 import { device, deviceName, tab } from '../presence.js';
 import { command, control, controlDevice, devices, endControl, positionOf, send, target } from '../remote.js';
@@ -251,12 +251,19 @@ function RemoteVolume({ d }) {
   </div>`;
 }
 
-const modeLook = { order: ['order', '順序播放'], all: ['repeat', '列表循環'], one: ['repeatOne', '單曲循環'], shuffle: ['shuffle', '隨機播放'] };
+const repeatLook = { off: ['repeat', '不循環'], all: ['repeat', '列表循環'], one: ['repeatOne', '單曲循環'] };
 
-function RemoteMode({ d, size }) {
-  const [icon, label] = modeLook[d.mode] || modeLook.order;
-  return html`<${IconButton} icon=${icon} label=${`播放模式：${label}（按一下切換）`} size=${size}
-    className=${'mode' + (d.mode && d.mode !== 'order' ? ' on' : '')} onClick=${cycleMode} />`;
+// RemoteShuffle and RemoteRepeat are the device's play mode switches (review 2.9).
+function RemoteShuffle({ d, size }) {
+  const on = parseMode(d.mode).shuffle;
+  return html`<${IconButton} icon="shuffle" label="隨機播放" pressed=${on} size=${size}
+    className=${'mode' + (on ? ' on' : '')} onClick=${toggleShuffle} />`;
+}
+function RemoteRepeat({ d, size }) {
+  const { repeat } = parseMode(d.mode);
+  const [icon, label] = repeatLook[repeat];
+  return html`<${IconButton} icon=${icon} label=${`循環：${label}（按一下切換）`} size=${size}
+    className=${'mode' + (repeat !== 'off' ? ' on' : '')} onClick=${cycleRepeat} />`;
 }
 
 // useTarget is the device controlled, as last listed: or, gone from the list, how it was with
@@ -287,7 +294,7 @@ export function RemoteBar() {
         <span class="sub remote-label"><${Icon} name="devices" size=${16} />正在控制「${name}」${d.online ? '' : '（離線）'}</span></span>
     </button>
     <div class="controls">
-      <span class="wide-only"><${RemoteMode} d=${d} /></span>
+      <span class="wide-only"><${RemoteShuffle} d=${d} /><${RemoteRepeat} d=${d} /></span>
       <${IconButton} icon="prev" label="上一首" onClick=${prev} />
       <span class="remote-play">
         <${IconButton} icon=${d.state === 'playing' ? 'pause' : 'play'} label=${d.state === 'playing' ? '暫停' : '播放'} onClick=${toggle} filled />
@@ -325,6 +332,7 @@ function RemoteView() {
     <div class="np-top">
       <${IconButton} icon="expand" label="收起" onClick=${close} />
       <span class="remote-label grow"><${Icon} name="devices" size=${18} />正在控制「${name}」${d.online ? '' : '（離線）'}</span>
+      <${DevicesButton} />
       <button class="btn text" onClick=${() => { close(); endControl(); }}>結束控制</button>
     </div>
     <div class="np-main">
@@ -336,11 +344,11 @@ function RemoteView() {
         <div class="times"><span>${fmtTime(positionOf(d))}</span><span>${d.blocked ? '那台裝置要先點一下頁面才能播放' : ''}</span>
           <span>${fmtTime(d.duration_ms || 0)}</span></div>
         <div class="np-controls">
-          <${RemoteMode} d=${d} />
+          <${RemoteShuffle} d=${d} />
           <${IconButton} icon="prev" label="上一首" onClick=${prev} size=${32} />
           <${IconButton} icon=${d.state === 'playing' ? 'pause' : 'play'} label=${d.state === 'playing' ? '暫停' : '播放'} onClick=${toggle} filled size=${40} />
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
-          <${DevicesButton} />
+          <${RemoteRepeat} d=${d} />
         </div>
         <${RemoteVolume} d=${d} />
       </div>

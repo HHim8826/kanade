@@ -41,7 +41,7 @@ export function DiscordSettings() {
     const r = parseHash().query.get('discord');
     if (r && results[r]) {
       toast(...results[r]);
-      keepInAddress('settings');
+      keepInAddress('settings?s=linked');
     }
   }, []);
   // Linked: how it is doing, now and then.

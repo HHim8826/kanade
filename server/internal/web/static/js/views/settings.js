@@ -4,15 +4,15 @@ import { addPasskey, passkeyMessage, passkeysSupported } from '../passkey.js';
 import { EffectsPanel } from './effects.js';
 import { confirmDialog, textDialog } from './organize.js';
 import { showShortcuts } from '../shortcuts.js';
-import { askLite, canOpus, player, preloadLetGo, resetPlayer, setMode, setPrefs } from '../player.js';
+import { askLite, canOpus, modeOf, player, preloadLetGo, resetPlayer, setMode, setPrefs } from '../player.js';
 import { fromAgent } from '../presence.js';
 import { DiscordSettings } from './discord.js';
 import { DevicesSettings } from './remote.js';
 import { BangumiAccount } from './bangumi.js';
 import { StorageLocations } from './storage.js';
 import { loadPlaces, places } from '../places.js';
-import { href } from '../router.js';
-import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName } from '../site.js';
+import { href, parseHash } from '../router.js';
+import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName, usePageTitle } from '../site.js';
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
 import { StatsTimeZone } from './stats.js';
@@ -330,13 +330,12 @@ function StorageSettings({ conf, status }) {
     </div>`;
 }
 
-// Playback: the play mode (the player bar's own), what shuffle draws from, keeping on after the
-// queue, where a chosen song starts, preloading (reviews #72, #73, #78) and gapless playback; kept
+// Playback: shuffle and repeat (the player's own switches), keeping on after the queue, where a chosen song starts, preloading (reviews #72, #73, #78) and gapless playback; kept
 // in this browser and applied at once without stopping the song playing.
 function PlaybackSettings() {
   // One value each: a fresh object would re-render this four times a second while a song plays.
   const s = {
-    mode: useStore(player, (p) => p.mode), scope: useStore(player, (p) => p.scope), autoContinue: useStore(player, (p) => p.autoContinue),
+    shuffle: useStore(player, (p) => p.shuffle), repeat: useStore(player, (p) => p.repeat), autoContinue: useStore(player, (p) => p.autoContinue),
     plain: useStore(player, (p) => p.plain),
     preload: useStore(player, (p) => p.preload), gapless: useStore(player, (p) => p.gapless), resume: useStore(player, (p) => p.resume),
     lite: useStore(player, (p) => p.lite), liteServer: useStore(player, (p) => p.liteServer),
@@ -353,12 +352,12 @@ function PlaybackSettings() {
   const resume = (kind, k) => setPrefs({ resume: { ...s.resume, [kind]: k } });
   return html`<h2 class="section-title">播放</h2>
     <div class="card pad">
-      ${choices('播放模式（與播放列的按鈕相同）', [['order', '順序播放'], ['all', '列表循環'], ['one', '單曲循環'], ['shuffle', '隨機播放']], s.mode, setMode)}
-      ${choices('隨機播放的範圍', [['queue', '目前的佇列'], ['library', '全曲庫']], s.scope, (k) => setPrefs({ scope: k }))}
-      <p class="hint tight">「全曲庫」時，隨機播放會從整個曲庫挑歌（每首歌機會相同，不限專輯；音樂與廣播劇分開），一直接著播。首頁與曲庫的「全曲庫隨機播放」不論模式都這樣播。</p>
+      <${Toggle} label="隨機播放" sub="打亂目前佇列的順序（與播放列的按鈕相同）。要從整個曲庫隨機挑歌，用首頁或曲庫的「全曲庫隨機播放」，或播放頁「⋯」選單裡的同名項目。"
+        checked=${s.shuffle} onChange=${(on) => setMode(modeOf(on, s.repeat))} />
+      ${choices('循環（與播放列的按鈕相同）', [['off', '不循環'], ['all', '列表循環'], ['one', '單曲循環']], s.repeat, (k) => setMode(modeOf(s.shuffle, k)))}
       <${Toggle} label="隨機播放時略過伴奏與短版" sub="標題或版本說明寫著 Instrumental、Off Vocal、カラオケ、TV size、Short ver. 這類的歌不會被抽到；整個佇列都是這種歌時照常播放。從下一次隨機播放開始生效。"
         checked=${s.plain} onChange=${(on) => setPrefs({ plain: on })} />
-      <${Toggle} label="播完後自動接續" sub="佇列（專輯、歌單）播完後，從曲庫隨機挑歌接著播；自己加入的歌先播。單曲循環與列表循環時照常循環；隨機播放目前佇列時，播完一輪改為接續。"
+      <${Toggle} label="播完後自動接續" sub="佇列（專輯、歌單）播完後，從曲庫隨機挑歌接著播；自己加入的歌先播。列表循環時照常從頭再播。"
         checked=${s.autoContinue} onChange=${(on) => setPrefs({ autoContinue: on })} />
       ${choices('音樂：點一首歌時', [['start', '從頭播放'], ['resume', '從上次停下的地方']], s.resume.music, (k) => resume('music', k))}
       ${choices('廣播劇與談話：點一集時', [['resume', '從上次停下的地方'], ['start', '從頭播放']], s.resume.spoken, (k) => resume('spoken', k))}
@@ -371,7 +370,7 @@ function PlaybackSettings() {
           !canOpus ? '這個瀏覽器不能播放 Opus，開了也會播放原檔。' : s.liteServer === false ? '伺服器的 FFmpeg 不支援 Opus，開了也會播放原檔。' : ''}`}
         checked=${s.lite} onChange=${(on) => setPrefs({ lite: on })} />
       <div class="toggle-row">
-        <span class="grow"><span class="title">鍵盤快捷鍵</span><span class="sub">空白鍵播放／暫停、← → 倒退快轉、↑ ↓ 調音量；隨時按 ? 查看全部。</span></span>
+        <span class="grow"><span class="title">鍵盤快捷鍵</span><span class="sub">空白鍵播放／暫停、← → 倒退快轉、↑ ↓ 調音量、/ 搜尋；隨時按 ? 查看全部。</span></span>
         <button class="btn tonal" onClick=${showShortcuts}>查看</button>
       </div>
       <p class="hint tight">這些設定存在這個瀏覽器。</p>
@@ -799,35 +798,57 @@ function PasteConnect({ close, onDone }) {
 // Settings shows once its first reads are done (each waits at most ten seconds), all at once and in
 // a fixed order: the Drive connection decides whether the sync and inbox sections are there, so no
 // section appears above one already shown. A read that failed shows its error in its section.
+// Settings are two levels (review 2.11): a list of the sections, one's own preferences apart from
+// running the server, and a page for each. #/settings?s=<id> is a section's page.
+const groups = [
+  ['playback', '播放', '隨機與循環、播完自動接續、無縫播放、省流模式、其他裝置、音效、統計時區', 'play'],
+  ['look', '外觀', '配色、明暗、網站名稱與圖示', 'contrast'],
+  ['linked', '連結的帳號', 'Discord 狀態、Bangumi 帳號', 'link'],
+  ['account', '帳號', '登入中的裝置、通行金鑰、登出', 'key'],
+  ['storage', '音樂存放', '儲存位置、Google Drive、備份', 'folder'],
+  ['service', '下載與服務', '下載設定、服務狀態、磁碟與快取', 'download'],
+];
+const mine = ['playback', 'look', 'linked', 'account'];
+
 export function Settings({ onLogout, section }) {
+  // Back from linking Discord or Bangumi with an address of before (review 2.11): their section.
+  const q = parseHash().query;
+  const id = groups.some(([k]) => k === section) ? section : q.get('discord') || q.get('bangumi') ? 'linked' : '';
+  return id ? html`<${SettingsSection} id=${id} onLogout=${onLogout} />` : html`<${SettingsList} />`;
+}
+
+function SettingsList() {
+  const row = ([id, label, sub, icon]) => html`<li key=${id}><a class="row" href=${href('settings?s=' + id)}>
+    <span class="avatar"><${Icon} name=${icon} /></span>
+    <span class="grow track-text"><span class="title">${label}</span><span class="sub">${sub}</span></span>
+    <${Icon} name="right" /></a></li>`;
+  return html`<section>
+    <h1 class="page-title">設定</h1>
+    <h2 class="section-title">我的偏好</h2>
+    <ul class="list settings-list">${groups.filter(([k]) => mine.includes(k)).map(row)}</ul>
+    <h2 class="section-title">伺服器管理</h2>
+    <ul class="list settings-list">${groups.filter(([k]) => !mine.includes(k)).map(row)}</ul>
+  </section>`;
+}
+
+function SettingsSection({ id, onLogout }) {
+  const label = groups.find(([k]) => k === id)[1];
+  usePageTitle(label);
   const first = useLoad(async () => {
     const [status, drive, passkeys, sessions, conf, named, storage] = await Promise.all([read('/status'), read('/drive'), read('/passkeys'),
       read('/sessions'), read('/settings'), read('/site'), read('/storage')]);
     const sync = drive.data && drive.data.status.connected ? await read('/drive/sync') : null;
     return { status, drive, passkeys, sessions, conf, sync, named, storage };
   }, []);
-  if (!first.data) return html`<section><h1 class="page-title">設定</h1><div class="spinner late"></div></section>`;
-  return html`<${SettingsPage} first=${first.data} onLogout=${onLogout} section=${section} />`;
-}
-
-// The page's groups (review #233), and the bar at its top that goes to each: a phone gets to any
-// setting in a tap and a little scrolling. #/settings?s=<id> opens the page at one.
-const groups = [['storage', '音樂存放'], ['playback', '播放'], ['look', '外觀'], ['linked', '連結的帳號'], ['service', '服務與資源'], ['account', '帳號']];
-const goToGroup = (id, behavior = 'smooth') => document.getElementById('settings-' + id)?.scrollIntoView({ behavior, block: 'start' });
-
-function Group({ id, children }) {
-  const label = groups.find(([k]) => k === id)[1];
-  return html`<div class="settings-group" id=${'settings-' + id} role="region" aria-label=${label}>
-    <div class="group-label" aria-hidden="true">${label}</div>${children}</div>`;
+  const head = html`<div class="overline"><a href=${href('settings')}>設定</a></div><h1 class="page-title">${label}</h1>`;
+  if (!first.data) return html`<section>${head}<div class="spinner late"></div></section>`;
+  return html`<section>${head}<${SettingsPage} first=${first.data} onLogout=${onLogout} section=${id} /></section>`;
 }
 
 function SettingsPage({ first, onLogout, section }) {
   const status = useSection('/status', first.status);
   const drive = useSection('/drive', first.drive);
   const conf = useSection('/settings', first.conf);
-  useEffect(() => {
-    if (section) goToGroup(section, 'auto');
-  }, [section]);
   const logout = async () => {
     resetPlayer(true, true); // stop and report the playback while the login still works (review #14)
     await preloadLetGo(); // and let go of what the server preloads for it (review #240)
@@ -836,33 +857,27 @@ function SettingsPage({ first, onLogout, section }) {
   };
   const d = drive.data;
   const st = status.data;
-  return html`<section>
-    <h1 class="page-title">設定</h1>
-    <nav class="settings-nav" aria-label="設定分類">${groups.map(([id, label]) => html`<button key=${id} type="button" onClick=${() => goToGroup(id)}>${label}</button>`)}</nav>
-    <${Group} id="storage">
+  const pages = {
+    storage: () => html`
       <h2 class="section-title">儲存位置</h2>
       <${StorageLocations} first=${first.storage} />
       <h2 class="section-title" id="drive-settings">Google Drive</h2>
       <${Drive} drive=${drive} />
       ${d && d.status.connected && html`<${DriveSync} first=${first.sync} conf=${conf} />`}
-      <${Backups} />
-    <//>
-    <${Group} id="playback">
+      <${Backups} />`,
+    playback: () => html`
       <${PlaybackSettings} />
       <${DevicesSettings} />
       <h2 class="section-title">音效</h2>
       <div class="card pad"><${EffectsPanel} /></div>
-      <${StatsTimeZone} />
-    <//>
-    <${Group} id="look">
+      <${StatsTimeZone} />`,
+    look: () => html`
       <${Appearance} />
-      <${SiteSettings} first=${first.named} />
-    <//>
-    <${Group} id="linked">
+      <${SiteSettings} first=${first.named} />`,
+    linked: () => html`
       <${DiscordSettings} />
-      <${BangumiAccount} />
-    <//>
-    <${Group} id="service">
+      <${BangumiAccount} />`,
+    service: () => html`
       <${DownloadSettings} conf=${conf} />
       <h2 class="section-title">服務</h2>
       <div class="card pad">
@@ -873,13 +888,12 @@ function SettingsPage({ first, onLogout, section }) {
           ${st.disk && html`<div class=${'sub' + (st.disk.low ? ' state-failed' : '')}>磁碟：剩 ${fmtBytes(st.disk.free_bytes)}（保留 ${fmtBytes(st.disk.reserve_bytes)}）${st.disk.low ? '，空間不足' : ''}</div>`}
           <div class="sub">已運行 ${Math.floor(st.uptime_seconds / 3600)} 小時 ${Math.floor((st.uptime_seconds % 3600) / 60)} 分</div>`}
       </div>
-      <${StorageSettings} conf=${conf} status=${st} />
-    <//>
-    <${Group} id="account">
+      <${StorageSettings} conf=${conf} status=${st} />`,
+    account: () => html`
       <h2 class="section-title">登入</h2>
       <${Logins} first=${first.sessions} onLogout=${onLogout} />
       <${Passkeys} first=${first.passkeys} />
-      <div class="actions"><button class="btn outlined" onClick=${logout}><${Icon} name="logout" />登出</button></div>
-    <//>
-  </section>`;
+      <div class="actions"><button class="btn outlined" onClick=${logout}><${Icon} name="logout" />登出</button></div>`,
+  };
+  return html`<div class="settings-group">${pages[section]()}</div>`;
 }

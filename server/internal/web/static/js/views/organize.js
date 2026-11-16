@@ -766,6 +766,104 @@ export function editArtistAliases(artist) {
     onSubmit=${async (text) => done(await api('PATCH', '/artists/' + artist.id, { aliases: lines(text) }), '已更新別名')} />`);
 }
 
+// ---- one artist under two names (D13) ----
+
+const sameReasons = {
+  case: '只差大小寫、全形半形、平假名片假名或空格', order: '同一個羅馬字名字，姓和名的順序相反', reading: '假名的讀音和羅馬字一樣',
+  given: '名字的讀音一樣，姓氏一個是漢字：請確認是同一人',
+};
+
+// mergeArtist says an artist is another one, under a name chosen of the two: picked from those that
+// look like the same artist, or found by name.
+export function mergeArtist(artist) {
+  showDialog((close) => html`<${MergeArtist} artist=${artist} close=${close} />`);
+}
+
+function MergeArtist({ artist, close }) {
+  const same = useLoad(() => get('/artists/same'), []);
+  const [q, setQ] = useState('');
+  const [found, setFound] = useState(null);
+  const [other, setOther] = useState(null);
+  const [keep, setKeep] = useState(null);
+  const [busy, run] = useRunner();
+  useEffect(() => {
+    if (!q.trim()) return setFound(null);
+    const t = setTimeout(() => get('/artists?limit=20&q=' + encodeURIComponent(q.trim())).then(setFound, () => setFound([])), 250);
+    return () => clearTimeout(t);
+  }, [q]);
+  const likely = same.data ? same.data.pairs.filter((p) => p.a.id === artist.id || p.b.id === artist.id).map((p) => ({ ...(p.a.id === artist.id ? p.b : p.a), reason: p.reason })) : [];
+  const list = (found || likely).filter((x) => x.id !== artist.id);
+  const pick = (x) => {
+    setOther(x);
+    setKeep(x.tracks > (artist.tracks || 0) ? x.id : artist.id);
+  };
+  const me = { id: artist.id, name: artist.name };
+  const submit = () => run(async () => {
+    const drop = keep === artist.id ? other.id : artist.id;
+    const res = await post(`/artists/${drop}/merge`, { into: keep });
+    if (done(res, '已合併')) {
+      close();
+      if (keep !== artist.id) go(`artist/${keep}?name=${encodeURIComponent(other.name)}`);
+    }
+  });
+  return html`<${Dialog} title="和其他歌手合併" onClose=${close} actions=${html`
+      <button class="btn text" onClick=${close}>取消</button>
+      <button class="btn filled" disabled=${busy || !other} onClick=${submit}>合併</button>`}>
+    <p class="hint">同一個人在不同歌曲寫成不同名字（羅馬字、日文、其他寫法）時，合併成一位。歌曲的標籤不會改；之後匯入、寫著另一個名字的歌也會算在這位歌手；另一個名字會成為別名，搜尋時也找得到。可在修改紀錄撤回。</p>
+    ${!other ? html`
+      <label class="search-field small"><${Icon} name="search" /><input type="search" placeholder="找另一個名字" aria-label="找另一個名字" value=${q}
+        onInput=${(e) => setQ(e.target.value)} autofocus /></label>
+      ${!q.trim() && likely.length > 0 && html`<div class="sub">看起來是同一位：</div>`}
+      ${(q.trim() ? found && !list.length : !likely.length && same.data) && html`<p class="hint">${q.trim() ? '找不到這個名字。' : '輸入另一個名字的一部分，例如羅馬字或日文。'}</p>`}
+      <ul class="list">${list.map((x) => html`<li key=${x.id}><button class="row plain wide" onClick=${() => pick(x)}>
+        <span class="avatar"><${Icon} name="person" /></span>
+        <span class="grow track-text"><span class="title">${x.name}</span>${x.reason && html`<span class="sub">${sameReasons[x.reason]}</span>`}</span>
+        <span class="sub">${x.tracks} 首</span></button></li>`)}</ul>`
+    : html`
+      <div class="sub">合併「${artist.name}」和「${other.name}」，保留哪個名字？</div>
+      <div class="choice-list" role="radiogroup" aria-label="保留的名字">${[me, other].map((x) => html`<label key=${x.id} class=${keep === x.id ? 'on' : ''}>
+        <input type="radio" name="keep" checked=${keep === x.id} onChange=${() => setKeep(x.id)} />
+        <span><span class="title">${x.name}</span><span class="sub">${x.id === artist.id ? '這一頁的歌手' : `${x.tracks} 首`}</span></span></label>`)}</div>
+      <div class="actions"><button class="btn text" onClick=${() => setOther(null)}>選別的名字</button></div>`}
+  <//>`;
+}
+
+// SameArtists are the pairs of artists whose names look like one artist's, for the user to say.
+export function SameArtists() {
+  const rev = useLibRev();
+  const data = useLoad(() => get('/artists/same'), [], rev);
+  const [busy, run] = useRunner();
+  const [count, setCount] = useState(SHOWN);
+  const d = data.data;
+  const merge = (drop, keep) => run(async () => done(await post(`/artists/${drop.id}/merge`, { into: keep.id }), `已合併為「${keep.name}」`));
+  const notSame = (p) => run(async () => {
+    await post('/artists/same/not', { a: p.a.name, b: p.b.name });
+    data.reload();
+  });
+  const again = () => run(async () => {
+    await api('DELETE', '/artists/same/not');
+    data.reload();
+  });
+  const name = (x) => html`<a class="link" href=${href(`artist/${x.id}?name=${encodeURIComponent(x.name)}`)}>${x.name}</a><span class="sub"> · ${x.tracks} 首</span>`;
+  return html`<section>
+    <div class="overline"><a href=${href('organize')}>待整理</a></div>
+    <h1 class="page-title">同一位歌手</h1>
+    <p class="hint">這些名字看起來是同一個人的不同寫法（羅馬字和假名、姓名順序、大小寫）。合併後歌曲標籤不變，之後匯入的歌也會算在保留的名字；可在修改紀錄撤回。只寫漢字的名字（例如 茅原実里 和 Minori Chihara）讀音沒辦法自動判斷，請在歌手頁的「⋯ › 和其他歌手合併…」自己合併。</p>
+    ${data.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
+    ${d && !d.pairs.length && html`<${Empty} icon="person">沒有看起來是同一位的歌手。<//>`}
+    ${d && d.pairs.length > 0 && html`<ul class="same-pairs">${d.pairs.slice(0, count).map((p) => html`<li key=${p.a.id + ':' + p.b.id} class="card pad same-pair">
+      <div class="same-names">${name(p.a)}<span class="same-and" aria-label="和">↔</span>${name(p.b)}</div>
+      <div class="sub">${p.sure ? '' : html`<span class="pill">請確認</span> `}${sameReasons[p.reason]}</div>
+      <div class="actions">
+        <button class="btn tonal" disabled=${busy} onClick=${() => merge(p.b, p.a)}>保留「${p.a.name}」</button>
+        <button class="btn tonal" disabled=${busy} onClick=${() => merge(p.a, p.b)}>保留「${p.b.name}」</button>
+        <button class="btn text" disabled=${busy} onClick=${() => notSame(p)}>不是同一位</button>
+      </div></li>`)}</ul>
+      ${d.pairs.length > count && html`<div class="actions center"><button class="btn tonal" onClick=${() => setCount(count + SHOWN)}>顯示更多</button></div>`}`}
+    ${d && d.left > 0 && html`<div class="actions center"><button class="btn text" disabled=${busy} onClick=${again}>重新顯示說過不是同一位的 ${d.left} 組</button></div>`}
+  </section>`;
+}
+
 // ---- files gone from where they were (P2-6, #99) ----
 
 // ---- what is left to sort out (review 2.3) ----
@@ -776,21 +874,24 @@ export function Organize() {
   const rev = useLibRev();
   const home = useLoad(() => get('/home'), [], rev, 'home');
   const splits = useLoad(() => get('/artists/splits'), [], rev);
+  const same = useLoad(() => get('/artists/same'), [], rev);
   const folders = useLoad(() => get('/organize/folders'), [], rev);
   useStore(places, (v) => v.stores.length);
   const att = home.data && home.data.attention;
   const proposals = splits.data ? splits.data.proposals.length : 0;
+  const pairs = same.data ? same.data.pairs : [];
   const groups = folders.data || [];
   const songs = groups.reduce((n, x) => n + x.tracks.length, 0);
   const row = (to, icon, title, sub, warn) => html`<a class="card summary-card" href=${href(to)}>
     <${Icon} name=${icon} /><span class="grow track-text"><span class="title">${title}</span>${sub && html`<span class="sub">${sub}</span>`}</span>
     ${warn ? html`<span class="pill warn">${warn}</span>` : html`<span class="sub">›</span>`}</a>`;
-  const nothing = att && !proposals && !songs && !att.without_album && !att.unknown_artist && !att.missing && !att.failed_imports;
+  const nothing = att && !proposals && !pairs.length && !songs && !att.without_album && !att.unknown_artist && !att.missing && !att.failed_imports;
   return html`<section>
     <h1 class="page-title">待整理</h1>
     ${home.loading && !home.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
     ${nothing && html`<p class="hint">目前沒有需要整理的項目。</p>`}
     ${proposals > 0 && row('splits', 'person', `${proposals} 個歌手名稱看起來是幾位歌手`, splits.data.proposals.slice(0, 3).map((x) => x.name).join('、'))}
+    ${pairs.length > 0 && row('same', 'merge', `${pairs.length} 組歌手看起來是同一位`, pairs.slice(0, 2).map((p) => `${p.a.name} ↔ ${p.b.name}`).join('、'))}
     ${songs > 0 && html`<div class="card summary-card">
       <${Icon} name="album" />
       <span class="grow track-text"><span class="title">${songs} 首可以依資料夾歸入專輯</span>
@@ -803,6 +904,7 @@ export function Organize() {
     ${att && att.failed_imports > 0 && row('tasks', 'tasks', '匯入失敗', '在任務頁重試或捨棄', att.failed_imports)}
     <h2 class="section-title">其他</h2>
     ${proposals === 0 && row('splits', 'person', '拆分歌手名稱', '把「A & B」這類合寫的名字拆成各自的歌手')}
+    ${pairs.length === 0 && row('same', 'merge', '合併同一位歌手', '同一個人寫成羅馬字和日文這類不同名字時，合併成一位')}
     ${row('edits', 'history', '修改紀錄', '曲庫的每一次修改，都可以在這裡撤回')}
   </section>`;
 }

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.
 import { ApiError, api, get, post } from '../api.js';
 import { addToPlaylist, goToArtist, toggleFav, useFav } from '../actions.js';
 import {
-  canOpus, cancelSleep, clearUpcoming, clock, current, cycleMode, endScrub, extendSleep, moveItem, next, now, playAfterCurrent, playAt, player, prev,
+  canOpus, cancelSleep, clearUpcoming, clock, current, cycleRepeat, endScrub, extendSleep, moveItem, next, now, playAfterCurrent, playAt, player, playLibraryShuffle, prev, toggleShuffle,
   removeAt, resetPlayer, retryRadio, scrubTo, seek, setPrefs, setSleep, setVolume, shrinks, sleepAfterTrack, toggle, toggleMute,
 } from '../player.js';
 import { go, href } from '../router.js';
@@ -57,14 +57,18 @@ function seekKey(e, s) {
   seek(Math.min(Math.max(now() + by, 0), s.duration));
 }
 
-const modeLook = { order: ['order', '順序播放'], all: ['repeat', '列表循環'], one: ['repeatOne', '單曲循環'], shuffle: ['shuffle', '隨機播放'] };
+const repeatLook = { off: ['repeat', '不循環'], all: ['repeat', '列表循環'], one: ['repeatOne', '單曲循環'] };
 
-// ModeButton shows the play mode and switches to the next one (review #40).
-function ModeButton({ s, size }) {
-  const [icon, mode] = modeLook[s.mode];
-  const name = s.mode === 'shuffle' && s.scope === 'library' ? '隨機播放（全曲庫）' : mode;
-  return html`<${IconButton} icon=${icon} label=${`播放模式：${name}（按一下切換）`} size=${size}
-    className=${'mode' + (s.mode !== 'order' ? ' on' : '')} onClick=${cycleMode} />`;
+// ShuffleButton and RepeatButton are the two play mode switches (review 2.9); a device controlled
+// has its own (views/remote.js).
+export function ShuffleButton({ on, size }) {
+  return html`<${IconButton} icon="shuffle" label="隨機播放" pressed=${!!on} size=${size}
+    className=${'mode' + (on ? ' on' : '')} onClick=${toggleShuffle} />`;
+}
+export function RepeatButton({ repeat, size }) {
+  const [icon, name] = repeatLook[repeat] || repeatLook.off;
+  return html`<${IconButton} icon=${icon} label=${`循環：${name}（按一下切換）`} size=${size}
+    className=${'mode' + (repeat && repeat !== 'off' ? ' on' : '')} onClick=${cycleRepeat} />`;
 }
 
 function Volume({ s }) {
@@ -92,7 +96,7 @@ export function PlayerBar() {
       <span class="track-text"><span class="title">${item.title}</span><span class="sub">${s.liteWait && s.buffering ? '正在轉成省流格式…' : item.artist || '未知歌手'}</span></span>
     </button>
     <div class="controls">
-      <span class="wide-only"><${ModeButton} s=${s} /></span>
+      <span class="wide-only"><${ShuffleButton} on=${s.shuffle} /><${RepeatButton} repeat=${s.repeat} /></span>
       <span class="roomy"><${IconButton} icon="prev" label="上一首" onClick=${prev} /></span>
       <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled />
       <${IconButton} icon="next" label="下一首" onClick=${next} />
@@ -116,6 +120,8 @@ function FavButton({ trackId }) {
   return html`<${IconButton} icon=${on ? 'favorite' : 'favoriteOff'} label=${on ? '取消收藏' : '收藏'} pressed=${on}
     className=${on ? 'fav-on' : ''} onClick=${() => toggleFav('track', trackId)} />`;
 }
+
+const kindOf = (item) => (item && item.kind === 'spoken' ? 'spoken' : 'music');
 
 const showQueue = () => {
   panel.set({ tab: 'queue' });
@@ -166,13 +172,14 @@ function NowPlayingView() {
     item.albumId && { icon: 'album', label: '前往專輯', onClick: () => go('album/' + item.albumId) },
     item.trackId && { icon: 'lyrics', label: '編輯歌詞', onClick: () => editLyrics(item) },
     item.coverId && { icon: 'image', label: '檢視封面', onClick: () => viewCover(item.coverId, item.album || item.title) },
+    !(s.radio && s.radio.chosen) && { icon: 'shuffle', label: '全曲庫隨機播放', onClick: () => playLibraryShuffle(kindOf(item)) },
     { icon: 'equalizer', label: '音效…', onClick: showEffects },
     { icon: 'dataSaver', label: s.lite ? '關閉省流模式' : '開啟省流模式', onClick: () => toggleLite(s) },
   ]);
   return html`<div class="now-playing" role="dialog" aria-modal="true" aria-label="正在播放" ref=${root} onScroll=${onScroll}>
     <div class="np-top">
       <${IconButton} icon="expand" label="收起" onClick=${() => open(false)} />
-      <span class="np-top-end"><${DevicesButton} /><${IconButton} icon="more" label="更多" onClick=${menu} /></span>
+      <span class="np-top-end"><${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} /><${DevicesButton} /><${IconButton} icon="more" label="更多" onClick=${menu} /></span>
     </div>
     <div class="np-main">
       ${item.coverId
@@ -193,11 +200,11 @@ function NowPlayingView() {
         <${Seek} s=${s} className="np-seek" />
         <div class="times"><span><${Elapsed} s=${s} /></span><span>${s.buffering ? (s.liteWait ? '正在轉成省流格式…' : '緩衝中…') : ''}</span><span>${fmtTime(s.duration * 1000)}</span></div>
         <div class="np-controls">
-          <${ModeButton} s=${s} />
+          <${ShuffleButton} on=${s.shuffle} />
           <${IconButton} icon="prev" label="上一首" onClick=${prev} size=${32} />
           <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled size=${40} />
           <${IconButton} icon="next" label="下一首" onClick=${next} size=${32} />
-          <${IconButton} icon="queue" label="播放佇列" onClick=${showQueue} />
+          <${RepeatButton} repeat=${s.repeat} />
         </div>
         <${Volume} s=${s} />
         <div class="np-tools">
@@ -320,18 +327,18 @@ function Queue({ s }) {
     i < last && { icon: 'down', label: '下移', onClick: () => moveItem(i, i + 1) },
     { icon: 'close', label: '從佇列移除', onClick: () => removeAt(i) },
   ]);
-  const libraryShuffle = s.shuffle && s.scope === 'library';
   const going = !s.radio ? '' : s.radio.playlist ? `依智慧歌單「${s.radio.name}」的條件一直挑歌接著播`
-    : s.radio.chosen || libraryShuffle ? '全曲庫隨機：會一直從曲庫挑歌接著播' : '已播完佇列，正從曲庫隨機挑歌接著播';
+    : s.radio.chosen ? '全曲庫隨機：會一直從曲庫挑歌接著播' : '已播完佇列，正從曲庫隨機挑歌接著播';
+  const mode = s.radio && s.radio.chosen ? '全曲庫隨機' : [s.shuffle && '隨機播放', s.repeat !== 'off' && repeatLook[s.repeat][1]].filter(Boolean).join('、') || '順序播放';
   return html`<div class="queue">
     <div class="queue-head">
-      <span class="sub grow">${s.queue.length} 首 · ${libraryShuffle ? '全曲庫隨機' : modeLook[s.mode][1]}</span>
+      <span class="sub grow">${s.queue.length} 首 · ${mode}</span>
       <button class="btn text" disabled=${s.index >= last} onClick=${clearUpcoming}>清除待播</button>
       <button class="btn text" onClick=${() => resetPlayer()}>停止並清空</button>
     </div>
     <label class="toggle-row queue-toggle">
       <span class="grow"><span class="title">播完後自動接續</span>
-        <span class="sub">${going || (s.mode === 'all' ? '列表循環中：播完會從頭再播一次' : s.mode === 'one' ? '單曲循環中' : '佇列播完後，從曲庫隨機挑歌接著播')}</span></span>
+        <span class="sub">${going || (s.repeat === 'all' ? '列表循環中：播完會從頭再播一次' : s.repeat === 'one' ? '單曲循環中' : '佇列播完後，從曲庫隨機挑歌接著播')}</span></span>
       <input type="checkbox" role="switch" checked=${s.autoContinue} onChange=${(e) => setPrefs({ autoContinue: e.target.checked })} />
     </label>
     ${s.radioError && html`<div class="error-box" role="alert"><span>沒能${s.radio && s.radio.playlist ? '依條件' : '從曲庫'}挑歌接著播：${s.radioError}</span>

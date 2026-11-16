@@ -21,7 +21,7 @@ import { Me } from './views/me.js';
 import { Login } from './views/login.js';
 import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
-import { Edits, Missing, Organize, Splits } from './views/organize.js';
+import { Edits, Missing, Organize, SameArtists, Splits } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
 import { RemoteNowPlaying } from './views/remote.js';
 import { Settings } from './views/settings.js';
@@ -41,7 +41,7 @@ const nav = [
 
 // What each kind of page is called in the tab's title, until it names itself.
 const titles = { '': '首頁', search: '搜尋', library: '曲庫', album: '專輯', category: '分類', work: '作品', artist: '歌手',
-  playlist: '歌單', me: '我的', edits: '修改紀錄', splits: '拆分歌手名稱', missing: '遺失的檔案', organize: '待整理',
+  playlist: '歌單', me: '我的', edits: '修改紀錄', splits: '拆分歌手名稱', same: '同一位歌手', missing: '遺失的檔案', organize: '待整理',
   tasks: '任務', upload: '上傳音樂', import: '匯入預覽', feeds: 'RSS 訂閱', settings: '設定' };
 
 function Page({ route, onLogout }) {
@@ -49,7 +49,7 @@ function Page({ route, onLogout }) {
   switch (name) {
     case undefined: return html`<${Home} />`;
     case 'search': return html`<${Search} />`;
-    case 'library': return html`<${Library} tab=${arg || 'albums'} filter=${route.query.get('filter') || ''} />`;
+    case 'library': return html`<${Library} key=${arg || 'albums'} tab=${arg || 'albums'} filter=${route.query.get('filter') || ''} find=${route.query.get('q') || ''} />`;
     case 'album': return html`<${Album} id=${arg} />`;
     case 'category': return html`<${CategoryPage} id=${arg} />`;
     case 'work': return html`<${WorkPage} id=${arg} />`;
@@ -58,6 +58,7 @@ function Page({ route, onLogout }) {
     case 'me': return html`<${Me} tab=${arg || 'playlists'} />`;
     case 'edits': return html`<${Edits} />`;
     case 'splits': return html`<${Splits} />`;
+    case 'same': return html`<${SameArtists} />`;
     case 'missing': return html`<${Missing} />`;
     case 'organize': return html`<${Organize} />`;
     case 'tasks': return html`<${Tasks} />`;
@@ -118,7 +119,7 @@ function App() {
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} /><${UpdateBar} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'splits', 'missing', 'organize', 'category', 'work'].includes(section))
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'splits', 'same', 'missing', 'organize', 'category', 'work'].includes(section))
     || (key === 'me' && section === 'playlist') || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section));
   const skip = () => {
     const content = document.getElementById('content');

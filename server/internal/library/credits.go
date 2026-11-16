@@ -175,6 +175,10 @@ func credit(ctx context.Context, tx *sql.Tx, trackID int64) error {
 		return err
 	}
 	put := func(role string, pos int, name, as string) (int64, error) {
+		name, err := sameAs(ctx, tx, name)
+		if err != nil {
+			return 0, err
+		}
 		id, err := upsertArtist(ctx, tx, name)
 		if err != nil {
 			return 0, err
@@ -211,16 +215,45 @@ func credit(ctx context.Context, tx *sql.Tx, trackID int64) error {
 	return nil
 }
 
+// sameAs is the artist a name is: the user's word that a name is another artist (a romanized name,
+// another spelling: MergeArtists) holds wherever the name is credited, whole or as one of several
+// names, or as a character's voice.
+func sameAs(ctx context.Context, q querier, name string) (string, error) {
+	seen := map[string]bool{name: true}
+	for {
+		var v sql.NullString
+		err := q.QueryRowContext(ctx, `SELECT parts FROM artist_splits WHERE name = ?`, name).Scan(&v)
+		if errors.Is(err, sql.ErrNoRows) || err == nil && !v.Valid {
+			return name, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		var parts []Part
+		if json.Unmarshal([]byte(v.String), &parts) != nil || len(parts) != 1 || parts[0].CV != "" || seen[parts[0].Name] {
+			return name, nil
+		}
+		name = parts[0].Name
+		seen[name] = true
+	}
+}
+
 // knownAs says what an artist is, unless that was known already.
 func knownAs(ctx context.Context, tx *sql.Tx, id int64, kind string) error {
 	_, err := tx.ExecContext(ctx, `UPDATE artists SET kind = ? WHERE id = ? AND kind = ''`, kind, id)
 	return err
 }
 
-// creditTracksNamed works the credits out again for every track with name in a role, after the
-// user's word on how it divides changed.
+// creditTracksNamed works the credits out again for every track the user's word on name may
+// change, after it changed: those with the name in a role, whole or within, those credited to the
+// artist of that name, and those with a string the user divided into names that include it.
 func creditTracksNamed(ctx context.Context, tx *sql.Tx, name string) error {
-	ids, err := idsTx(ctx, tx, `SELECT id FROM tracks WHERE artist = ?1 OR composer = ?1 OR lyricist = ?1 OR arranger = ?1`, name)
+	quoted, _ := json.Marshal(name)
+	ids, err := idsTx(ctx, tx, `SELECT id FROM tracks WHERE instr(artist, ?1) OR instr(composer, ?1) OR instr(lyricist, ?1) OR instr(arranger, ?1)
+		OR id IN (SELECT c.track_id FROM credits c JOIN artists ar ON ar.id = c.artist_id WHERE ar.name = ?1)
+		OR artist IN (SELECT name FROM artist_splits WHERE instr(parts, ?2)) OR composer IN (SELECT name FROM artist_splits WHERE instr(parts, ?2))
+		OR lyricist IN (SELECT name FROM artist_splits WHERE instr(parts, ?2)) OR arranger IN (SELECT name FROM artist_splits WHERE instr(parts, ?2))`,
+		name, string(quoted))
 	if err != nil {
 		return err
 	}

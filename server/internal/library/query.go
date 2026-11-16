@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -71,18 +72,33 @@ func (s *Store) Albums(ctx context.Context, limit, offset int, recent bool) ([]A
 // or album artist contains Search.
 type AlbumQuery struct {
 	Limit, Offset int
-	Recent        bool  // the latest made first, else by album artist and title
-	Category      int64 // > 0: in this category; -1: in no category
+	Recent        bool   // the latest made first, else by album artist and title
+	Sort          string // artist (by album artist), title, recent, date (the newest release first), catalog
+	Category      int64  // > 0: in this category; -1: in no category
 	Search        string
 	// Place picks albums with a song whose file is in Google Drive ("drive") or in a storage
 	// location ("<kind>:<id>", #99).
 	Place string
 }
 
+// albumOrders are the orders albums are listed in (review 2.2); each ends with the ID, so pages
+// neither repeat nor skip.
+var albumOrders = map[string]string{
+	"":        `al.album_artist, al.title, al.id`,
+	"artist":  `al.album_artist, al.title, al.id`,
+	"title":   `al.title, al.album_artist, al.id`,
+	"recent":  `al.id DESC`,
+	"date":    `al.date = '', al.date DESC, al.id DESC`, // those with no date last
+	"catalog": `al.catalog = '', al.catalog, al.id`,
+}
+
 func (s *Store) AlbumsBy(ctx context.Context, q AlbumQuery) ([]AlbumSummary, error) {
-	order := `al.album_artist, al.title, al.id`
 	if q.Recent {
-		order = `al.id DESC`
+		q.Sort = "recent"
+	}
+	order, ok := albumOrders[q.Sort]
+	if !ok {
+		return nil, invalid("unknown order %q", q.Sort)
 	}
 	var where []string
 	var args []any
@@ -104,9 +120,9 @@ func (s *Store) AlbumsBy(ctx context.Context, q AlbumQuery) ([]AlbumSummary, err
 		args = append(args, len(prefix), prefix)
 	}
 	if t := strings.TrimSpace(q.Search); t != "" {
-		like := "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(t) + "%"
-		where = append(where, `(al.title LIKE ? ESCAPE '\' OR al.album_artist LIKE ? ESCAPE '\')`)
-		args = append(args, like, like)
+		like := likeOf(t)
+		where = append(where, `(al.title LIKE ? ESCAPE '\' OR al.album_artist LIKE ? ESCAPE '\' OR al.catalog LIKE ? ESCAPE '\')`)
+		args = append(args, like, like, like)
 	}
 	cond := ""
 	if len(where) > 0 {
@@ -267,11 +283,45 @@ var trackFilters = map[string]string{
 
 // Tracks lists songs by title, all of them or those a filter keeps.
 func (s *Store) Tracks(ctx context.Context, limit, offset int, filter string) ([]TrackItem, error) {
-	where, ok := trackFilters[filter]
+	return s.TracksBy(ctx, TrackQuery{Limit: limit, Offset: offset, Filter: filter})
+}
+
+// TrackQuery picks songs of the list: those a filter keeps, whose title or artist contains Search,
+// in an order: title, artist or recent (the latest added first).
+type TrackQuery struct {
+	Limit, Offset  int
+	Filter, Search string
+	Sort           string
+}
+
+var trackOrders = map[string]string{"": `t.title, t.id`, "title": `t.title, t.id`, "artist": `t.artist = '', t.artist, t.title, t.id`, "recent": `t.id DESC`}
+
+func (s *Store) TracksBy(ctx context.Context, q TrackQuery) ([]TrackItem, error) {
+	where, ok := trackFilters[q.Filter]
 	if !ok {
-		return nil, invalid("unknown filter %q", filter)
+		return nil, invalid("unknown filter %q", q.Filter)
 	}
-	return scanTracks(s.db.QueryContext(ctx, trackSQL+where+` ORDER BY t.title, t.id LIMIT ? OFFSET ?`, limit, offset)) // a total order: pages neither repeat nor skip
+	order, ok := trackOrders[q.Sort]
+	if !ok {
+		return nil, invalid("unknown order %q", q.Sort)
+	}
+	args := []any{}
+	if t := strings.TrimSpace(q.Search); t != "" {
+		cond := `(t.title LIKE ? ESCAPE '\' OR t.artist LIKE ? ESCAPE '\')`
+		if where == "" {
+			where = ` WHERE ` + cond
+		} else {
+			where += ` AND ` + cond
+		}
+		args = append(args, likeOf(t), likeOf(t))
+	}
+	args = append(args, q.Limit, q.Offset)
+	return scanTracks(s.db.QueryContext(ctx, trackSQL+where+` ORDER BY `+order+` LIMIT ? OFFSET ?`, args...)) // a total order: pages neither repeat nor skip
+}
+
+// likeOf is a LIKE pattern for text anywhere in a value.
+func likeOf(t string) string {
+	return "%" + strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`).Replace(t) + "%"
 }
 
 type Artist struct {
@@ -283,8 +333,26 @@ type Artist struct {
 
 // Artists are those who sang (or voiced the characters who sang) songs of the library (D13).
 func (s *Store) Artists(ctx context.Context, limit, offset int) ([]Artist, error) {
+	return s.ArtistsBy(ctx, limit, offset, "", "")
+}
+
+// ArtistsBy lists the artists whose name or other name contains search, by name or, with sort
+// "tracks", those with the most songs first.
+func (s *Store) ArtistsBy(ctx context.Context, limit, offset int, sort, search string) ([]Artist, error) {
+	order := map[string]string{"": `ar.name, ar.id`, "name": `ar.name, ar.id`, "tracks": `count(DISTINCT c.track_id) DESC, ar.name, ar.id`}[sort]
+	if order == "" {
+		return nil, invalid("unknown order %q", sort)
+	}
+	where, args := "", []any{}
+	if t := strings.TrimSpace(search); t != "" {
+		where = ` WHERE ar.name LIKE ?1 ESCAPE '\' OR ar.id IN (SELECT target_id FROM aliases WHERE target = 'artist' AND name LIKE ?1 ESCAPE '\')`
+		args = append(args, likeOf(t))
+	}
+	args = append(args, limit, offset)
+	n := len(args)
 	rows, err := s.db.QueryContext(ctx, `SELECT ar.id, ar.name, ar.kind, count(DISTINCT c.track_id) FROM artists ar
-		JOIN credits c ON c.artist_id = ar.id AND c.role IN ('artist', 'voice') GROUP BY ar.id ORDER BY ar.name, ar.id LIMIT ? OFFSET ?`, limit, offset)
+		JOIN credits c ON c.artist_id = ar.id AND c.role IN ('artist', 'voice')`+where+` GROUP BY ar.id ORDER BY `+order+
+		fmt.Sprintf(` LIMIT ?%d OFFSET ?%d`, n-1, n), args...)
 	if err != nil {
 		return nil, err
 	}

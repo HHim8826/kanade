@@ -326,9 +326,13 @@ function route(op, args = {}) {
   if (executing || !control.get().target) return false;
   const d = target(), name = control.get().name;
   switch (op) {
-    case 'cycleMode':
-      quietly(command('mode', { mode: P.MODES[(P.MODES.indexOf(d && d.mode) + 1) % P.MODES.length] }));
+    case 'toggleShuffle':
+    case 'cycleRepeat': {
+      const m = P.parseMode(d && d.mode);
+      const mode = op === 'toggleShuffle' ? P.modeOf(!m.shuffle, m.repeat) : P.modeOf(m.shuffle, P.REPEATS[(P.REPEATS.indexOf(m.repeat) + 1) % P.REPEATS.length]);
+      quietly(command('mode', { mode }));
       break;
+    }
     case 'mute':
       quietly(command('mute', { on: !(d && d.muted) }));
       break;

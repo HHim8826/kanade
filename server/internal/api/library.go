@@ -42,7 +42,7 @@ func pathID(r *http.Request) (int64, error) {
 
 func (s *Server) albums(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageArgs(r)
-	q := library.AlbumQuery{Limit: limit, Offset: offset, Recent: r.URL.Query().Get("sort") == "recent", Search: r.URL.Query().Get("q")}
+	q := library.AlbumQuery{Limit: limit, Offset: offset, Sort: r.URL.Query().Get("sort"), Search: r.URL.Query().Get("q")}
 	switch c := r.URL.Query().Get("category"); c {
 	case "":
 	case "none": // in no category (review #92)
@@ -98,7 +98,8 @@ func (s *Server) album(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) tracks(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageArgs(r)
-	list, err := s.lib.Tracks(r.Context(), limit, offset, r.URL.Query().Get("filter"))
+	q := r.URL.Query()
+	list, err := s.lib.TracksBy(r.Context(), library.TrackQuery{Limit: limit, Offset: offset, Filter: q.Get("filter"), Sort: q.Get("sort"), Search: q.Get("q")})
 	if err != nil {
 		s.libError(w, r, err)
 		return
@@ -142,9 +143,9 @@ func (s *Server) randomTracks(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) artists(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pageArgs(r)
-	list, err := s.lib.Artists(r.Context(), limit, offset)
+	list, err := s.lib.ArtistsBy(r.Context(), limit, offset, r.URL.Query().Get("sort"), r.URL.Query().Get("q"))
 	if err != nil {
-		s.internal(w, r, err)
+		s.libError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, list)

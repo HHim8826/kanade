@@ -1,6 +1,7 @@
 import { current, next, nudgeVolume, player, prev, seekBy, toggle, toggleMute } from './player.js';
 import { control } from './remote.js';
 import { Dialog, html, showDialog } from './ui.js';
+import { openSearch } from './views/library.js';
 
 // ---- keyboard shortcuts ----
 // Anywhere in the app, for a keyboard: not while typing, while a dialog, a menu or a cover is open
@@ -17,6 +18,7 @@ export const SHORTCUTS = [
   [[['Shift', '↑'], ['Shift', '↓']], '音量增減 5%'],
   [[['M']], '靜音／取消靜音'],
   [[['Esc']], '收起正在播放'],
+  [[['/'], ['Ctrl', 'K']], '搜尋'],
   [[['?']], '顯示這些快捷鍵'],
 ];
 export const PLAYER_SHORTCUTS = [
@@ -61,6 +63,16 @@ function ownKey(el, key) {
 }
 
 addEventListener('keydown', (e) => {
+  // / and Ctrl+K (⌘K) go to the search, from anywhere; Ctrl+K also while typing (review 2.8).
+  const ctrlK = (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k';
+  if (ctrlK || (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+    if (e.defaultPrevented || e.isComposing || document.querySelector('.scrim, .menu-scrim, .cover-view')) return;
+    if (!ctrlK && ownKey(document.activeElement, e.key)) return;
+    e.preventDefault();
+    if (player.get().nowPlayingOpen) player.set({ nowPlayingOpen: false });
+    openSearch();
+    return;
+  }
   if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.isComposing) return;
   if (document.querySelector('.scrim, .menu-scrim, .cover-view')) return;
   if (ownKey(document.activeElement, e.key)) return;

@@ -370,6 +370,65 @@ func (s *Server) decideSplits(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"group": g})
 }
 
+// sameArtists are the pairs of artists that look like one ({pairs, left}: left, the pairs the user
+// said are two).
+func (s *Server) sameArtists(w http.ResponseWriter, r *http.Request) {
+	pairs, left, err := s.lib.SameArtists(r.Context())
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pairs": pairs, "left": left})
+}
+
+// notSame keeps a pair of names ({a, b}) from being proposed as one artist again; DELETE proposes
+// every pair again.
+func (s *Server) notSame(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodDelete {
+		if err := s.lib.ProposeSameAgain(r.Context()); err != nil {
+			s.internal(w, r, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	var req struct {
+		A string `json:"a"`
+		B string `json:"b"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.lib.NotSame(r.Context(), req.A, req.B); err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// mergeArtist says the artist is another ({into}: that one's ID), as one change in the edit log.
+func (s *Server) mergeArtist(w http.ResponseWriter, r *http.Request) {
+	id, err := pathID(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	var req struct {
+		Into int64 `json:"into"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	g, err := s.lib.MergeArtists(r.Context(), id, req.Into)
+	if err != nil {
+		s.libError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"group": g})
+}
+
 // editArtist renames an artist (every track and album using exactly that name) and/or sets its
 // aliases; each is its own entry in the edit log.
 func (s *Server) editArtist(w http.ResponseWriter, r *http.Request) {

@@ -396,7 +396,7 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 
 /* ---- now playing ---- */
 .now-playing {
-  position: fixed; inset: 0; z-index: 40; overflow: auto; background: var(--surface);
+  position: fixed; inset: 0; z-index: 40; overflow: auto; overscroll-behavior: contain; background: var(--surface);
   padding: 8px 16px calc(24px + var(--safe-b)); animation: rise .2s ease-out;
 }
 @keyframes rise { from { transform: translateY(24px); opacity: 0; } }
@@ -553,9 +553,11 @@ kbd { display: inline-block; min-width: 1.9em; padding: 1px 7px; border: 1px sol
 @media (min-width: 840px) {
   .np-main { flex-direction: row; align-items: center; justify-content: center; gap: 48px; padding-top: 24px; }
 }
-/* On a phone the cover gives way to the height there is (review #165). */
+/* On a phone the cover gives way to the height there is (review #165): the height with the browser's
+   bars shown (svh), which scrolling the page does not change, so the cover does not jump as they
+   hide (dvh did). */
 @media (max-width: 839px) {
-  .np-cover { width: min(420px, 82vw, max(38dvh, 180px)); }
+  .np-cover { width: min(420px, 82vw, max(38svh, 180px)); }
 }
 @media (max-width: 839px) and (max-height: 720px) {
   .np-main { gap: 16px; }
@@ -777,8 +779,7 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 /* Songs filter, folder albums, VGMdb paste (2026-10-03) */
 .filter-seg { margin: 4px 0 16px; }
 .seg a { display: flex; align-items: center; padding: 8px 16px; color: var(--on-surface); font-size: 14px; text-decoration: none; }
-.place-filter { margin-top: 4px; }
-.place-filter .select-field { min-width: 0; max-width: 100%; white-space: nowrap; }
+.place-filter.select-field { min-width: 0; max-width: 100%; white-space: nowrap; }
 .place-filter select { min-width: 0; max-width: min(100%, 360px); text-overflow: ellipsis; }
 .seg a.on { background: var(--secondary-container); color: var(--on-secondary-container); font-weight: 600; }
 .folder-card .btn { flex: none; }
@@ -1162,20 +1163,9 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .folder-list .grow { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .folder-list .empty { padding: 12px; }
 
-/* Settings in groups, and the bar going to them (review #233) */
-.settings-nav { position: sticky; top: -16px; z-index: 3; display: flex; gap: 8px; overflow-x: auto; scrollbar-width: none;
-  margin: 0 -16px; padding: 12px 16px 8px; background: var(--surface); }
-.settings-nav::-webkit-scrollbar { display: none; }
-.settings-nav button { flex: none; padding: 6px 14px; border: 1px solid var(--outline-variant); border-radius: 16px; background: none;
-  color: var(--on-surface); font: inherit; font-size: 14px; cursor: pointer; }
-.settings-nav button:hover { background: var(--surface-container-high); }
-.settings-nav button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.settings-group { scroll-margin-top: 64px; }
-.settings-group + .settings-group { margin-top: 40px; }
-.group-label { margin: 16px 0 -12px; font-size: 13px; font-weight: 600; letter-spacing: .04em; color: var(--primary); }
-@media (min-width: 840px) {
-  .settings-nav { top: -24px; margin: 0 -32px; padding: 12px 32px 8px; }
-}
+/* Settings: the sections, one's own preferences and the server's (review 2.11). */
+.settings-list .row { padding-block: 12px; }
+.settings-list .track-text .sub { white-space: normal; }
 
 /* A dialog with something entered in it, tapped around: it stays, and says so with a nudge. */
 .dialog.nudge { animation: nudge .3s ease-out; }
@@ -1186,3 +1176,23 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 .artist-actions { margin: 0 0 8px; }
 .import-had { margin: 16px 0; }
 .import-had summary { cursor: pointer; color: var(--on-surface-variant); font-size: 13px; padding: 8px 0; }
+
+/* ---- search (review 2.8) ---- */
+.search-group { margin-top: 8px; }
+.group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.group-head .section-title { margin-bottom: 4px; }
+.best-result { display: flex; align-items: center; gap: 16px; padding: 16px; max-width: 560px; color: inherit; text-decoration: none; }
+.best-result .title { font-size: 20px; font-weight: 600; }
+.best-pic { width: 88px; height: 88px; flex: none; border-radius: var(--radius-m, 12px); object-fit: cover; }
+.avatar.best-pic { border-radius: 50%; }
+.row-pic { width: 48px; height: 48px; flex: none; border-radius: var(--radius-s); object-fit: cover; }
+.row-pic.placeholder { display: grid; place-items: center; }
+.past-search { display: flex; align-items: center; gap: 4px; }
+.past-search .row { flex: 1; min-width: 0; }
+.past-search .grow { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.library-tools .select-field select { max-width: 200px; }
+.same-pairs { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 12px; }
+.same-pair { display: flex; flex-direction: column; gap: 6px; }
+.same-names { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; font-size: 16px; overflow-wrap: anywhere; }
+.same-and { color: var(--on-surface-variant); }
+.same-pair .actions { margin-top: 4px; }

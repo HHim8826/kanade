@@ -147,7 +147,7 @@ export function BangumiAccount() {
     const r = parseHash().query.get('bangumi');
     if (r && results[r]) {
       toast(...results[r]);
-      keepInAddress('settings');
+      keepInAddress('settings?s=linked');
     }
   }, []);
   const save = () => run(async () => {

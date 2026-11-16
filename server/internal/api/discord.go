@@ -95,7 +95,7 @@ func (s *Server) beginDiscordLink(w http.ResponseWriter, r *http.Request) {
 func (s *Server) discordCallback(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	back := func(result string) {
-		http.Redirect(w, r, "/app/#/settings?discord="+result, http.StatusFound)
+		http.Redirect(w, r, "/app/#/settings?s=linked&discord="+result, http.StatusFound)
 	}
 	if q.Get("error") != "" {
 		back("denied")

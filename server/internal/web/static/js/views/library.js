@@ -10,7 +10,7 @@ import { control } from '../remote.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumActions, Categorize, SongActions, editSections } from './batch.js';
 import { CategoriesTab } from './categories.js';
-import { WorkGrid, WorkImage, WorksTab, bindSubject, linkWorks, trackWorks, useTags } from './works.js';
+import { WorkImage, WorksTab, bindSubject, linkWorks, trackWorks, useTags } from './works.js';
 import { SubjectChips } from './bangumi.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
@@ -18,7 +18,7 @@ import { addDownload } from './tasks.js';
 import { viewCover } from './coverview.js';
 import { moveFiles } from './moves.js';
 import { AlbumGallery, openGallery, uploadImages } from './gallery.js';
-import { changeCover, editAlbum, editArtistAliases, folderAlbums, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
+import { changeCover, editAlbum, editArtistAliases, folderAlbums, mergeArtist, identifyAlbum, mergeAlbum, removeAlbum, removeFromAlbum, renameArtist,
   restoreAlbum, splitAlbum, useLibRev, vgmdbAlbum } from './organize.js';
 
 // Albums in one horizontally scrolling row (home page shelves).
@@ -181,8 +181,51 @@ function LoadMore({ onMore, busy }) {
 // Filters of the songs tab: the songs the home page asks to sort out.
 const trackFilters = [['', '全部'], ['no_album', '未分類（沒有專輯）'], ['no_artist', '沒有歌手']];
 
-export function Library({ tab = 'albums', filter = '' }) {
+// The orders of the lists (review 2.2), the first the server's own; the one chosen for each tab is
+// kept in this browser.
+const orders = {
+  albums: [['artist', '專輯歌手'], ['title', '標題'], ['recent', '最近加入'], ['date', '發行日'], ['catalog', '型號']],
+  tracks: [['title', '標題'], ['artist', '歌手'], ['recent', '最近加入']],
+  artists: [['name', '名稱'], ['tracks', '歌曲數']],
+};
+const ORDERS = 'kanade.orders';
+function readOrders() {
+  try {
+    return JSON.parse(localStorage.getItem(ORDERS) || '{}') || {};
+  } catch {
+    return {};
+  }
+}
+const findNoun = { albums: '專輯、歌手或型號', tracks: '歌名或歌手', artists: '歌手' };
+
+export function Library({ tab = 'albums', filter = '', find = '' }) {
   const rev = useLibRev();
+  // What to find in the list, kept in the address (going back finds it again), and the order. Each
+  // tab is a page of its own (app.js): another starts with what its address says.
+  const [typed, setTyped] = useState(find);
+  const [kept, setKept] = useState(readOrders);
+  useEffect(() => setTyped(find), [filter, find]);
+  const term = typed.trim();
+  const [later, setLater] = useState(term);
+  useEffect(() => {
+    const t = setTimeout(() => setLater(term), 250);
+    return () => clearTimeout(t);
+  }, [term]);
+  // While typing the list waits a moment; emptied or as the address says, it changes at once.
+  const q = !term || term === find.trim() ? term : later;
+  useEffect(() => { // the lists of the server's pages only: the works tab keeps its own address
+    if (!paged) return;
+    const qs = [filter && 'filter=' + filter, q && 'q=' + encodeURIComponent(q)].filter(Boolean).join('&');
+    keepInAddress('library/' + tab + (qs ? '?' + qs : ''));
+  }, [q]);
+  const order = orders[tab] && orders[tab].some(([k]) => k === kept[tab]) ? kept[tab] : '';
+  const setOrder = (k) => {
+    const next = { ...readOrders(), [tab]: k };
+    try {
+      localStorage.setItem(ORDERS, JSON.stringify(next));
+    } catch { /* storage blocked: this visit only */ }
+    setKept(next);
+  };
   const paged = !tabURL[tab];
   if (!tabs.some(([k]) => k === tab)) tab = 'albums';
   // Albums by where their files are (#95): Google Drive or a storage location, by its ID.
@@ -196,7 +239,8 @@ export function Library({ tab = 'albums', filter = '' }) {
   const placeList = [...(where.drive.connected || where.drive.songs || filter === 'drive' ? [['drive', 'Google Drive']] : []),
     ...stores.map((st) => [String(st.id), st.name])];
   const placeFilters = tab === 'albums' && (placeList.length > 1 || filter) ? [['', '全部'], ...placeList] : [];
-  const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? (tab === 'albums' ? '&place=' : '&filter=') + filter : ''}`;
+  const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? (tab === 'albums' ? '&place=' : '&filter=') + filter : ''}${
+    order ? '&sort=' + order : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
   const data = useLoad(() => get(base), [base], rev, base);
   // Later pages, for this tab, filter and library version only (review #9).
   const key = `${base}:${rev}`;
@@ -224,7 +268,7 @@ export function Library({ tab = 'albums', filter = '' }) {
   }, [key, list && list.length, own.busy, done]);
   // Albums and songs can be selected to act on them at once (review #83); another tab or filter
   // starts over.
-  const sel = useSelection(tab + '?' + filter);
+  const sel = useSelection(tab + '?' + filter + '&' + q + '&' + order);
   const canSelect = tab === 'albums' || tab === 'tracks';
   const selectable = canSelect && list;
   const keys = selectable ? list.map((x) => x.id) : [];
@@ -243,22 +287,29 @@ export function Library({ tab = 'albums', filter = '' }) {
     </nav>
     ${tab === 'tracks' && html`<nav class="seg filter-seg" aria-label="篩選">${trackFilters.map(([k, label]) => html`<a key=${k}
       class=${k === filter ? 'on' : ''} aria-current=${k === filter ? 'page' : null} href=${href('library/tracks' + (k ? '?filter=' + k : ''))}>${label}</a>`)}</nav>`}
-    ${placeFilters.length > 0 && html`<div class="toolbar place-filter"><label class="select-field">位置
-      <select value=${filter} onChange=${(e) => go('library/albums' + (e.target.value ? '?filter=' + e.target.value : ''))}>
-        ${placeFilters.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
-        ${gone && html`<option value=${filter}>（已移除的位置）</option>`}</select></label></div>`}
+    ${paged && html`<div class="list-tools library-tools">
+      <input type="search" class="grow" placeholder=${'找' + findNoun[tab]} aria-label=${'在清單中找' + findNoun[tab]} value=${typed}
+        onInput=${(e) => setTyped(e.target.value)} onKeyDown=${(e) => e.key === 'Escape' && typed && (e.stopPropagation(), setTyped(''))} />
+      <label class="select-field">排序<select value=${order || orders[tab][0][0]} onChange=${(e) => setOrder(e.target.value)}>
+        ${orders[tab].map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}</select></label>
+      ${placeFilters.length > 0 && html`<label class="select-field place-filter">位置
+        <select value=${filter} onChange=${(e) => go('library/albums' + (e.target.value ? '?filter=' + e.target.value : ''))}>
+          ${placeFilters.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
+          ${gone && html`<option value=${filter}>（已移除的位置）</option>`}</select></label>`}
+    </div>`}
     ${tab === 'tracks' && filter === 'no_album' && html`<${FolderCard} rev=${rev} />`}
     ${gone ? html`<${Empty} icon="album">這個儲存位置已經移除了。<//>`
       : data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
-    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} empty=${filter ? '這裡沒有專輯。' : undefined} />`}
-    ${tab === 'artists' && html`<${SplitCard} rev=${rev} />`}
+    ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} empty=${q ? `沒有符合「${q}」的專輯。` : filter ? '這裡沒有專輯。' : undefined} />`}
+    ${tab === 'artists' && !q && html`<${SplitCard} rev=${rev} /><${SameCard} rev=${rev} />`}
+    ${list && tab === 'artists' && !list.length && q && html`<${Empty} icon="person">沒有符合「${q}」的歌手。<//>`}
     ${list && tab === 'artists' && html`<ul class="list">
       ${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
         <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}${a.kind === 'character' && html`<span class="sub"> · 角色</span>`}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
     </ul>`}
     ${list && tab === 'tracks' && (list.length
       ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum sel=${sel} />`
-      : html`<${Empty}>${filter === 'no_album' ? '每首歌都有專輯了。' : filter === 'no_artist' ? '每首歌都有歌手了。' : '還沒有歌曲。'}<//>`)}
+      : html`<${Empty}>${q ? `沒有符合「${q}」的歌。` : filter === 'no_album' ? '每首歌都有專輯了。' : filter === 'no_artist' ? '每首歌都有歌手了。' : '還沒有歌曲。'}<//>`)}
     ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'categories' && html`<${CategoriesTab} data=${data.data} />`}
     ${data.data && tab === 'works' && html`<${WorksTab} data=${data.data} />`}
@@ -452,6 +503,7 @@ export function Artist({ id, name }) {
         every.length && '-',
         { icon: 'edit', label: '改名…', onClick: () => renameArtist(a) },
         { icon: 'note', label: '編輯別名…', onClick: () => editArtistAliases(a) },
+        { icon: 'merge', label: '和其他歌手合併…', onClick: () => mergeArtist({ ...a, tracks: every.length }) },
       ])} />
     </div>`}
     ${artist.loading && !a ? html`<${Spinner} />` : html`<${ErrorBox} error=${artist.error} onRetry=${artist.reload} />`}
@@ -477,12 +529,116 @@ function SplitCard({ rev }) {
   </div>`;
 }
 
+// SameCard offers the artists that look like one under two names (D13).
+function SameCard({ rev }) {
+  const same = useLoad(() => get('/artists/same'), [], rev);
+  const list = same.data ? same.data.pairs : [];
+  if (!list.length) return null;
+  return html`<div class="card summary-card">
+    <${Icon} name="merge" />
+    <span class="grow track-text"><span class="title">${list.length} 組歌手看起來是同一位</span>
+      <span class="sub">${list.slice(0, 2).map((p) => `${p.a.name} ↔ ${p.b.name}`).join('、')}${list.length > 2 ? ' 等' : ''}</span></span>
+    <a class="btn tonal" href=${href('same')}>逐一確認…</a>
+  </div>`;
+}
+
+// Searches made, the latest first, kept in this browser (review 2.8).
+const SEARCHES = 'kanade.searches';
+function pastSearches() {
+  try {
+    const v = JSON.parse(localStorage.getItem(SEARCHES) || '[]');
+    return Array.isArray(v) ? v.filter((x) => typeof x === 'string' && x.trim()).slice(0, 8) : [];
+  } catch {
+    return [];
+  }
+}
+function keepSearches(list) {
+  try {
+    localStorage.setItem(SEARCHES, JSON.stringify(list.slice(0, 8)));
+  } catch { /* storage blocked: not kept */ }
+}
+function rememberSearch(q) {
+  if ((q = q.trim())) keepSearches([q, ...pastSearches().filter((x) => x !== q)]);
+}
+
+// openSearch goes to the search, its box focused (/ and Ctrl+K, shortcuts.js).
+let focusOnArrival = false;
+export function openSearch() {
+  const box = document.querySelector('.search-page input[type="search"]');
+  if (box) {
+    box.focus();
+    box.select();
+    return;
+  }
+  focusOnArrival = true;
+  go('search');
+}
+
+// A result's links and songs, in the order shown: the arrows go through them (review 2.8).
+const RESULT = '.search-results :is(a.row, a.card, .track-main)';
+const fold = (t) => (t || '').normalize('NFKC').toLowerCase().replace(/[\s・･·]+/g, '');
+
+// bestOf is the artist, album or work named just as searched (or starting so), shown first.
+function bestOf(r, q) {
+  const k = fold(q);
+  if (!k) return null;
+  const all = [
+    ...r.artists.map((a) => ({ kind: 'artist', name: a.name, item: a })),
+    ...r.albums.map((a) => ({ kind: 'album', name: a.title, item: a })),
+    ...(r.works || []).map((w) => ({ kind: 'work', name: w.name, item: w })),
+  ];
+  return all.find((x) => fold(x.name) === k) || (k.length > 1 && all.find((x) => fold(x.name).startsWith(k))) || null;
+}
+
+function BestResult({ best }) {
+  const { kind, item } = best;
+  const link = kind === 'artist' ? `artist/${item.id}?name=${encodeURIComponent(item.name)}` : kind === 'album' ? 'album/' + item.id : 'work/' + item.id;
+  const pic = kind === 'artist' ? html`<span class="avatar best-pic"><${Icon} name="person" size=${36} /></span>`
+    : kind === 'album' ? html`<${Cover} id=${item.cover_id} size=${300} className="best-pic" />`
+      : html`<${WorkImage} id=${item.image ? item.id : 0} size=${300} className="best-pic" />`;
+  const sub = kind === 'artist' ? `歌手 · ${item.tracks} 首`
+    : kind === 'album' ? ['專輯', item.album_artist, item.date && item.date.slice(0, 4)].filter(Boolean).join(' · ')
+      : ['作品', item.name_cn, item.albums && `${item.albums} 張專輯`].filter(Boolean).join(' · ');
+  return html`<section class="search-group"><h2 class="section-title">最佳結果</h2>
+    <a class="row card best-result" href=${href(link)}>${pic}
+      <span class="grow track-text"><span class="title">${kind === 'work' ? item.name : best.name}</span><span class="sub">${sub}</span></span></a></section>`;
+}
+
+// Group is a kind of result: its first few, and the rest on asking.
+function Group({ title, items, n = 5, children }) {
+  const [all, setAll] = useState(false);
+  if (!items.length) return null;
+  return html`<section class="search-group">
+    <div class="group-head"><h2 class="section-title">${title}</h2>
+      ${items.length > n && html`<button class="btn text" aria-expanded=${all} onClick=${() => setAll(!all)}>${all ? '收起' : `顯示全部（${items.length}${items.length >= 50 ? '+' : ''}）`}</button>`}</div>
+    ${children(all ? items : items.slice(0, n))}
+  </section>`;
+}
+
+const albumRows = (list) => html`<ul class="list">${list.map((a) => html`<li key=${a.id}><a class="row" href=${href('album/' + a.id)}>
+  <${Cover} id=${a.cover_id} size=${96} className="row-pic" />
+  <span class="grow track-text"><span class="title">${a.title}</span>
+    <span class="sub">${[a.album_artist || '未知歌手', a.date && a.date.slice(0, 4), `${a.tracks} 首`].filter(Boolean).join(' · ')}</span></span></a></li>`)}</ul>`;
+const artistRows = (list) => html`<ul class="list">${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
+  <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}${a.kind === 'character' && html`<span class="sub"> · 角色</span>`}</span><span class="sub">${a.tracks} 首</span></a></li>`)}</ul>`;
+const workRows = (list) => html`<ul class="list">${list.map((w) => html`<li key=${w.id}><a class="row" href=${href('work/' + w.id)}>
+  <${WorkImage} id=${w.image ? w.id : 0} size=${96} className="row-pic" />
+  <span class="grow track-text"><span class="title">${w.name}</span>
+    <span class="sub">${[w.name_cn, w.albums && `${w.albums} 張專輯`, w.tracks && `${w.tracks} 首歌`].filter(Boolean).join(' · ')}</span></span></a></li>`)}</ul>`;
+
 // Search keeps its words in the address (#/search?q=…), so coming back from a result finds them
-// and their results again; an error is for the search that made it (review #164).
+// and their results again; an error is for the search that made it (review #164). The results come
+// in kinds, a few of each, the best one first (review 2.8).
 export function Search() {
   const [q, setQ] = useState(() => parseHash().query.get('q') || '');
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
+  const [past, setPast] = useState(pastSearches);
+  const box = useRef(null);
+  useEffect(() => { // arriving by / or Ctrl+K, or with a keyboard and mouse: ready to type
+    if (focusOnArrival || matchMedia('(pointer: fine)').matches) box.current && box.current.focus();
+    focusOnArrival = false;
+  }, []);
   useEffect(() => {
     keepInAddress(q.trim() ? 'search?q=' + encodeURIComponent(q) : 'search');
     setError(null);
@@ -492,27 +648,65 @@ export function Search() {
     }
     const ctrl = new AbortController();
     const t = setTimeout(() => {
-      get('/search?q=' + encodeURIComponent(q), { signal: ctrl.signal }).then((r) => { setResult(r); setError(null); },
+      get('/search?q=' + encodeURIComponent(q), { signal: ctrl.signal }).then((r) => { setResult({ q, ...r }); setError(null); },
         (e) => e.name !== 'AbortError' && setError(e));
     }, 250);
     return () => { clearTimeout(t); ctrl.abort(); };
   }, [q]);
-  const nothing = result && !result.tracks.length && !result.albums.length && !result.artists.length && !(result.works || []).length;
-  return html`<section>
+  const term = q.trim();
+  const shown = term && result ? result : null;
+  const nothing = shown && !shown.tracks.length && !shown.albums.length && !shown.artists.length && !(shown.works || []).length;
+  const best = shown && bestOf(shown, shown.q);
+  const remember = () => {
+    rememberSearch(term);
+    setPast(pastSearches());
+  };
+  // ↓ and ↑ go through the results and back to the box; Enter in the box opens the first.
+  const onKeyDown = (e) => {
+    if (e.isComposing || e.keyCode === 229 || e.altKey || e.ctrlKey || e.metaKey) return;
+    const inBox = e.target === box.current;
+    if (inBox && e.key === 'Enter') {
+      e.preventDefault();
+      remember();
+      const first = document.querySelector(RESULT);
+      if (first && shown && shown.q === q) first.click();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const all = [...document.querySelectorAll(RESULT)];
+    const at = inBox ? -1 : all.indexOf(e.target);
+    if (!inBox && at < 0) return;
+    const to = at + (e.key === 'ArrowDown' ? 1 : -1);
+    if (to >= all.length) return;
+    e.preventDefault();
+    const el = to < 0 ? box.current : all[to];
+    el.focus();
+    if (to >= 0) el.scrollIntoView({ block: 'nearest' });
+  };
+  return html`<section class="search-page" onKeyDown=${onKeyDown}>
     <h1 class="page-title">搜尋</h1>
     <label class="search-field">
       <${Icon} name="search" />
-      <input type="search" placeholder="歌名、歌手、專輯、作品" value=${q} onInput=${(e) => setQ(e.target.value)} autofocus />
+      <input type="search" ref=${box} placeholder="歌名、歌手、專輯、作品" aria-label="搜尋歌名、歌手、專輯、作品" value=${q}
+        onInput=${(e) => setQ(e.target.value)} aria-keyshortcuts="/ Control+K" />
     </label>
     <${ErrorBox} error=${error} />
-    ${q.trim() && html`<div class="actions"><a class="btn text" href=${href('feeds?q=' + encodeURIComponent(q.trim()))}><${Icon} name="download" />在 RSS 資源中找「${q.trim()}」</a></div>`}
-    ${nothing && html`<${Empty} icon="search">找不到「${q}」<//>`}
-    ${result?.artists.length > 0 && html`<h2 class="section-title">歌手</h2><ul class="list">
-      ${result.artists.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
-        <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
-    </ul>`}
-    ${result?.works?.length > 0 && html`<h2 class="section-title">作品</h2><${WorkGrid} works=${result.works} />`}
-    ${result?.albums.length > 0 && html`<h2 class="section-title">專輯</h2><${AlbumGrid} albums=${result.albums} />`}
-    ${result?.tracks.length > 0 && html`<h2 class="section-title">歌曲</h2><${TrackList} items=${result.tracks.map(fromTrack)} showAlbum />`}
+    ${!term && past.length > 0 && html`<section class="search-group">
+      <div class="group-head"><h2 class="section-title">最近搜尋</h2>
+        <button class="btn text" onClick=${() => { keepSearches([]); setPast([]); }}>清除</button></div>
+      <ul class="list past-searches">${past.map((p) => html`<li key=${p} class="past-search">
+        <button class="row plain wide" onClick=${() => { setQ(p); box.current && box.current.focus(); }}><${Icon} name="history" /><span class="grow">${p}</span></button>
+        <${IconButton} icon="close" label=${`從最近搜尋移除「${p}」`} onClick=${() => { const left = past.filter((x) => x !== p); keepSearches(left); setPast(left); }} />
+      </li>`)}</ul></section>`}
+    ${!term && !past.length && html`<p class="hint">輸入歌名、歌手、專輯或作品的一部分。在其他頁按 <kbd>/</kbd> 或 <kbd>Ctrl</kbd> + <kbd>K</kbd> 也會來到這裡。</p>`}
+    ${nothing && html`<${Empty} icon="search">找不到「${shown.q}」<//>`}
+    ${shown && html`<div class="search-results" key=${shown.q} onClick=${(e) => e.target.closest('a[href], .track-main') && remember()}>
+      ${best && html`<${BestResult} best=${best} />`}
+      <${Group} title="歌曲" items=${shown.tracks}>${(list) => html`<${TrackList} items=${list.map(fromTrack)} showAlbum />`}<//>
+      <${Group} title="歌手" items=${shown.artists}>${artistRows}<//>
+      <${Group} title="專輯" items=${shown.albums}>${albumRows}<//>
+      <${Group} title="作品" items=${shown.works || []}>${workRows}<//>
+    </div>`}
+    ${term && html`<div class="actions"><a class="btn text" href=${href('feeds?q=' + encodeURIComponent(term))}><${Icon} name="download" />在 RSS 資源中找「${term}」</a></div>`}
   </section>`;
 }

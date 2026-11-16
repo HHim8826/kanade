@@ -53,7 +53,7 @@ func TestDiscordEndpoints(t *testing.T) {
 	}
 	for q, want := range map[string]string{"?error=access_denied": "denied", "?state=forged&code=x": "expired"} {
 		rec := do(t, h, "GET", "/oauth/discord/callback"+q, "", nil)
-		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/app/#/settings?discord="+want {
+		if rec.Code != http.StatusFound || rec.Header().Get("Location") != "/app/#/settings?s=linked&discord="+want {
 			t.Fatalf("%s: %d %s", q, rec.Code, rec.Header().Get("Location"))
 		}
 	}

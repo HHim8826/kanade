@@ -122,11 +122,11 @@ func TestBangumiAccount(t *testing.T) {
 		t.Fatalf("authorize %s", begun.URL)
 	}
 	for q, want := range map[string]string{"?state=forged&code=good": "expired", "?error=access_denied": "denied"} {
-		if rec := do(t, h, "GET", "/oauth/bangumi/callback"+q, "", nil); rec.Header().Get("Location") != "/app/#/settings?bangumi="+want {
+		if rec := do(t, h, "GET", "/oauth/bangumi/callback"+q, "", nil); rec.Header().Get("Location") != "/app/#/settings?s=linked&bangumi="+want {
 			t.Fatalf("%s: %s", q, rec.Header().Get("Location"))
 		}
 	}
-	if rec := do(t, h, "GET", "/oauth/bangumi/callback?state="+u.Query().Get("state")+"&code=good", "", nil); rec.Header().Get("Location") != "/app/#/settings?bangumi=linked" {
+	if rec := do(t, h, "GET", "/oauth/bangumi/callback?state="+u.Query().Get("state")+"&code=good", "", nil); rec.Header().Get("Location") != "/app/#/settings?s=linked&bangumi=linked" {
 		t.Fatalf("linked: %s", rec.Header().Get("Location"))
 	}
 	var acct struct {
