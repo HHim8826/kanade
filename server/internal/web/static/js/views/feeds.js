@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href } from '../router.js';
-import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
+import { Dialog, Empty, ErrorBox, Icon, IconButton, PageTitle, Spinner, fmtBytes, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 
 // RSS sources of torrents (P2-5): items from the feeds, rules, automatic download.
 
@@ -21,9 +21,8 @@ export function Feeds({ tab = 'items', q = '' }) {
   const reload = () => setRev((n) => n + 1);
   return html`<section>
     <div class="page-head">
-      <h1 class="page-title">RSS 訂閱</h1>
+      <${PageTitle} up=${['tasks', '任務']}>RSS 訂閱<//>
       <div class="actions tight">
-        <a class="btn text" href=${href('tasks')}><${Icon} name="tasks" />任務</a>
         <button class="btn tonal" onClick=${() => editSource(null, reload)}><${Icon} name="add" />新增來源</button>
       </div>
     </div>

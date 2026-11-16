@@ -1,7 +1,7 @@
 import { useEffect, useState } from '../../vendor/hooks.module.js';
 import { get, post } from '../api.js';
 import { go, href } from '../router.js';
-import { Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, fmtTime, html, openMenu, showDialog, toast } from '../ui.js';
+import { Dialog, Empty, ErrorBox, Icon, IconButton, PageTitle, Spinner, fmtTime, html, openMenu, showDialog, toast } from '../ui.js';
 
 // The import preview (P2-3): how a batch's files will become albums, corrected before anything is
 // uploaded.
@@ -117,7 +117,7 @@ export function ImportReview({ id }) {
   return html`<section class="import-review">
     <div class="page-head">
       <div class="grow">
-        <h1 class="page-title">${review || p.state === 'analyzing' ? '匯入預覽' : '匯入結果'}</h1>
+        <${PageTitle} up=${['tasks', '任務']}>${review || p.state === 'analyzing' ? '匯入預覽' : '匯入結果'}<//>
         <div class="sub">${{ upload: '上傳', local: '伺服器資料夾', download: 'BT 下載', inbox: 'Drive 收件匣', source: '來源掃描' }[p.kind] || p.kind}${p.kind !== 'upload' && p.source ? '：' + p.source : ''}</div>
       </div>
       ${review && html`<div class="actions tight">

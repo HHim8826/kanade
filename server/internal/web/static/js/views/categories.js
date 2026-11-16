@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { go, href } from '../router.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
-import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
+import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, PageTitle, Spinner, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumActions } from './batch.js';
 import { AlbumGrid } from './common.js';
 import { Field, changed, done, useLibRev, useRunner } from './organize.js';
@@ -112,8 +112,7 @@ export function CategoryPage({ id }) {
     .then((res) => { if (done(res, `已將 ${sel.count} 張專輯移出「${c.name}」`)) sel.stop(); }, report);
   return html`<section>
     <div class="page-head">
-      <div><div class="overline"><a href=${href('library/categories')}>分類</a></div>
-        <h1 class=${'page-title' + (c || none ? '' : ' muted')}>${title}</h1>
+      <div><${PageTitle} up=${['library/categories', '分類']} className=${c || none ? '' : 'muted'}>${title}<//>
         <div class="sub">${count !== null && count !== undefined ? `${count} 張專輯` : '\u00a0'}</div></div>
       <div class="actions">
         <${SelectToggle} sel=${sel} disabled=${!list || !list.length} />

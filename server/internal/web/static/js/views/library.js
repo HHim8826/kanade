@@ -460,9 +460,10 @@ function AlbumFavorite({ id }) {
 const roleTitles = { voice: '配音演唱', composer: '作曲', lyricist: '作詞', arranger: '編曲' };
 
 // PeopleLine links the artists paired with this one: who voiced a character, the characters one voiced.
-function PeopleLine({ label, list }) {
-  if (!list || !list.length) return null;
-  return html`<div class="sub alias-line">${label}：${list.map((p, i) => html`${i ? '、' : ''}<a class="link"
+// A character's says it is one first (under the title, which stays where every page has it).
+function PeopleLine({ label, list, lead }) {
+  if (!list || !list.length) return lead ? html`<div class="sub alias-line">${lead}</div>` : null;
+  return html`<div class="sub alias-line">${lead && `${lead} · `}${label}：${list.map((p, i) => html`${i ? '、' : ''}<a class="link"
     href=${href(`artist/${p.id}?name=${encodeURIComponent(p.name)}`)}>${p.name}</a>`)}</div>`;
 }
 
@@ -489,10 +490,9 @@ export function Artist({ id, name }) {
   return html`<section>
     <div class="page-head">
       <div class="grow">
-        ${a && a.kind === 'character' && html`<div class="overline">角色</div>`}
         <h1 class="page-title">${a ? a.name : name || '歌手'}</h1>
+        ${a && html`<${PeopleLine} lead=${a.kind === 'character' && '角色'} label="聲優" list=${a.voices} /><${PeopleLine} label="飾演" list=${a.characters} />`}
         ${a && a.aliases.length > 0 && html`<div class="sub alias-line">別名：${a.aliases.join('、')}</div>`}
-        ${a && html`<${PeopleLine} label="聲優" list=${a.voices} /><${PeopleLine} label="飾演" list=${a.characters} />`}
       </div>
     </div>
     ${a && html`<div class="actions artist-actions">

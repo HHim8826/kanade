@@ -2,6 +2,7 @@ import { h } from '../vendor/preact.module.js';
 import { useEffect, useErrorBoundary, useLayoutEffect, useRef, useState } from '../vendor/hooks.module.js';
 import htm from '../vendor/htm.module.js';
 import { coverURL } from './api.js';
+import { href } from './router.js';
 import { createStore, useStore } from './store.js';
 
 export const html = htm.bind(h);
@@ -176,8 +177,18 @@ export function fmtQuality(a) {
   return a.bitrate ? `${f} ${Math.round(a.bitrate / 1000)}k` : f;
 }
 
-export function Spinner() {
-  return html`<div class="spinner" role="status" aria-label="載入中"></div>`;
+// Spinner shows a wait; a late one only if the wait goes on, so a short one shows nothing.
+export function Spinner({ late }) {
+  return html`<div class=${'spinner' + (late ? ' late' : '')} role="status" aria-label="載入中"></div>`;
+}
+
+// PageTitle is a page's title. A page under another names that one first, as a link back to it, on
+// the title's line: the title is where every page has it, and going in from that page leaves its
+// name where it was.
+export function PageTitle({ up, className, children }) {
+  const h1 = html`<h1 class=${'page-title' + (className ? ' ' + className : '')}>${children}</h1>`;
+  if (!up) return h1;
+  return html`<div class="title-path"><a class="up" href=${href(up[0])}>${up[1]}</a><span class="sep" aria-hidden="true">›</span>${h1}</div>`;
 }
 
 export function Empty({ icon = 'note', children }) {
@@ -209,6 +220,14 @@ export function ErrorBox({ error, onRetry }) {
 // it at once, where it was left, while it is read again (review 2.1).
 const kept = new Map();
 
+// keptAnswer and keepAnswer are that for a page that reads in its own way (the task page polls).
+export const keptAnswer = (keep) => kept.get(keep);
+export function keepAnswer(keep, data) {
+  kept.delete(keep);
+  kept.set(keep, data);
+  if (kept.size > 40) kept.delete(kept.keys().next().value);
+}
+
 export function useLoad(loader, deps, refresh, keep) {
   const key = JSON.stringify(deps);
   const [state, setState] = useState(() => (keep && kept.has(keep) ? { key, loading: false, error: null, data: kept.get(keep) }
@@ -219,11 +238,7 @@ export function useLoad(loader, deps, refresh, keep) {
     setState((s) => ({ ...s, loading: true, error: null }));
     loader().then(
       (data) => {
-        if (keep) {
-          kept.delete(keep);
-          kept.set(keep, data);
-          if (kept.size > 40) kept.delete(kept.keys().next().value);
-        }
+        if (keep) keepAnswer(keep, data);
         if (alive) setState({ key, loading: false, error: null, data });
       },
       (error) => alive && setState({ key, loading: false, error, data: null }),

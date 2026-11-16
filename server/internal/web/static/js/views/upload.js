@@ -1,7 +1,7 @@
 import { useState } from '../../vendor/hooks.module.js';
 import { ApiError, api, get, post } from '../api.js';
 import { go } from '../router.js';
-import { ErrorBox, FilePick, Icon, fmtBytes, html, toast, useLoad } from '../ui.js';
+import { ErrorBox, FilePick, Icon, PageTitle, fmtBytes, html, toast, useLoad } from '../ui.js';
 import { confirmDialog } from './organize.js';
 import { uuid } from '../uuid.js';
 
@@ -134,7 +134,7 @@ export function Upload() {
 
   const busy = progress !== null;
   return html`<section>
-    <h1 class="page-title">上傳音樂</h1>
+    <${PageTitle} up=${['tasks', '任務']}>上傳音樂<//>
     <p class="hint">選擇資料夾時會保留資料夾結構，Disc 子資料夾、封面與掃描圖都會用來整理專輯。也可以上傳 ZIP 壓縮檔。上傳後會先列出要怎麼分成專輯，確認了才開始匯入。</p>
     <div class="actions">
       <${FilePick} label="選擇檔案" icon="note" multiple disabled=${busy} onPick=${pick}

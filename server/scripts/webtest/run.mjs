@@ -204,7 +204,7 @@ async function credits(page, token) {
   ok(heads.join(',') === '配音演唱' && tags.length === 2 && tags.every((t) => t === 'Mika'), `voice page: ${heads} / ${tags}`);
   ok((await texts(page, '.alias-line')).some((t) => t === '飾演：Mika'), 'voice page links the character');
   await at(page, `artist/${byName.Mika.id}`);
-  ok((await texts(page, '.overline')).includes('角色') && (await texts(page, '.alias-line')).includes('聲優：Aoi Hoshino'), 'character page');
+  ok((await texts(page, '.alias-line')).includes('角色 · 聲優：Aoi Hoshino'), 'character page');
   const composer = (await api('GET', '/search?q=Ken', undefined, token)).artists[0];
   await at(page, `artist/${composer.id}`);
   ok((await texts(page, 'main .section-title')).filter((t) => t !== '專輯').join(',') === '作曲' && (await page.$$('main .tracks li')).length === 3,
@@ -420,6 +420,7 @@ async function second(page, token) {
     'names read alike are proposed: ' + JSON.stringify(same.pairs));
   await at(page, 'organize');
   ok((await texts(page, '.summary-card .title')).some((t) => t.includes('組歌手看起來是同一位')), 'the page to sort out says so');
+  await steady(page, token);
   await at(page, 'same');
   await page.evaluate(() => [...document.querySelectorAll('.same-pair button')].find((b) => b.textContent.includes('保留「Nao Ito」')).click());
   await sleep(1500);
@@ -429,6 +430,66 @@ async function second(page, token) {
   ok((await api('GET', '/tracks/' + stair.id, undefined, token)).artist === 'イトウナオ', 'the song says what it said');
   ok((await api('GET', '/search?q=' + encodeURIComponent('イトウ'), undefined, token)).artists.map((a) => a.name).join() === 'Nao Ito', 'and either name finds the artist');
   ok((await texts(page, '.toast')).some((t) => t.includes('已合併')), 'the merge can be undone from its note');
+}
+
+// Pages that do not jump: every title where the others are, a page under another naming it on the
+// title's line where that page has its title, and the pages read in parts or polled showing once,
+// whole, or what they showed last time (review 3.1).
+async function steady(page, token) {
+  const cdp = await page.target().createCDPSession();
+  const slow = (latency) => cdp.send('Network.emulateNetworkConditions', { offline: false, latency, downloadThroughput: -1, uploadThroughput: -1 });
+  await cdp.send('Network.enable');
+  // What the page shows, frame by frame, from going to it (in the app, as a link does) until it settles.
+  const watch = (route) => page.evaluate(async (h) => {
+    const seen = [];
+    location.hash = '#/' + h;
+    for (let i = 0; i < 50; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      const s = document.querySelector('main section');
+      seen.push(s ? `${s.querySelector('h1')?.textContent}|${[...s.children].map((e) => e.className || e.tagName).join()}|${s.textContent.length}` : '');
+      await new Promise((r) => setTimeout(r, 30));
+    }
+    return seen;
+  }, route);
+  await at(page, ''); // the home page's answer is kept: the page to sort out has it at once, and waits for the rest
+  await slow(300);
+  const parts = (await watch('organize')).filter((x) => x.startsWith('待整理|') && (x.includes('summary-card') || x.includes('hint')));
+  ok(parts.length > 0 && parts.every((x) => x === parts[0]), 'the page to sort out shows once, whole: ' + [...new Set(parts)].join(' → '));
+  await watch('library/albums');
+  const back = (await watch('organize')).filter((x) => x.startsWith('待整理|'));
+  ok(back[0] === back[back.length - 1] && back[0].includes('summary-card'), 'and at once when gone back to');
+  await slow(0);
+  await watch('tasks');
+  await watch('library/albums');
+  await slow(300);
+  const tasks = (await watch('tasks')).filter((x) => x.startsWith('任務|'));
+  ok(tasks.length > 0 && !tasks[0].includes('spinner') && tasks[0].includes('section-title'), 'the task page shows its list at once when gone back to');
+  await slow(0);
+
+  const where = async (route) => {
+    await page.evaluate((h) => { location.hash = '#/' + h; }, route);
+    await sleep(700);
+    return page.evaluate(() => {
+      const top = document.querySelector('.content').getBoundingClientRect().top;
+      const h1 = document.querySelector('main h1');
+      const up = document.querySelector('main .title-path .up');
+      return { y: Math.round(h1.getBoundingClientRect().top - top), x: Math.round((up || h1).getBoundingClientRect().left) };
+    });
+  };
+  const mika = (await api('GET', '/search?q=Mika', undefined, token)).artists[0];
+  const routes = ['', 'library/albums', 'library/categories', 'me/playlists', 'settings', 'settings?s=playback', 'settings?s=storage', 'organize',
+    'same', 'splits', 'edits', 'missing', 'tasks', 'upload', 'feeds', 'artist/' + mika.id];
+  for (const width of [1280, 400]) {
+    await page.setViewport({ width, height: 900 });
+    const at0 = await where('');
+    const off = [];
+    for (const r of routes) {
+      const w = await where(r);
+      if (w.y !== at0.y || w.x !== at0.x) off.push(`${r || 'home'} ${w.x},${w.y}`);
+    }
+    ok(off.length === 0, `every title at ${at0.x},${at0.y} (${width}px)` + (off.length ? ': ' + off.join('; ') : ''));
+  }
+  await page.setViewport({ width: 1280, height: 900 });
 }
 
 // Keyboard and focus (review #265–#271).

@@ -5,11 +5,14 @@ import { go, href } from '../router.js';
 import { driveOnly, missingNote, places, trashName, trashNote } from '../places.js';
 import { createStore, useStore } from '../store.js';
 import { siteName } from '../site.js';
-import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
+import { Cover, Dialog, Empty, ErrorBox, Icon, IconButton, PageTitle, Spinner, html, showDialog, toast, useLoad } from '../ui.js';
 import { hasKana, parseVGMdb } from '../vgmdb.js';
 
 // Organizing the library (P2-2): edit dialogs, merge / split / remove, MusicBrainz identification,
 // and the edit log. Every change is one entry in the log and can be undone.
+
+// The pages under "to sort out" name it on their title's line.
+const up = ['organize', '待整理'];
 
 // Bumped after every change, so pages that show library data load it again.
 export const libRev = createStore({ n: 0 });
@@ -846,8 +849,7 @@ export function SameArtists() {
   });
   const name = (x) => html`<a class="link" href=${href(`artist/${x.id}?name=${encodeURIComponent(x.name)}`)}>${x.name}</a><span class="sub"> · ${x.tracks} 首</span>`;
   return html`<section>
-    <div class="overline"><a href=${href('organize')}>待整理</a></div>
-    <h1 class="page-title">同一位歌手</h1>
+    <${PageTitle} up=${up}>同一位歌手<//>
     <p class="hint">這些名字看起來是同一個人的不同寫法（羅馬字和假名、姓名順序、大小寫）。合併後歌曲標籤不變，之後匯入的歌也會算在保留的名字；可在修改紀錄撤回。只寫漢字的名字（例如 茅原実里 和 Minori Chihara）讀音沒辦法自動判斷，請在歌手頁的「⋯ › 和其他歌手合併…」自己合併。</p>
     ${data.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${d && !d.pairs.length && html`<${Empty} icon="person">沒有看起來是同一位的歌手。<//>`}
@@ -873,10 +875,15 @@ export function SameArtists() {
 export function Organize() {
   const rev = useLibRev();
   const home = useLoad(() => get('/home'), [], rev, 'home');
-  const splits = useLoad(() => get('/artists/splits'), [], rev);
-  const same = useLoad(() => get('/artists/same'), [], rev);
-  const folders = useLoad(() => get('/organize/folders'), [], rev);
+  const splits = useLoad(() => get('/artists/splits'), [], rev, 'organize:splits');
+  const same = useLoad(() => get('/artists/same'), [], rev, 'organize:same');
+  const folders = useLoad(() => get('/organize/folders'), [], rev, 'organize:folders');
   useStore(places, (v) => v.stores.length);
+  // The page shows once all four are read, not a part at a time: "nothing to sort out", then cards
+  // pushing the rest down. Going back to it shows the last answers at once.
+  const reads = [home, splits, same, folders];
+  const ready = reads.every((r) => r.data || r.error);
+  const failed = reads.find((r) => r.error);
   const att = home.data && home.data.attention;
   const proposals = splits.data ? splits.data.proposals.length : 0;
   const pairs = same.data ? same.data.pairs : [];
@@ -888,8 +895,8 @@ export function Organize() {
   const nothing = att && !proposals && !pairs.length && !songs && !att.without_album && !att.unknown_artist && !att.missing && !att.failed_imports;
   return html`<section>
     <h1 class="page-title">待整理</h1>
-    ${home.loading && !home.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
-    ${nothing && html`<p class="hint">目前沒有需要整理的項目。</p>`}
+    ${!ready ? html`<${Spinner} late />` : failed && html`<${ErrorBox} error=${failed.error} onRetry=${failed.reload} />`}
+    ${ready && html`${nothing && html`<p class="hint">目前沒有需要整理的項目。</p>`}
     ${proposals > 0 && row('splits', 'person', `${proposals} 個歌手名稱看起來是幾位歌手`, splits.data.proposals.slice(0, 3).map((x) => x.name).join('、'))}
     ${pairs.length > 0 && row('same', 'merge', `${pairs.length} 組歌手看起來是同一位`, pairs.slice(0, 2).map((p) => `${p.a.name} ↔ ${p.b.name}`).join('、'))}
     ${songs > 0 && html`<div class="card summary-card">
@@ -905,7 +912,7 @@ export function Organize() {
     <h2 class="section-title">其他</h2>
     ${proposals === 0 && row('splits', 'person', '拆分歌手名稱', '把「A & B」這類合寫的名字拆成各自的歌手')}
     ${pairs.length === 0 && row('same', 'merge', '合併同一位歌手', '同一個人寫成羅馬字和日文這類不同名字時，合併成一位')}
-    ${row('edits', 'history', '修改紀錄', '曲庫的每一次修改，都可以在這裡撤回')}
+    ${row('edits', 'history', '修改紀錄', '曲庫的每一次修改，都可以在這裡撤回')}`}
   </section>`;
 }
 
@@ -913,7 +920,7 @@ export function Missing() {
   const list = useLoad(() => get('/library/missing'), []);
   useStore(places, (v) => v.stores.length);
   return html`<section>
-    <h1 class="page-title">${driveOnly() ? 'Drive 中遺失的檔案' : '遺失的檔案'}</h1>
+    <${PageTitle} up=${up}>${driveOnly() ? 'Drive 中遺失的檔案' : '遺失的檔案'}<//>
     <p class="hint">${driveOnly()
       ? '這些歌曲的音檔在 Google Drive 被刪除或移到垃圾桶，暫時無法播放；曲庫資料都還在。從 Drive 垃圾桶還原後，下一次同步（或設定頁的「完整對帳」）會自動恢復。'
       : '這些歌曲的音檔不在原本的位置（被刪除、移到垃圾桶或搬走），暫時無法播放；曲庫資料都還在。在 Google Drive 從垃圾桶還原後，下一次同步會自動恢復；在其他儲存位置把檔案放回原位後，下一次檢查或掃描會自動恢復。'}若是不要了，可以在歌曲的「編輯資訊」裡永久刪除。</p>
@@ -949,7 +956,7 @@ export function Edits() {
     }
   };
   return html`<section>
-    <h1 class="page-title">修改紀錄</h1>
+    <${PageTitle} up=${up}>修改紀錄<//>
     <p class="hint">曲庫資料的每次修改。「撤回」只還原那次改過的欄位；之後又被改過的欄位會保留，不會覆蓋你後來的修改。</p>
     ${first.loading && !first.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${first.error} onRetry=${first.reload} />`}
     ${first.data && !list.length && html`<${Empty} icon="history">還沒有修改紀錄。<//>`}
@@ -1013,7 +1020,7 @@ export function Splits() {
   });
   return html`<section>
     <div class="page-head">
-      <h1 class="page-title">拆分歌手名稱</h1>
+      <${PageTitle} up=${up}>拆分歌手名稱<//>
       ${d && tab === 'proposals' && d.proposals.length > 1 && html`<button class="btn tonal" disabled=${busy} onClick=${all}>全部照建議拆分</button>`}
     </div>
     <p class="hint">標籤裡的歌手有時是幾位合寫在一起，例如「A & B」或「角色（CV：聲優）」。確認拆分後，每個名字各自成為一位歌手，有自己的頁面；之後匯入的歌曲也照這樣拆。歌曲標籤的文字不會改，可在修改紀錄撤回。</p>

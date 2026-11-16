@@ -129,7 +129,9 @@ button { font: inherit; color: inherit; }
    The shell fills the window: the page scrolls in its own area, and the player bar and the
    navigation sit beside it rather than over it, so the scroll bar stops above them (review #48). */
 .shell { position: fixed; inset: 0; display: grid; grid-template: "main" minmax(0, 1fr) "player" auto "nav" auto / minmax(0, 1fr); }
-.content { grid-area: main; overflow-y: auto; overscroll-behavior: contain; padding: 16px 16px 24px; }
+/* The scroll bar's room is kept, so a page growing past the window (a list read in), or going to
+   another page, does not move everything sideways. */
+.content { grid-area: main; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 16px 16px 24px; }
 .page { max-width: 1200px; margin: 0 auto; }
 .nav {
   grid-area: nav; z-index: 20; height: calc(var(--nav-h) + var(--safe-b)); padding-bottom: var(--safe-b);
@@ -163,6 +165,11 @@ button { font: inherit; color: inherit; }
 
 /* ---- type and sections ---- */
 .page-title { font-size: 28px; font-weight: 500; margin: 8px 0 16px; }
+/* A page under another names it on the title's line (PageTitle), so its title is where every page's is. */
+.title-path { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 10px; margin: 8px 0 16px; font-size: 28px; font-weight: 500; line-height: 1.5; }
+.title-path .page-title { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.title-path .up, .title-path .sep { color: var(--on-surface-variant); }
+.title-path .up:hover { color: var(--on-surface); text-decoration: underline; }
 .section-title { font-size: 16px; font-weight: 600; margin: 24px 0 8px; }
 .page-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: space-between; }
 .section-head { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; justify-content: space-between; margin: 24px 0 8px; }
@@ -706,7 +713,7 @@ input[type=checkbox]:focus-visible, input[type=radio]:focus-visible { outline: 2
 .warn-text { flex-basis: 100%; color: var(--warn); font-size: 12px; }
 .search-field.small { height: 48px; margin-bottom: 8px; }
 .dialog .search-field { background: var(--surface); border: 1px solid var(--outline); }
-.alias-line { margin-top: -8px; }
+.page-title + .alias-line { margin-top: -8px; }
 button.plain { border: 0; background: none; font: inherit; color: inherit; text-align: left; cursor: pointer; padding: 0; }
 .edit-log { list-style: none; margin: 0; padding: 0; }
 .edit-log > li { border-top: 1px solid var(--outline-variant); padding: 10px 4px; }

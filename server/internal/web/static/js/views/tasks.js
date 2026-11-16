@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { href } from '../router.js';
-import { Dialog, Empty, ErrorBox, FilePick, Icon, IconButton, Spinner, fmtBytes, html, showDialog, toast } from '../ui.js';
+import { Dialog, Empty, ErrorBox, FilePick, Icon, IconButton, Spinner, fmtBytes, html, keepAnswer, keptAnswer, showDialog, toast } from '../ui.js';
 import { Field, confirmDialog, done } from './organize.js';
 import { MoveCard } from './moves.js';
 import { go } from '../router.js';
@@ -19,11 +19,11 @@ const batchKinds = { local: '伺服器資料夾', download: 'BT 下載', upload:
 
 const fmtWhen = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
-// usePoll reads now and every ms. An answer older than the one shown is dropped (a reload after
-// cancelling, a page of older ones asked for meanwhile), and a poll waits for the last one to answer
-// (review #169).
-function usePoll(loader, ms, deps = []) {
-  const [state, setState] = useState({ data: null, error: null });
+// usePoll reads now and every ms, showing first what it read last time (data). An answer older than
+// the one shown is dropped (a reload after cancelling, a page of older ones asked for meanwhile), and
+// a poll waits for the last one to answer (review #169).
+function usePoll(loader, ms, deps = [], data = null) {
+  const [state, setState] = useState({ data, error: null });
   const seq = useRef({ asked: 0, shown: 0, busy: 0 });
   const load = useCallback(() => {
     const q = seq.current, my = ++q.asked;
@@ -69,10 +69,13 @@ export function Tasks() {
     if (older.downloads || older.imports) p.set('changed', changed.current);
     return p.toString();
   };
+  // The latest tasks are kept, so going back to the page shows them at once rather than a spinner
+  // and then the list.
   const tasks = usePoll(() => get('/tasks?' + query()).then((t) => {
     changed.current ||= t.now;
+    if (!older.downloads && !older.imports) keepAnswer('tasks', t);
     return t;
-  }), 2000, [older]);
+  }), 2000, [older], keptAnswer('tasks'));
   const [adding, setAdding] = useState(false);
   const [selecting, setSelecting] = useState(null);
   const [loadingMore, setLoadingMore] = useState('');
@@ -140,7 +143,7 @@ export function Tasks() {
     <${ErrorBox} error=${tasks.error} onRetry=${tasks.reload} />
     ${tasks.data && tasks.data.disk && tasks.data.disk.low && html`<div class="error-box" role="alert"><span>
       磁碟空間不足（剩 ${fmtBytes(tasks.data.disk.free_bytes)}，需保留 ${fmtBytes(tasks.data.disk.reserve_bytes)}）：已清掉播放快取${tasks.data.disk.stopped ? '，並暫停下載、暫不接受新的下載與上傳' : ''}。空間恢復後會自動繼續，不會刪除還沒存好的檔案。</span></div>`}
-    ${!tasks.data && !tasks.error && html`<${Spinner} />`}
+    ${!tasks.data && !tasks.error && html`<${Spinner} late />`}
     ${t && html`
       ${clearable && html`<div class="task-tools"><button class="btn text" onClick=${clearAll}><${Icon} name="delete" />清除已結束的記錄</button></div>`}
       ${movesFirst && moveList}

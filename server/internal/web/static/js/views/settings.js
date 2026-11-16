@@ -16,7 +16,7 @@ import { applySite, builtInIcon, iconURL, setTitleInfo, site, siteName, usePageT
 import { loadTheme, modes, setTheme, themes } from '../theme.js';
 import { useStore } from '../store.js';
 import { StatsTimeZone } from './stats.js';
-import { Dialog, ErrorBox, FilePick, copyText, Icon, IconButton, Spinner, fmtBytes, html, radioKeys, rove, showDialog, toast, useLoad } from '../ui.js';
+import { Dialog, ErrorBox, FilePick, copyText, Icon, IconButton, PageTitle, Spinner, fmtBytes, html, radioKeys, rove, showDialog, toast, useLoad } from '../ui.js';
 
 const when = (ms) => (ms ? new Date(ms).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) : '還沒有');
 
@@ -840,8 +840,8 @@ function SettingsSection({ id, onLogout }) {
     const sync = drive.data && drive.data.status.connected ? await read('/drive/sync') : null;
     return { status, drive, passkeys, sessions, conf, sync, named, storage };
   }, []);
-  const head = html`<div class="overline"><a href=${href('settings')}>設定</a></div><h1 class="page-title">${label}</h1>`;
-  if (!first.data) return html`<section>${head}<div class="spinner late"></div></section>`;
+  const head = html`<${PageTitle} up=${['settings', '設定']}>${label}<//>`;
+  if (!first.data) return html`<section>${head}<${Spinner} late /></section>`;
   return html`<section>${head}<${SettingsPage} first=${first.data} onLogout=${onLogout} section=${id} /></section>`;
 }
 
