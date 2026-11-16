@@ -1,6 +1,6 @@
 import { get } from '../api.js';
 import { href } from '../router.js';
-import { ErrorBox, Spinner, html, useLoad } from '../ui.js';
+import { ErrorBox, Icon, Spinner, html, useLoad } from '../ui.js';
 import { CollectionsTab } from './bangumi.js';
 import { BookmarksTab } from './bookmarks.js';
 import { FavoritesTab, HistoryTab, PlaylistsTab } from './collections.js';
@@ -14,7 +14,8 @@ const tabs = [['playlists', '歌單'], ['favorites', '收藏'], ['bookmarks', '�
 export function Me({ tab }) {
   if (!tabs.some(([k]) => k === tab)) tab = 'playlists';
   return html`<section>
-    <div class="page-head"><h1 class="page-title">我的</h1></div>
+    <div class="page-head"><h1 class="page-title">我的</h1>
+      <a class="btn tonal" href=${href('settings')}><${Icon} name="settings" />設定</a></div>
     <nav class="tabs" aria-label="我的">
       ${tabs.map(([k, label]) => html`<a key=${k} aria-current=${k === tab ? 'page' : undefined} class=${k === tab ? 'active' : ''} href=${href('me/' + k)}>${label}</a>`)}
     </nav>
@@ -30,7 +31,7 @@ export function Me({ tab }) {
 // Loaded shows what path answers, read again when the library changes.
 function Loaded({ path, children }) {
   const rev = useLibRev();
-  const data = useLoad(() => get(path), [path], rev);
+  const data = useLoad(() => get(path), [path], rev, path);
   return html`${data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${data.data && children(data.data)}`;
 }

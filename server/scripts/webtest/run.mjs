@@ -97,6 +97,8 @@ async function api(method, p, body, token) {
   return text ? JSON.parse(text) : null;
 }
 
+let demoBatch = 0;
+
 async function start() {
   const bin = path.join(tmp, 'kanade');
   run('go', ['build', '-o', bin, './cmd/kanade'], { cwd: serverDir, env: { ...process.env, CGO_ENABLED: '0' } });
@@ -116,6 +118,7 @@ async function start() {
   await api('POST', '/storage', { kind: 'local', name: 'Library', mode: 'managed', config: { root: path.join(tmp, 'store') } }, token);
   await api('PUT', '/storage/default', { id: '1' }, token);
   const { id } = await api('POST', '/imports', { path: 'Demo' }, token);
+  demoBatch = id;
   for (let i = 0; ; i++) {
     const b = await api('GET', '/imports/' + id, undefined, token);
     if (b.state === 'done') {
@@ -196,7 +199,7 @@ async function credits(page, token) {
     'artists: ' + artists.map((a) => `${a.name}/${a.kind || '-'}/${a.tracks}`).join(', '));
 
   await at(page, `artist/${byName['Aoi Hoshino'].id}`);
-  const heads = await texts(page, 'main .section-title');
+  const heads = (await texts(page, 'main .section-title')).filter((t) => t !== '專輯'); // the albums sung on, when several
   const tags = await texts(page, 'main .track-tag');
   ok(heads.join(',') === '配音演唱' && tags.length === 2 && tags.every((t) => t === 'Mika'), `voice page: ${heads} / ${tags}`);
   ok((await texts(page, '.alias-line')).some((t) => t === '飾演：Mika'), 'voice page links the character');
@@ -204,7 +207,8 @@ async function credits(page, token) {
   ok((await texts(page, '.overline')).includes('角色') && (await texts(page, '.alias-line')).includes('聲優：Aoi Hoshino'), 'character page');
   const composer = (await api('GET', '/search?q=Ken', undefined, token)).artists[0];
   await at(page, `artist/${composer.id}`);
-  ok((await texts(page, 'main .section-title')).join(',') === '作曲' && (await page.$$('main .tracks li')).length === 3, 'composer page: three songs composed');
+  ok((await texts(page, 'main .section-title')).filter((t) => t !== '專輯').join(',') === '作曲' && (await page.$$('main .tracks li')).length === 3,
+    'composer page: three songs composed');
 }
 
 // Shuffling leaves the instrumental out by default (review: variants).
@@ -260,6 +264,88 @@ async function leftOpen(page) {
   ok((await texts(page, '.toast')).some((t) => t.includes('refused for the test')), 'and says why');
 }
 
+// The flows of the UI review (2026-11-16): back to a page where it was left, a phone's album page
+// and player bar, a dialog with something typed in it, the menus, and a finished import.
+async function flows(page, token) {
+  const content = () => page.evaluate(() => document.getElementById('content').scrollTop);
+  await page.setViewport({ width: 390, height: 700, isMobile: true, hasTouch: true });
+  await at(page, 'settings');
+  await page.evaluate(() => document.getElementById('content').scrollTo(0, 1500));
+  await sleep(500);
+  const y0 = await content();
+  await page.evaluate(() => { location.hash = '#/tasks'; });
+  await sleep(800);
+  ok(await content() === 0, 'another page starts at the top');
+  await page.evaluate(() => history.back());
+  await sleep(2000);
+  const y1 = await content();
+  // Sections that load late above it move it a little (the browser keeps what was in view).
+  ok(y0 >= 1000 && Math.abs(y1 - y0) <= 80, `back to settings: where it was (${y0} → ${y1})`);
+  ok((await page.$$eval('.nav a', (as) => as.filter((a) => a.offsetParent !== null).length)) === 5, 'five places at the bottom of a phone');
+
+  const album = (await api('GET', '/albums?limit=10', undefined, token)).find((a) => a.title === 'Quiet Rooms');
+  await at(page, 'album/' + album.id);
+  const first = await page.$eval('main .tracks li', (li) => li.getBoundingClientRect().top);
+  ok(first < 360, 'the first song of an album on a phone is at ' + Math.round(first));
+  const title = await page.evaluate(() => document.title);
+  ok(title.startsWith('Quiet Rooms · '), 'the tab names the album: ' + title);
+  await page.evaluate(() => [...document.querySelectorAll('.album-info .actions button')].find((b) => b.textContent.includes('播放')).click());
+  await sleep(1200);
+  const room = await page.$eval('.player-bar .now', (n) => n.getBoundingClientRect().width);
+  ok(room >= 200, 'the player bar on a phone leaves the title ' + Math.round(room) + 'px');
+  // Songs put in by hand, and another list played: the queue can come back (review 2.10).
+  await page.evaluate(() => document.querySelectorAll('main .tracks .row-more')[1].click());
+  await sleep(300);
+  await page.evaluate(() => [...document.querySelectorAll('.menu button')].find((b) => b.textContent.includes('加入佇列')).click());
+  await sleep(300);
+  await page.evaluate(() => document.querySelectorAll('main .tracks .track-main')[0].click());
+  await sleep(800);
+  ok((await texts(page, '.toast')).some((t) => t.includes('復原')), 'playing over songs put in by hand offers to undo');
+
+  // A dialog: tapped around with nothing typed it closes; with something typed it stays (also on a
+  // back gesture, or an Esc that ends a composed word), and Esc closes it.
+  await at(page, 'me/playlists');
+  const newList = () => page.evaluate(() => [...document.querySelectorAll('main button')].find((b) => b.textContent.includes('新增歌單')).click());
+  await newList();
+  await page.waitForSelector('.dialog input');
+  await page.mouse.click(5, 5);
+  await sleep(400);
+  ok(!(await page.$('.dialog')), 'a dialog with nothing typed closes when tapped around');
+  await newList();
+  await page.waitForSelector('.dialog input');
+  await page.type('.dialog input', 'Rainy');
+  await page.mouse.click(5, 5);
+  await sleep(400);
+  ok(await page.$('.dialog') && (await page.$eval('.dialog input', (i) => i.value)) === 'Rainy', 'with something typed it stays');
+  ok((await texts(page, '.toast')).some((t) => t.includes('沒有關閉')), 'and says why');
+  await page.evaluate(() => document.querySelector('.dialog input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', isComposing: true, bubbles: true })));
+  await page.evaluate(() => history.back());
+  await sleep(500);
+  ok(!!(await page.$('.dialog')), 'nor does Esc ending a composed word or going back close it');
+  await page.keyboard.press('Escape');
+  await sleep(400);
+  ok(!(await page.$('.dialog')), 'Esc closes it');
+
+  await at(page, 'import/' + demoBatch);
+  const said = await texts(page, '.summary-line');
+  ok(said.some((t) => t.startsWith('已入庫 5 首')), 'a finished import says what it did: ' + said.join(' | '));
+
+  await page.setViewport({ width: 1280, height: 900 });
+  await at(page, 'album/' + album.id);
+  ok((await page.$$eval('.nav a', (as) => as.filter((a) => a.offsetParent !== null).length)) === 6, 'settings is on the rail of a wide screen');
+  const box = await (await page.$('main .tracks .track-main')).boundingBox();
+  await page.mouse.click(box.x + 60, box.y + 10, { button: 'right' });
+  await sleep(300);
+  const items = await texts(page, '.menu [role=menuitem]');
+  ok(items.includes('前往歌手') && (await page.$$('.menu .menu-line')).length > 0, 'a right click opens the song menu: ' + items.join(','));
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => document.querySelector('.album-info .actions [aria-label="更多"]').click());
+  await sleep(300);
+  const last = await page.$$eval('.menu [role=menuitem]', (b) => ({ text: b.at(-1).textContent.trim(), danger: b.at(-1).classList.contains('danger') }));
+  ok(last.text === '移除專輯…' && last.danger, 'the album menu ends with removing it, marked: ' + JSON.stringify(last));
+  await page.keyboard.press('Escape');
+}
+
 // Keyboard and focus (review #265–#271).
 async function keyboard(page) {
   await look(page, 'violet', 'light');
@@ -307,7 +393,7 @@ async function keyboard(page) {
 }
 
 const routes = ['', 'library/albums', 'library/artists', 'library/tracks', '@album', '@artist', 'splits', 'search?q=Tide', 'me/playlists',
-  'me/stats', 'me/history', 'settings', 'feeds', 'works', 'edits', 'tasks', '@np'];
+  'me/stats', 'me/history', 'settings', 'feeds', 'works', 'edits', 'organize', 'tasks', '@np'];
 
 async function accessibility(page, token) {
   const firstAlbum = (await api('GET', '/albums?limit=10', undefined, token)).find((a) => a.title === 'Quiet Rooms');
@@ -346,6 +432,7 @@ try {
   await credits(o.page, token);
   await shuffle(o.page, token);
   await leftOpen(o.page);
+  await flows(o.page, token);
   await keyboard(o.page);
   await accessibility(o.page, token);
   const seen = [...new Set(errors)];

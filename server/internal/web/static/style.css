@@ -139,6 +139,16 @@ button { font: inherit; color: inherit; }
 .nav-icon { display: grid; place-items: center; width: min(56px, 100% - 4px); height: 30px; border-radius: 15px; transition: background .15s; }
 .nav a.active { color: var(--on-surface); font-weight: 600; }
 .nav a.active .nav-icon { background: var(--secondary-container); color: var(--on-secondary-container); }
+/* On a phone settings is on "my" page, which stands for it at the bottom (review 2.3). */
+@media (max-width: 839px) {
+  .nav a.nav-settings { display: none; }
+  .nav a.active-narrow { color: var(--on-surface); font-weight: 600; }
+  .nav a.active-narrow .nav-icon { background: var(--secondary-container); color: var(--on-secondary-container); }
+}
+.skip-link { position: fixed; z-index: 70; top: calc(8px + env(safe-area-inset-top, 0px)); left: 8px; padding: 8px 16px; border: 0; border-radius: var(--radius-s);
+  background: var(--primary); color: var(--on-primary); transform: translateY(-200%); }
+.skip-link:focus { transform: none; }
+.content:focus, .content h1:focus { outline: none; }
 
 @media (min-width: 840px) {
   .shell { grid-template: "nav main" minmax(0, 1fr) "nav player" auto / var(--rail-w) minmax(0, 1fr); }
@@ -148,6 +158,7 @@ button { font: inherit; color: inherit; }
   .nav { height: auto; padding: 16px 0; flex-direction: column; justify-content: flex-start; gap: 12px;
     border-top: 0; border-right: 1px solid var(--outline-variant); }
   .nav a { flex: none; height: 64px; }
+  .nav a.nav-settings { margin-top: auto; }
 }
 
 /* ---- type and sections ---- */
@@ -205,6 +216,19 @@ button { font: inherit; color: inherit; }
 .cover.big { width: min(240px, 60vw); aspect-ratio: 1; border-radius: var(--radius-l); box-shadow: 0 4px 16px rgb(0 0 0 / .2); }
 .album-info { flex: 1; min-width: 240px; }
 .album-info h1 { font-size: 26px; font-weight: 600; margin: 4px 0 8px; line-height: 1.25; }
+/* A phone sees the first songs with the album's head (review 2.5): the cover beside the title, where
+   it belongs and the buttons below them. */
+@media (max-width: 599px) {
+  .album-head { display: grid; grid-template-columns: 120px minmax(0, 1fr); grid-template-areas: "cover titles" "chips chips" "actions actions";
+    gap: 12px 16px; align-items: end; margin: 0 0 8px; }
+  .album-head .cover-open { grid-area: cover; }
+  .album-head .cover.big { width: 120px; border-radius: var(--radius-m); }
+  .album-info { display: contents; }
+  .album-titles { grid-area: titles; min-width: 0; }
+  .album-titles h1 { font-size: 20px; margin: 2px 0 4px; overflow-wrap: anywhere; }
+  .album-head .album-categories { grid-area: chips; margin: 0; }
+  .album-head .actions { grid-area: actions; margin: 0; }
+}
 
 /* ---- lists ---- */
 .tracks, .list, .files, .items { list-style: none; margin: 0; padding: 0; }
@@ -324,6 +348,9 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
   text-align: left; cursor: pointer; }
 .menu button:hover, .menu button:focus-visible { background: color-mix(in srgb, var(--on-surface) 8%, transparent); }
 .menu .icon { color: var(--on-surface-variant); }
+.menu button span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.menu-line { height: 1px; margin: 4px 0; background: var(--outline-variant); }
+.menu button.danger, .menu button.danger .icon { color: var(--error); }
 .files li label { display: flex; align-items: center; gap: 10px; padding: 8px 4px; border-top: 1px solid var(--outline-variant); font-size: 13px; cursor: pointer; }
 .files input { width: 18px; height: 18px; accent-color: var(--primary); flex: none; }
 .file-tools { display: flex; gap: 4px; margin: 8px 0; flex-wrap: wrap; }
@@ -338,6 +365,9 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .bar-time { font-size: 12px; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; padding: 0 8px; white-space: nowrap; }
 .wide-only { display: contents; }
 @media (max-width: 839px) { .wide-only { display: none; } }
+/* A phone's bar keeps room for the title (review 2.6); other devices playing still show. */
+.roomy { display: contents; }
+@media (max-width: 599px) { .roomy:not(:has(.badge)) { display: none; } }
 
 /* Sliders: the played or set part filled (--p), a thumb that grows on hover and focus. */
 .seek, .volume input {
@@ -388,6 +418,10 @@ code { font-family: ui-monospace, monospace; font-size: .92em; }
 .np-info .volume { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 4px;
   width: min(100%, 312px); margin: 8px auto 0; padding-right: 10px; }
 .np-info .volume input { width: 100%; }
+@media (hover: none) and (pointer: coarse) { .np-info .volume { display: none; } } /* the phone's own buttons set it */
+.np-artist { display: block; max-width: 100%; min-height: 24px; padding: 0; border: 0; background: none; text-align: left; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-artist:hover { text-decoration: underline; }
 .times { display: flex; justify-content: space-between; font-size: 12px; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
 .np-controls { display: flex; justify-content: center; align-items: center; gap: 16px; margin-top: 8px; }
 /* Five buttons, kept round: on a narrow phone the space between them gives way instead. */
@@ -585,8 +619,8 @@ body.locked .content { overflow: hidden; }
 .split-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .split-head .track-text .title, .split-head .track-text .sub { white-space: normal; overflow-wrap: anywhere; }
 .split-parts { list-style: none; margin: 12px 0 4px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
-.split-parts li { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.split-parts input { flex: 1 1 10em; min-width: 0; padding: 10px 12px; border: 1px solid var(--outline); border-radius: var(--radius-s);
+.split-parts li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 8px; }
+.split-parts input { min-width: 0; padding: 10px 12px; border: 1px solid var(--outline); border-radius: var(--radius-s);
   background: var(--surface); color: var(--on-surface); font: inherit; font-size: 15px; }
 .split-parts input:focus { outline: 2px solid var(--primary); border-color: transparent; }
 .credit-line { display: grid; grid-template-columns: max-content 1fr; gap: 4px 12px; margin: 0 0 8px; font-size: 13px; }
@@ -1142,3 +1176,13 @@ details.auth summary { cursor: pointer; color: var(--on-surface-variant); font-s
 @media (min-width: 840px) {
   .settings-nav { top: -24px; margin: 0 -32px; padding: 12px 32px 8px; }
 }
+
+/* A dialog with something entered in it, tapped around: it stays, and says so with a nudge. */
+.dialog.nudge { animation: nudge .3s ease-out; }
+.dialog.nudge2 { animation: nudge2 .3s ease-out; }
+@keyframes nudge { 40% { transform: scale(1.02); } }
+@keyframes nudge2 { 40% { transform: scale(1.02); } }
+@media (prefers-reduced-motion: reduce) { .dialog.nudge, .dialog.nudge2 { animation: none; } }
+.artist-actions { margin: 0 0 8px; }
+.import-had { margin: 16px 0; }
+.import-had summary { cursor: pointer; color: var(--on-surface-variant); font-size: 13px; padding: 8px 0; }

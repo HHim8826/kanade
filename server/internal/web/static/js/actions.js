@@ -43,15 +43,36 @@ export async function toggleFav(kind, id) {
 // trackMenu opens the "more" menu of one queue item; extra entries go at the end.
 export function trackMenu(e, item, extra = []) {
   const fav = item.trackId && favs.get().tracks.has(item.trackId);
+  const opener = e.currentTarget;
   openMenu(e, [
     { icon: 'playNext', label: '下一首播放', onClick: () => playNext(item) },
     { icon: 'queue', label: '加入佇列', onClick: () => enqueue(item) },
     item.trackId && { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist([item]) },
     item.trackId && { icon: fav ? 'favorite' : 'favoriteOff', label: fav ? '取消收藏' : '收藏', onClick: () => toggleFav('track', item.trackId) },
+    '-',
     item.albumId && { icon: 'album', label: '前往專輯', onClick: () => go('album/' + item.albumId) },
+    item.trackId && { icon: 'person', label: '前往歌手', onClick: () => goToArtist(item, opener) },
     item.trackId && { icon: 'edit', label: '編輯資訊…', onClick: () => editTrack(item.trackId) },
     ...extra,
   ]);
+}
+
+// goToArtist goes to the page of the song's artist; when it has several (a duet, a character and
+// its voice), a menu by opener asks which (review 2.7).
+export async function goToArtist(item, opener) {
+  let credits;
+  try {
+    credits = (await get('/tracks/' + item.trackId)).credits || [];
+  } catch (err) {
+    return toast(err.message, 'error');
+  }
+  const seen = new Set();
+  const people = credits.filter((c) => (c.role === 'artist' || c.role === 'voice') && !seen.has(c.artist_id) && seen.add(c.artist_id));
+  if (!people.length) return toast('這首歌沒有歌手資料');
+  if (people.length === 1) return go('artist/' + people[0].artist_id);
+  if (!opener || !opener.isConnected) opener = document.body;
+  openMenu({ currentTarget: opener, type: 'click', stopPropagation() {} },
+    people.map((c) => ({ icon: 'person', label: c.role === 'voice' ? `${c.name}（聲優）` : c.name, onClick: () => go('artist/' + c.artist_id) })));
 }
 
 // ---- playlists ----

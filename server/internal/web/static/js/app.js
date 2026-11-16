@@ -1,5 +1,5 @@
 import { render } from '../vendor/preact.module.js';
-import { useEffect, useState } from '../vendor/hooks.module.js';
+import { useEffect, useLayoutEffect, useRef, useState } from '../vendor/hooks.module.js';
 import { get, setUnauthorizedHandler } from './api.js';
 import { loadFavorites } from './actions.js';
 import { player, resetPlayer, restoreSession } from './player.js';
@@ -8,7 +8,7 @@ import { control, startRemote, stopRemote } from './remote.js';
 import './scrollbars.js';
 import './shortcuts.js';
 import { loadPlaces } from './places.js';
-import { site } from './site.js';
+import { setPageTitle, site } from './site.js';
 import { useStore } from './store.js';
 import { UpdateBar, watchUpdates } from './update.js';
 import { href, useRoute } from './router.js';
@@ -21,13 +21,15 @@ import { Me } from './views/me.js';
 import { Login } from './views/login.js';
 import { Feeds } from './views/feeds.js';
 import { ImportReview } from './views/importreview.js';
-import { Edits, Missing, Splits } from './views/organize.js';
+import { Edits, Missing, Organize, Splits } from './views/organize.js';
 import { NowPlaying, PlayerBar } from './views/player.js';
 import { RemoteNowPlaying } from './views/remote.js';
 import { Settings } from './views/settings.js';
 import { Tasks } from './views/tasks.js';
 import { Upload } from './views/upload.js';
 
+// Five places at the bottom of a phone (review 2.3); settings is on "my" page there, and at the
+// foot of the rail on a wide screen.
 const nav = [
   ['', 'home', '首頁'],
   ['search', 'search', '搜尋'],
@@ -36,6 +38,11 @@ const nav = [
   ['tasks', 'tasks', '任務'],
   ['settings', 'settings', '設定'],
 ];
+
+// What each kind of page is called in the tab's title, until it names itself.
+const titles = { '': '首頁', search: '搜尋', library: '曲庫', album: '專輯', category: '分類', work: '作品', artist: '歌手',
+  playlist: '歌單', me: '我的', edits: '修改紀錄', splits: '拆分歌手名稱', missing: '遺失的檔案', organize: '待整理',
+  tasks: '任務', upload: '上傳音樂', import: '匯入預覽', feeds: 'RSS 訂閱', settings: '設定' };
 
 function Page({ route, onLogout }) {
   const [name, arg] = route.parts;
@@ -52,6 +59,7 @@ function Page({ route, onLogout }) {
     case 'edits': return html`<${Edits} />`;
     case 'splits': return html`<${Splits} />`;
     case 'missing': return html`<${Missing} />`;
+    case 'organize': return html`<${Organize} />`;
     case 'tasks': return html`<${Tasks} />`;
     case 'upload': return html`<${Upload} />`;
     case 'import': return html`<${ImportReview} id=${arg} />`;
@@ -78,6 +86,23 @@ function App() {
     player.set({ nowPlayingOpen: false });
     control.set({ open: false });
   }, [route]);
+  useLayoutEffect(() => setPageTitle(titles[route.parts[0] || ''] || ''), [route.raw]);
+  // Another page: the keyboard and a screen reader go on from its title, not from the link that led
+  // there (review 2.12), unless the page put the focus somewhere itself.
+  const shown = useRef(route.raw);
+  useEffect(() => {
+    if (shown.current === route.raw) return;
+    shown.current = route.raw;
+    if (auth !== 'in') return;
+    const t = setTimeout(() => {
+      const content = document.getElementById('content');
+      if (!content || content.contains(document.activeElement)) return;
+      const h = content.querySelector('h1') || content;
+      h.tabIndex = -1;
+      h.focus({ preventScroll: true });
+    }, 0);
+    return () => clearTimeout(t);
+  }, [route.raw]);
   useEffect(() => {
     if (auth !== 'in') return;
     loadFavorites();
@@ -93,16 +118,24 @@ function App() {
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
   if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} /><${UpdateBar} />`;
   const section = route.parts[0] || '';
-  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'splits', 'category', 'work'].includes(section))
+  const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'splits', 'missing', 'organize', 'category', 'work'].includes(section))
     || (key === 'me' && section === 'playlist') || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section));
+  const skip = () => {
+    const content = document.getElementById('content');
+    const h = content.querySelector('h1') || content;
+    h.tabIndex = -1;
+    h.focus();
+  };
   // The page scrolls on its own above the player bar and the navigation, which keep their room
-  // (review #48).
+  // (review #48). On a phone, settings is reached from "my" page, which stands for it there.
   return html`<div class="shell">
+    <button class="skip-link" onClick=${skip}>跳到主要內容</button>
     <nav class="nav" aria-label="主要">
-      ${nav.map(([key, icon, label]) => html`<a key=${key} href=${href(key)} class=${active(key) ? 'active' : ''} aria-current=${active(key) ? 'page' : undefined}>
+      ${nav.map(([key, icon, label]) => html`<a key=${key} href=${href(key)} aria-current=${active(key) ? 'page' : undefined}
+        class=${[active(key) && 'active', key === 'settings' && 'nav-settings', key === 'me' && section === 'settings' && 'active-narrow'].filter(Boolean).join(' ')}>
         <span class="nav-icon"><${Icon} name=${icon} /></span><span class="nav-label">${label}</span></a>`)}
     </nav>
-    <main class="content" id="content"><div class="page"><${Boundary} key=${route.raw}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></div></main>
+    <main class="content" id="content" tabindex="-1"><div class="page"><${Boundary} key=${route.raw}><${Page} route=${route} onLogout=${() => setAuth('out')} /><//></div></main>
     <${PlayerBar} />
     </div>
     <${NowPlaying} />

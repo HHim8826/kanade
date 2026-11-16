@@ -4,7 +4,7 @@ import { go, href, keepInAddress, parseHash } from '../router.js';
 import { siteName } from '../site.js';
 import { Dialog, Empty, ErrorBox, Icon, Spinner, copyText, html, radioKeys, showDialog, toast } from '../ui.js';
 import { confirmDialog, useLibRev, useRunner } from './organize.js';
-import { WorkImage, bindSubject, workLine } from './works.js';
+import { WorkImage, workLine } from './works.js';
 
 // The album's own entry in Bangumi (a music subject) and its owner's collection of it, through
 // their linked Bangumi account (review #94): status, rating, tags, comment, private — written to
@@ -14,9 +14,9 @@ export const statusNames = { 1: '想聽', 2: '聽過', 3: '在聽', 4: '擱置',
 
 const unavailable = (e) => (e && e.status === 503 ? 'Bangumi 暫時無法連線，請稍後再試。' : e && e.message);
 
-// SubjectRow is the album page's line for its Bangumi entry: the entry and how it is collected, or a
-// way to bind one.
-export function SubjectRow({ album }) {
+// SubjectChips are the album page's chips for its Bangumi entry, when it has one: the entry, and how
+// it is collected. Binding one is in the album's "整理" menu (review 2.5).
+export function SubjectChips({ album }) {
   const sub = album.subject;
   const [col, setCol] = useState(null); // { linked, collection } once read
   useEffect(() => {
@@ -27,20 +27,14 @@ export function SubjectRow({ album }) {
     get(`/albums/${album.id}/collection`).then((v) => alive && setCol(v), () => alive && setCol({ failed: true }));
     return () => { alive = false; };
   }, [album.id, sub && sub.id]);
-  if (!sub) {
-    return html`<div class="chips album-categories album-works">
-      <button class="chip ghost" onClick=${() => bindSubject(album)}><${Icon} name="note" size=${16} />綁定 Bangumi 條目</button></div>`;
-  }
+  if (!sub) return null;
   const c = col && col.collection;
   const label = !col ? '…' : col.failed ? '收藏' : !col.linked ? '連結帳號以管理收藏' : c ? `${statusNames[c.type]}${c.rate ? ` ★${c.rate}` : ''}` : '收藏…';
-  return html`<div class="chips album-categories album-works">
-    <a class="chip work-chip" href=${`https://bgm.tv/subject/${sub.source_id}`} target="_blank" rel="noopener noreferrer"
+  return html`<a class="chip work-chip" href=${`https://bgm.tv/subject/${sub.source_id}`} target="_blank" rel="noopener noreferrer"
       title=${['Bangumi', sub.name_cn, sub.date].filter(Boolean).join(' · ')}>
       <${Icon} name="openNew" size=${16} />Bangumi${sub.score ? ` ${sub.score.toFixed(1)}` : ''}</a>
     <button class=${'chip' + (c ? ' on' : ' ghost')} onClick=${() => editCollection(album, (v) => setCol(v))}>
-      <${Icon} name=${c ? 'favorite' : 'favoriteOff'} size=${16} />${label}</button>
-    <button class="chip ghost" onClick=${() => bindSubject(album)} title="改綁或解除 Bangumi 條目"><${Icon} name="edit" size=${16} />條目</button>
-  </div>`;
+      <${Icon} name=${c ? 'favorite' : 'favoriteOff'} size=${16} />${label}</button>`;
 }
 
 export const editCollection = (album, onSaved) => showDialog((close) => html`<${CollectionDialog} album=${album} onSaved=${onSaved} close=${close} />`);

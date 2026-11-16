@@ -5,14 +5,16 @@ import { clock, enqueue, fromEntry, fromTrack, playLibraryShuffle, playNext, pla
 import { driveOnly, places } from '../places.js';
 import { go, href, keepInAddress, parseHash } from '../router.js';
 import { useStore } from '../store.js';
+import { usePageTitle } from '../site.js';
 import { control } from '../remote.js';
 import { Cover, Empty, ErrorBox, Icon, IconButton, Spinner, fmtBytes, fmtTime, html, openMenu, showDialog, toast, useLoad } from '../ui.js';
 import { AlbumActions, Categorize, SongActions, editSections } from './batch.js';
 import { CategoriesTab } from './categories.js';
 import { WorkGrid, WorkImage, WorksTab, bindSubject, linkWorks, trackWorks, useTags } from './works.js';
-import { SubjectRow } from './bangumi.js';
+import { SubjectChips } from './bangumi.js';
 import { SelectBar, SelectToggle, useSelection } from '../selection.js';
 import { AlbumGrid, TrackList, playInAlbum } from './common.js';
+import { addDownload } from './tasks.js';
 import { viewCover } from './coverview.js';
 import { moveFiles } from './moves.js';
 import { AlbumGallery, openGallery, uploadImages } from './gallery.js';
@@ -25,7 +27,7 @@ function Shelf({ title, albums, more }) {
   return html`<div class="section-head"><h2 class="section-title">${title}</h2>${more}</div>
     <div class="shelf">${albums.map((a) => html`<a key=${a.id} class="card album-card" href=${href('album/' + a.id)}>
       <${Cover} id=${a.cover_id} alt="" />
-      <div class="card-text"><div class="title" title=${a.title}>${a.title}</div><div class="sub" title=${a.album_artist || ''}>${a.album_artist || '未知歌手'}</div></div>
+      <div class="card-text"><div class="title" title=${a.title}>${a.title}</div><div class="sub" title=${a.album_artist || ''}>${a.sub || a.album_artist || '未知歌手'}</div></div>
     </a>`)}</div>`;
 }
 
@@ -89,7 +91,7 @@ function ProgressLine({ position, duration }) {
 const downloadLabels = { metadata: '取得清單', selecting: '等待選檔', queued: '排隊', downloading: '下載中', paused: '已暫停', seeding: '做種中' };
 
 export function Home() {
-  const home = useLoad(() => get('/home'), []);
+  const home = useLoad(() => get('/home'), [], undefined, 'home');
   const d = home.data;
   const local = useStore(player, (s) => s.queue[s.index]); // re-renders on track change, not on every tick
   // Controlling another device (review #138): what is paused here is not what the buttons play.
@@ -105,10 +107,10 @@ export function Home() {
   return html`<section>
     <div class="page-head">
       <h1 class="page-title">首頁</h1>
-      <div class="actions">
+      ${d && !empty && html`<div class="actions">
         <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
         <button class="btn tonal" onClick=${playRandomAlbum}><${Icon} name="album" />隨便聽一張</button>
-      </div>
+      </div>`}
     </div>
     ${home.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
     ${(d || home.error) && (live ? html`<${NowCard} />` : d && d.continue && html`<${LastPlayedCard} item=${d.continue} />`)}
@@ -121,7 +123,11 @@ export function Home() {
       </span>
       <span class="sub">任務 ›</span>
     </a>`}
-    ${empty && html`<${Empty} icon="library">曲庫還是空的。到「任務」新增下載，或上傳音樂。<//>`}
+    ${empty && html`<${Empty} icon="library">曲庫還是空的，先加入一些音樂吧。
+      <div class="actions center">
+        <a class="btn filled" href=${href('upload')}><${Icon} name="upload" />上傳音樂</a>
+        <button class="btn tonal" onClick=${addDownload}><${Icon} name="download" />新增下載</button>
+      </div><//>`}
     ${d && html`<${Shelf} title="最近播放" albums=${d.recently_played}
       more=${html`<a class="btn text" href=${href('me/history')}><${Icon} name="history" />播放記錄</a>`} />`}
     ${spoken.length > 0 && html`<h2 class="section-title">未聽完的廣播劇</h2>
@@ -134,14 +140,14 @@ export function Home() {
       </button></li>`)}</ul>`}
     ${d && html`<${Shelf} title="最近加入" albums=${d.recently_added} />`}
     ${att && (att.without_album > 0 || att.unknown_artist > 0 || att.missing > 0) && html`<h2 class="section-title">待整理</h2>
-      <a class="card summary-card" href=${href(att.missing > 0 ? 'missing' : 'library/tracks?filter=' + (att.without_album > 0 ? 'no_album' : 'no_artist'))}>
+      <a class="card summary-card" href=${href('organize')}>
         <${Icon} name="note" />
         <span class="grow">
           ${att.without_album > 0 && html`<span class="pill">沒有專輯的歌曲 ${att.without_album}</span>`}
           ${att.unknown_artist > 0 && html`<span class="pill">沒有歌手 ${att.unknown_artist}</span>`}
           ${att.missing > 0 && html`<span class="pill warn">${driveOnly() ? 'Drive 中遺失' : '檔案遺失'} ${att.missing}</span>`}
         </span>
-        <span class="sub">${att.missing > 0 ? '查看 ›' : '整理 ›'}</span>
+        <span class="sub">整理 ›</span>
       </a>`}
   </section>`;
 }
@@ -152,6 +158,9 @@ const tabs = [['albums', '專輯'], ['categories', '分類'], ['works', '作品'
 const tabURL = { categories: '/categories', works: '/works' };
 
 const PAGE = 200;
+// The later pages of the lists, by list and library version: going back to one shows as much of it
+// as was loaded, where it was left (review 2.1).
+const pagesKept = new Map();
 
 // LoadMore loads the next page when it scrolls into view, or when tapped.
 function LoadMore({ onMore, busy }) {
@@ -188,11 +197,18 @@ export function Library({ tab = 'albums', filter = '' }) {
     ...stores.map((st) => [String(st.id), st.name])];
   const placeFilters = tab === 'albums' && (placeList.length > 1 || filter) ? [['', '全部'], ...placeList] : [];
   const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? (tab === 'albums' ? '&place=' : '&filter=') + filter : ''}`;
-  const data = useLoad(() => get(base), [base], rev);
+  const data = useLoad(() => get(base), [base], rev, base);
   // Later pages, for this tab, filter and library version only (review #9).
   const key = `${base}:${rev}`;
-  const [more, setMore] = useState({ key: null, pages: [], done: false, busy: false });
+  const [more, setMore] = useState(() => pagesKept.get(key) || { key: null, pages: [], done: false, busy: false });
   const own = more.key === key ? more : { key, pages: [], done: false, busy: false };
+  useEffect(() => {
+    if (more.key && !more.busy) {
+      pagesKept.delete(more.key);
+      pagesKept.set(more.key, more);
+      if (pagesKept.size > 10) pagesKept.delete(pagesKept.keys().next().value);
+    }
+  }, [more]);
   const list = data.data && paged ? [...data.data, ...own.pages.flat()] : data.data;
   const done = !paged || !data.data || data.data.length < PAGE || own.done;
   const loadMore = useCallback(async () => {
@@ -216,9 +232,10 @@ export function Library({ tab = 'albums', filter = '' }) {
     <div class="page-head">
       <h1 class="page-title">曲庫</h1>
       <div class="actions">
-        <button class="btn tonal" onClick=${() => playLibraryShuffle()}><${Icon} name="shuffle" />全曲庫隨機播放</button>
+        ${!(tab === 'albums' && !filter && list && !list.length) && html`<button class="btn tonal" onClick=${() => playLibraryShuffle()}>
+          <${Icon} name="shuffle" />全曲庫隨機播放</button>`}
         ${canSelect && html`<${SelectToggle} sel=${sel} disabled=${!list || !list.length} />`}
-        <a class="btn text" href=${href('edits')}><${Icon} name="history" />修改紀錄</a>
+        <a class="btn text" href=${href('organize')}><${Icon} name="edit" />整理</a>
       </div>
     </div>
     <nav class="tabs" aria-label="曲庫">
@@ -266,10 +283,20 @@ function FolderCard({ rev }) {
   </div>`;
 }
 
+// belongs are the ways to say where an album belongs: its categories, the works (anime, games) it
+// is music of, and its own entry on Bangumi.
+const belongs = (a) => [
+  { icon: 'folder', label: a.categories && a.categories.length ? '分類…' : '加入分類…',
+    onClick: () => showDialog((close) => html`<${Categorize} ids=${[a.id]} close=${close} />`) },
+  { icon: 'work', label: '動畫、遊戲作品…', onClick: () => linkWorks(a) },
+  { icon: 'note', label: a.subject ? '改綁 Bangumi 條目…' : '綁定 Bangumi 條目…', onClick: () => bindSubject(a) },
+];
+
 export function Album({ id }) {
   const rev = useLibRev();
-  const album = useLoad(() => get('/albums/' + id), [id], rev);
+  const album = useLoad(() => get('/albums/' + id), [id], rev, 'album/' + id);
   const sel = useSelection(id); // songs of this album, selected to act on at once (review #83)
+  usePageTitle(album.data && album.data.title);
   if (album.loading && !album.data) return html`<${Spinner} />`;
   if (album.error) return html`<${ErrorBox} error=${album.error} onRetry=${album.reload} />`;
   const a = album.data;
@@ -278,26 +305,34 @@ export function Album({ id }) {
     uses: e.works || [], tags: useTags(e.works, a.works) }));
   const discs = [...new Set(items.map((i) => i.disc))];
   const named = Object.keys(a.sections || {}).length > 0;
+  // The album's own menu, in groups: playing it, what it says, its pictures, where it belongs and
+  // how it is put together, and removing it last (review 2.4).
   const menu = (e) => openMenu(e, [
     { icon: 'playNext', label: '下一首播放', onClick: () => playNext(items) },
     { icon: 'queue', label: '加入佇列', onClick: () => enqueue(items) },
     { icon: 'playlistAdd', label: '加入歌單…', onClick: () => addToPlaylist(items) },
+    !sel.on && { icon: 'check', label: '選取歌曲', onClick: sel.start },
+    '-',
     { icon: 'edit', label: '編輯專輯資訊…', onClick: () => editAlbum(a) },
+    { icon: 'order', label: '區段名稱…', onClick: () => editSections(a) },
     { icon: 'identify', label: '從 MusicBrainz 辨識…', onClick: () => identifyAlbum(a) },
     { icon: 'identify', label: '從 VGMdb 匯入…', onClick: () => vgmdbAlbum(a) },
+    a.original && { icon: 'restore', label: '恢復原標籤…', onClick: () => restoreAlbum(a) },
+    '-',
     a.cover_id && { icon: 'image', label: '檢視封面', onClick: () => viewCover(a.cover_id, a.title) },
     { icon: 'image', label: a.cover_id ? '更換封面…' : '加上封面…', onClick: () => changeCover(a) },
     a.images > 0 && { icon: 'image', label: `檢視內頁圖（${a.images} 張）`, onClick: () => openGallery(a) },
     { icon: 'upload', label: '上傳內頁圖…', onClick: () => uploadImages(a) },
+    '-',
+    ...belongs(a),
+    '-',
     { icon: 'merge', label: '合併到其他專輯…', onClick: () => mergeAlbum(a) },
     a.entries.length > 1 && { icon: 'split', label: '拆分…', onClick: () => splitAlbum(a) },
-    { icon: 'order', label: '區段名稱…', onClick: () => editSections(a) },
-    { icon: 'work', label: '關聯 Bangumi 作品…', onClick: () => linkWorks(a) },
-    { icon: 'note', label: a.subject ? 'Bangumi 條目…' : '綁定 Bangumi 條目…', onClick: () => bindSubject(a) },
-    a.original && { icon: 'restore', label: '恢復原標籤…', onClick: () => restoreAlbum(a) },
     !driveOnly() && { icon: 'move', label: '搬移檔案到…', onClick: () => moveFiles({ albums: [a.id], title: a.title }) },
-    { icon: 'delete', label: '移除專輯…', onClick: () => removeAlbum(a) },
+    '-',
+    { icon: 'delete', label: '移除專輯…', onClick: () => removeAlbum(a), danger: true },
   ]);
+  const cats = a.categories || [], works = a.works || [];
   return html`<section>
     <header class="album-head">
       ${a.cover_id
@@ -306,36 +341,35 @@ export function Album({ id }) {
         : html`<button class="cover-open add" onClick=${() => changeCover(a)} aria-label="加上封面" title="加上封面">
             <${Cover} id=${0} alt=${a.title} className="big" /></button>`}
       <div class="album-info">
-        <div class="overline">專輯${a.edition ? ` · ${a.edition}` : ''}</div>
-        <h1>${a.title}</h1>
-        <div class="sub">${[a.album_artist, a.date, a.catalog].filter(Boolean).join(' · ')}</div>
-        <div class="sub">${a.tracks} 首 · ${fmtTime(a.duration_ms)}</div>
+        <div class="album-titles">
+          <div class="overline">專輯${a.edition ? ` · ${a.edition}` : ''}</div>
+          <h1>${a.title}</h1>
+          <div class="sub">${[a.album_artist, a.date, a.catalog].filter(Boolean).join(' · ')}</div>
+          <div class="sub">${a.tracks} 首 · ${fmtTime(a.duration_ms)}</div>
+        </div>
+        ${/* Where it belongs, as chips when it does; one way in to set any of it (review 2.5). */ ''}
         <div class="chips album-categories">
-          ${(a.categories || []).map((c) => html`<a key=${c.id} class="chip" href=${href('category/' + c.id)}><${Icon} name="folder" size=${16} />${c.name}</a>`)}
-          <button class="chip ghost" onClick=${() => showDialog((close) => html`<${Categorize} ids=${[a.id]} close=${close} />`)}>
-            <${Icon} name=${a.categories && a.categories.length ? 'edit' : 'add'} size=${16} />${a.categories && a.categories.length ? '分類' : '加入分類'}</button>
-        </div>
-        <div class="chips album-categories album-works">
-          ${(a.works || []).map((w) => html`<a key=${w.id} class="chip work-chip" href=${href('work/' + w.id)} title=${[w.name_cn, w.date].filter(Boolean).join(' · ')}>
+          ${cats.map((c) => html`<a key=${'c' + c.id} class="chip" href=${href('category/' + c.id)}><${Icon} name="folder" size=${16} />${c.name}</a>`)}
+          ${works.map((w) => html`<a key=${'w' + w.id} class="chip work-chip" href=${href('work/' + w.id)} title=${[w.name_cn, w.date].filter(Boolean).join(' · ')}>
             <${WorkImage} id=${w.image ? w.id : 0} size=${96} />${w.name}</a>`)}
-          <button class="chip ghost" onClick=${() => linkWorks(a)}>
-            <${Icon} name=${a.works && a.works.length ? 'edit' : 'work'} size=${16} />${a.works && a.works.length ? '作品' : '關聯作品'}</button>
+          <${SubjectChips} album=${a} />
+          <button class="chip ghost" onClick=${(e) => openMenu(e, belongs(a))} aria-label="分類、作品與 Bangumi 條目">
+            <${Icon} name=${cats.length || works.length || a.subject ? 'edit' : 'add'} size=${16} />${cats.length || works.length || a.subject ? '修改…' : '分類、作品…'}</button>
         </div>
-        <${SubjectRow} album=${a} />
         <div class="actions">
           <button class="btn filled" onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放</button>
           <button class="btn tonal" onClick=${() => playQueue(shuffled(items), 0)}><${Icon} name="shuffle" />隨機播放</button>
           <${AlbumFavorite} id=${a.id} />
           <${IconButton} icon="more" label="更多" onClick=${menu} />
+          ${sel.on && html`<${SelectToggle} sel=${sel} />`}
         </div>
       </div>
     </header>
-    <div class="section-head album-tools"><span class="grow"></span><${SelectToggle} sel=${sel} /></div>
     ${discs.map((d) => html`<div key=${d}>
       ${(discs.length > 1 || named) && html`<h2 class="section-title">${(a.sections && a.sections[d]) || `Disc ${d}`}</h2>`}
       <${TrackList} items=${items.filter((i) => i.disc === d)} queue=${items} showNumber sel=${sel} selKey=${(it) => it.entryId}
-        menuExtra=${(it) => [{ icon: 'work', label: '作品用途…', onClick: () => trackWorks(it, a) },
-          { icon: 'delete', label: '從專輯移除', onClick: () => removeFromAlbum(a, it) }]} />
+        menuExtra=${(it) => ['-', { icon: 'work', label: '作品用途…', onClick: () => trackWorks(it, a) },
+          { icon: 'delete', label: '從專輯移除', onClick: () => removeFromAlbum(a, it), danger: true }]} />
     </div>`)}
     <${SelectBar} sel=${sel} noun="首" loaded=${items.map((i) => i.entryId)} items=${items}>
       <${SongActions} sel=${sel} album=${a} />
@@ -383,13 +417,24 @@ function PeopleLine({ label, list }) {
 
 export function Artist({ id, name }) {
   const rev = useLibRev();
-  const artist = useLoad(() => get('/artists/' + id), [id], rev);
+  const artist = useLoad(() => get('/artists/' + id), [id], rev, 'artist/' + id);
   const a = artist.data;
+  usePageTitle(a ? a.name : name);
   const sung = a ? a.items.map(fromTrack) : [];
   // A voice's songs say which character it sang as.
   const roles = a ? (a.roles || []).map((r) => ({ ...r, items: r.items.map((t) => ({ ...fromTrack(t), key: r.role + t.id,
     tags: t.as ? [{ label: t.as, title: '飾演的角色' }] : undefined })) })) : [];
   const every = [...sung, ...roles.flatMap((r) => r.items)].filter((t, i, all) => all.findIndex((x) => x.trackId === t.trackId) === i);
+  // The albums the artist is on, those with the most of their songs first (review 2.7).
+  const albums = [];
+  for (const t of every) {
+    if (!t.albumId) continue;
+    const al = albums.find((x) => x.id === t.albumId);
+    if (al) al.n++;
+    else albums.push({ id: t.albumId, title: t.album, cover_id: t.coverId, n: 1 });
+  }
+  albums.sort((x, y) => y.n - x.n);
+  for (const al of albums) al.sub = `${al.n} 首`;
   return html`<section>
     <div class="page-head">
       <div class="grow">
@@ -398,17 +443,24 @@ export function Artist({ id, name }) {
         ${a && a.aliases.length > 0 && html`<div class="sub alias-line">別名：${a.aliases.join('、')}</div>`}
         ${a && html`<${PeopleLine} label="聲優" list=${a.voices} /><${PeopleLine} label="飾演" list=${a.characters} />`}
       </div>
-      ${a && html`<${IconButton} icon="more" label="更多" onClick=${(e) => openMenu(e, [
-        every.length && { icon: 'play', label: '全部播放', onClick: () => playQueue(every, 0) },
+    </div>
+    ${a && html`<div class="actions artist-actions">
+      ${every.length > 0 && html`<button class="btn filled" onClick=${() => playQueue(every, 0)}><${Icon} name="play" />播放</button>
+        <button class="btn tonal" onClick=${() => playQueue(shuffled(every), 0)}><${Icon} name="shuffle" />隨機播放</button>`}
+      <${IconButton} icon="more" label="更多" onClick=${(e) => openMenu(e, [
+        every.length && { icon: 'queue', label: '加入佇列', onClick: () => enqueue(every) },
+        every.length && '-',
         { icon: 'edit', label: '改名…', onClick: () => renameArtist(a) },
         { icon: 'note', label: '編輯別名…', onClick: () => editArtistAliases(a) },
-      ])} />`}
-    </div>
+      ])} />
+    </div>`}
     ${artist.loading && !a ? html`<${Spinner} />` : html`<${ErrorBox} error=${artist.error} onRetry=${artist.reload} />`}
     ${a && !every.length && html`<${Empty} icon="person">這位歌手已經沒有歌曲。<//>`}
-    ${sung.length > 0 && html`${roles.length > 0 && html`<h2 class="section-title">演唱</h2>`}<${TrackList} items=${sung} showAlbum />`}
+    ${albums.length > 1 && html`<${Shelf} title="專輯" albums=${albums} />`}
+    ${sung.length > 0 && html`${(roles.length > 0 || albums.length > 1) && html`<h2 class="section-title">${roles.length > 0 ? '演唱' : '歌曲'}</h2>`}
+      <${TrackList} items=${sung} showAlbum hideArtist=${a.name} />`}
     ${roles.map((r) => html`<div key=${r.role}><h2 class="section-title">${roleTitles[r.role] || r.role}</h2>
-      <${TrackList} items=${r.items} showAlbum /></div>`)}
+      <${TrackList} items=${r.items} showAlbum hideArtist=${a.name} /></div>`)}
   </section>`;
 }
 

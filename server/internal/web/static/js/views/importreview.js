@@ -14,7 +14,7 @@ const warningText = {
   same_audio: '有歌曲與曲庫中的音訊相同（標籤不同）',
 };
 const encodingNames = { '': '自動判斷', cp932: 'Shift-JIS（CP932，日文）', gbk: 'GBK（簡體中文）', big5: 'Big5（繁體中文）', latin1: 'Latin-1（西歐）', cp1252: 'CP1252（西歐）', 'utf-16': 'UTF-16' };
-const stateText = { skipped: '不匯入', failed: '無法匯入', excluded: '已手動排除', expanded: '已展開', published: '已入庫', duplicate: '已存在', pending: '等待中', split: '已分軌' };
+const stateText = { discarded: '已捨棄', skipped: '不匯入', failed: '無法匯入', excluded: '已手動排除', expanded: '已展開', published: '已入庫', duplicate: '已存在', pending: '等待中', split: '已分軌' };
 
 function reason(it) {
   if (it.state === 'excluded') return '已手動排除';
@@ -117,8 +117,8 @@ export function ImportReview({ id }) {
   return html`<section class="import-review">
     <div class="page-head">
       <div class="grow">
-        <h1 class="page-title">匯入預覽</h1>
-        <div class="sub">${{ upload: '上傳', local: '伺服器資料夾', download: 'BT 下載' }[p.kind] || p.kind}${p.kind !== 'upload' && p.source ? '：' + p.source : ''}</div>
+        <h1 class="page-title">${review || p.state === 'analyzing' ? '匯入預覽' : '匯入結果'}</h1>
+        <div class="sub">${{ upload: '上傳', local: '伺服器資料夾', download: 'BT 下載', inbox: 'Drive 收件匣', source: '來源掃描' }[p.kind] || p.kind}${p.kind !== 'upload' && p.source ? '：' + p.source : ''}</div>
       </div>
       ${review && html`<div class="actions tight">
         <button class="btn text" disabled=${busy} onClick=${cancel}>取消匯入</button>
@@ -128,8 +128,9 @@ export function ImportReview({ id }) {
     ${p.state === 'analyzing' && html`<div class="card pad"><${Spinner} /><p class="center sub">正在讀取標籤與展開壓縮檔…</p></div>`}
     ${p.state !== 'analyzing' && !review && html`<div class="card pad">
       這批匯入${{ running: '正在進行', done: '已完成', canceled: '已取消' }[p.state] || p.state}。<a class="link" href=${href('tasks')}>到任務頁查看</a></div>`}
+    ${p.state !== 'analyzing' && !review && html`<${Outcome} p=${p} />`}
     ${p.state !== 'analyzing' && html`
-      <p class="hint">確認每組會成為哪張專輯；這裡的修改不會改寫音檔，匯入後也可以再整理。${p.kind === 'source' ? '設為「不匯入」的檔案，之後掃描這個來源也不會再匯入，除非檔案有改動（和從曲庫刪除的歌一樣）。' : ''}</p>
+      ${review && html`<p class="hint">確認每組會成為哪張專輯；這裡的修改不會改寫音檔，匯入後也可以再整理。${p.kind === 'source' ? '設為「不匯入」的檔案，之後掃描這個來源也不會再匯入，除非檔案有改動（和從曲庫刪除的歌一樣）。' : ''}</p>`}
       ${review && html`<div class="toolbar">
         <button class="btn tonal" disabled=${busy} onClick=${() => op({ op: 'folders' })}><${Icon} name="album" />每個子資料夾是一張專輯</button>
         <label class="select-field">文字編碼
@@ -139,8 +140,9 @@ export function ImportReview({ id }) {
         </label>
         ${detected.length > 0 && !p.encoding && html`<span class="sub">自動判斷用了：${detected.map(([k, n]) => `${encodingNames[k] || k} ${n} 個檔案`).join('、')}</span>`}
       </div>`}
-      <div class="sub summary-line">${p.groups.length} 張專輯 · ${p.standalone.length} 首單曲${p.other.length ? ` · ${p.other.length} 個其他檔案` : ''}</div>
-      ${!songs && html`<${Empty} icon="upload">沒有可以匯入的歌曲。<//>`}
+      ${review && html`<div class="sub summary-line">${p.groups.length} 張專輯 · ${p.standalone.length} 首單曲${p.other.length ? ` · ${p.other.length} 個其他檔案` : ''}</div>`}
+      ${review && !songs && html`<${Empty} icon="upload">沒有可以匯入的歌曲。<//>`}
+      ${!review && songs > 0 && html`<h2 class="section-title">還在等待的歌曲（${songs} 首）</h2>`}
       ${p.groups.map((g) => html`<article class="card import-group" key=${g.key}>
         <div class="group-head">
           <div class="grow">
@@ -167,14 +169,38 @@ export function ImportReview({ id }) {
         <div class="group-head"><div class="grow"><h2 class="group-title">單曲</h2><div class="sub">沒有專輯標籤，各自成為獨立歌曲</div></div></div>
         <${ItemRows} items=${p.standalone} review=${review} onMenu=${(e, it) => itemMenu(e, it, null)} />
       </article>`}
-      ${p.other.length > 0 && html`<h2 class="section-title">其他檔案</h2>
-        <ul class="items">${p.other.map((it) => html`<li key=${it.id}>
+      ${(review ? p.other : p.other.filter((it) => it.role !== 'audio')).length > 0 && html`<h2 class="section-title">其他檔案</h2>
+        <ul class="items">${(review ? p.other : p.other.filter((it) => it.role !== 'audio')).map((it) => html`<li key=${it.id}>
           <span class="grow path">${it.path}</span>
           <span class="sub">${reason(it)}</span>
           ${review && it.state === 'excluded' && html`<button class="btn text" disabled=${busy} onClick=${() => op({ op: 'include', items: [it.id] })}>重新加入</button>`}
         </li>`)}</ul>`}
     `}
   </section>`;
+}
+
+// Outcome is what a batch under way or done has done (review 2.14): its songs in the library, by
+// album, and those it did not import, with why. The plan of each song stays, so its album is known.
+function Outcome({ p }) {
+  const audio = p.other.filter((it) => it.role === 'audio');
+  const saved = audio.filter((it) => it.state === 'published');
+  const had = audio.filter((it) => it.state === 'duplicate');
+  const left = audio.filter((it) => ['failed', 'skipped', 'excluded', 'discarded'].includes(it.state));
+  const going = audio.filter((it) => it.state === 'pending' || it.state === 'uploading');
+  const albums = new Map();
+  for (const it of saved) {
+    const name = (it.plan && it.plan.album) || '（單曲）';
+    albums.set(name, (albums.get(name) || 0) + 1);
+  }
+  return html`<div class="sub summary-line">${[`已入庫 ${saved.length} 首`, going.length && `處理中 ${going.length} 首`, had.length && `曲庫已有 ${had.length} 首`,
+    left.length && `沒有匯入 ${left.length} 個`]
+    .filter(Boolean).join(' · ')}</div>
+    ${left.length > 0 && html`<h2 class="section-title">沒有匯入的檔案</h2>
+      <ul class="items">${left.map((it) => html`<li key=${it.id}><span class="grow path">${it.path}</span><span class="sub">${reason(it)}</span></li>`)}</ul>`}
+    ${saved.length > 0 && html`<h2 class="section-title">已入庫</h2>
+      <ul class="items">${[...albums].map(([name, n]) => html`<li key=${name}><span class="grow">${name}</span><span class="sub">${n} 首</span></li>`)}</ul>`}
+    ${had.length > 0 && html`<details class="import-had"><summary>曲庫已有的 ${had.length} 首</summary>
+      <ul class="items">${had.map((it) => html`<li key=${it.id}><span class="grow path">${it.path}</span></li>`)}</ul></details>`}`;
 }
 
 function ItemRows({ items, review, onMenu }) {

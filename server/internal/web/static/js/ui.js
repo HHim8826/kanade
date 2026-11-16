@@ -205,15 +205,27 @@ export function ErrorBox({ error, onRetry }) {
 // deps (another tab, another album) is never returned: rendering one tab's rows with another
 // tab's component crashed the library page. A change of refresh (the library revision after an
 // edit) loads again but keeps showing the current data meanwhile.
-export function useLoad(loader, deps, refresh) {
+// kept: the last answers of the pages that name a place for theirs (keep), so going back to one shows
+// it at once, where it was left, while it is read again (review 2.1).
+const kept = new Map();
+
+export function useLoad(loader, deps, refresh, keep) {
   const key = JSON.stringify(deps);
-  const [state, setState] = useState({ key: null, loading: true, error: null, data: null });
+  const [state, setState] = useState(() => (keep && kept.has(keep) ? { key, loading: false, error: null, data: kept.get(keep) }
+    : { key: null, loading: true, error: null, data: null }));
   const [tick, setTick] = useState(0);
   useEffect(() => {
     let alive = true;
     setState((s) => ({ ...s, loading: true, error: null }));
     loader().then(
-      (data) => alive && setState({ key, loading: false, error: null, data }),
+      (data) => {
+        if (keep) {
+          kept.delete(keep);
+          kept.set(keep, data);
+          if (kept.size > 40) kept.delete(kept.keys().next().value);
+        }
+        if (alive) setState({ key, loading: false, error: null, data });
+      },
       (error) => alive && setState({ key, loading: false, error, data: null }),
     );
     return () => { alive = false; };
@@ -260,17 +272,29 @@ export function Toasts() {
 }
 
 // ---- menus ----
-// One popover menu at a time, anchored to the button that opened it. items: { icon, label, onClick }
-// (falsy entries are skipped, so callers can write `cond && {...}`).
+// One popover menu at a time, anchored to the button that opened it, or where a right click was.
+// items: { icon, label, onClick, danger } (falsy entries are skipped, so callers can write
+// `cond && {...}`); '-' between two of them draws a line.
 
 const menus = createStore({ menu: null });
 
 export function openMenu(e, items) {
   e.stopPropagation();
   const opener = e.currentTarget;
-  const r = opener.getBoundingClientRect();
-  menus.set({ menu: { rect: { top: r.top, bottom: r.bottom, right: r.right }, items: items.filter(Boolean), opener } });
+  let rect;
+  if (e.type === 'contextmenu') {
+    e.preventDefault();
+    rect = { top: e.clientY, bottom: e.clientY, right: e.clientX + MENU_W }; // it opens to the right of the pointer
+  } else {
+    const r = opener.getBoundingClientRect();
+    rect = { top: r.top, bottom: r.bottom, right: r.right };
+  }
+  // No line first, last, or twice in a row.
+  const list = items.filter(Boolean).filter((it, i, all) => it !== '-' || (i > 0 && i < all.length - 1 && all[i + 1] !== '-'));
+  menus.set({ menu: { rect, items: list, opener } });
 }
+
+const MENU_W = 240;
 
 // closeMenu with refocus puts the keyboard focus back on the button that opened the menu.
 const closeMenu = (refocus = false) => {
@@ -316,7 +340,8 @@ export function MenuHost() {
   }, [menu]);
   if (!menu) return null;
   const { rect, items } = menu;
-  const width = 240, height = items.length * 48 + 16;
+  const lines = items.filter((it) => it === '-').length;
+  const width = MENU_W, height = (items.length - lines) * 48 + lines * 9 + 16;
   const left = Math.max(8, Math.min(rect.right - width, innerWidth - width - 8));
   const place = placeMenu(rect, height);
   const style = { left: left + 'px', width: width + 'px', maxHeight: place.maxHeight + 'px',
@@ -325,8 +350,9 @@ export function MenuHost() {
   const onWheel = (e) => !ref.current?.contains(e.target) && closeMenu();
   return html`<div class="menu-scrim" onClick=${() => closeMenu(true)} onWheel=${onWheel}>
     <ul class="menu" role="menu" ref=${ref} style=${style} onClick=${(e) => e.stopPropagation()}>
-      ${items.map((it, i) => html`<li key=${i} role="none"><button role="menuitem" onClick=${() => { closeMenu(true); it.onClick(); }}>
-        <${Icon} name=${it.icon} /><span>${it.label}</span></button></li>`)}
+      ${items.map((it, i) => (it === '-' ? html`<li key=${i} role="separator" class="menu-line"></li>`
+        : html`<li key=${i} role="none"><button role="menuitem" class=${it.danger ? 'danger' : undefined} onClick=${() => { closeMenu(true); it.onClick(); }}>
+          <${Icon} name=${it.icon} /><span>${it.label}</span></button></li>`))}
     </ul>
   </div>`;
 }
@@ -341,6 +367,10 @@ const layers = []; // open, the top one last: { el, close, opener, popped }
 const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 let inerted = []; // what inertUnderTop made inert
+
+// pushLayer takes an entry of the history for the layers; it is the page's still, so the page is put
+// back where it was when the history comes back to it (router.js).
+const pushLayer = () => history.pushState({ kanadeLayer: true, kanadeEntry: history.state && history.state.kanadeEntry }, '');
 
 function inertUnderTop() {
   for (const el of inerted) el.inert = false;
@@ -367,8 +397,12 @@ function inertUnderTop() {
 addEventListener('popstate', () => {
   const top = layers[layers.length - 1];
   if (!top) return;
+  if (top.hold()) { // stays: its entry is put back
+    pushLayer();
+    return;
+  }
   top.popped = true;
-  if (layers.length > 1) history.pushState({ kanadeLayer: true }, ''); // the rest keep their entry
+  if (layers.length > 1) pushLayer(); // the rest keep their entry
   top.close();
 });
 addEventListener('hashchange', () => { // another page: nothing stays over it
@@ -393,16 +427,20 @@ addEventListener('keydown', (e) => { // Tab goes round the top layer
 });
 
 // useLayer makes the element of ref a layer while the component is shown; close closes it. focus,
-// when given, is where focus goes (else the first element marked autofocus, else the layer).
-export function useLayer(ref, close, focus) {
+// when given, is where focus goes (else the first element marked autofocus, else the layer). hold,
+// when given, is asked before going back closes it: true keeps it open.
+export function useLayer(ref, close, focus, hold) {
   const closing = useRef(close);
   closing.current = close;
+  const holding = useRef(hold);
+  holding.current = hold;
   // In the commit, before any timer: one dialog replacing another is open before the first one's
   // entry would be taken back.
   useLayoutEffect(() => {
-    const layer = { el: ref.current, close: () => closing.current(), opener: document.activeElement, popped: false };
+    const layer = { el: ref.current, close: () => closing.current(), hold: () => !!(holding.current && holding.current()),
+      opener: document.activeElement, popped: false };
     layers.push(layer);
-    if (!(history.state && history.state.kanadeLayer)) history.pushState({ kanadeLayer: true }, '');
+    if (!(history.state && history.state.kanadeLayer)) pushLayer();
     inertUnderTop();
     const target = (focus && focus.current) || layer.el?.querySelector('[autofocus]') || layer.el;
     if (target) {
@@ -440,16 +478,35 @@ export function DialogHost() {
   return render ? render(() => dialogs.set({ render: null })) : null;
 }
 
+// A dialog something was typed or chosen in stays open when the page around it is tapped, or on a
+// back gesture made by mistake: what was entered is not lost. It closes with its own buttons, Esc,
+// or the toast's "discard". A click that began in the dialog (selecting text, say) and ended
+// outside it is no tap outside. Esc that ends a word being composed (Chinese, Japanese) is the
+// input method's.
 export function Dialog({ title, onClose, children, actions, wide }) {
   const box = useRef(null);
-  useLayer(box, onClose);
+  const touched = useRef(false), downOutside = useRef(false), told = useRef(0);
+  const [nudged, setNudged] = useState(0);
+  const hold = () => {
+    if (!touched.current) return false;
+    setNudged((n) => n + 1);
+    if (Date.now() - told.current > 8000) { // one toast up at a time
+      told.current = Date.now();
+      toast('還有輸入的內容沒存，所以沒有關閉', 'info', { label: '捨棄並關閉', onClick: onClose });
+    }
+    return true;
+  };
+  useLayer(box, onClose, undefined, hold);
   useEffect(() => {
-    const onKey = (e) => e.key === 'Escape' && onClose();
+    const onKey = (e) => e.key === 'Escape' && !e.isComposing && e.keyCode !== 229 && onClose();
     addEventListener('keydown', onKey);
     return () => removeEventListener('keydown', onKey);
   }, [onClose]);
-  return html`<div class="scrim" onClick=${(e) => e.target === e.currentTarget && onClose()}>
-    <div class=${'dialog' + (wide ? ' wide' : '')} role="dialog" aria-modal="true" aria-label=${title} ref=${box}>
+  const outside = (e) => e.target === e.currentTarget;
+  return html`<div class="scrim" onPointerDown=${(e) => { downOutside.current = outside(e); }}
+    onClick=${(e) => outside(e) && downOutside.current && !hold() && onClose()}>
+    <div class=${'dialog' + (wide ? ' wide' : '') + (nudged % 2 ? ' nudge' : nudged ? ' nudge2' : '')} role="dialog" aria-modal="true" aria-label=${title} ref=${box}
+      onInput=${() => { touched.current = true; }} onChange=${() => { touched.current = true; }}>
       <h2 title=${typeof title === 'string' ? title : undefined}>${title}</h2>
       <div class="dialog-body">${children}</div>
       ${actions && html`<div class="dialog-actions">${actions}</div>`}

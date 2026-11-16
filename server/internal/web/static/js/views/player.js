@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from '../../vendor/hooks.module.js';
 import { ApiError, api, get, post } from '../api.js';
-import { addToPlaylist, toggleFav, useFav } from '../actions.js';
+import { addToPlaylist, goToArtist, toggleFav, useFav } from '../actions.js';
 import {
   canOpus, cancelSleep, clearUpcoming, clock, current, cycleMode, endScrub, extendSleep, moveItem, next, now, playAfterCurrent, playAt, player, prev,
   removeAt, resetPlayer, retryRadio, scrubTo, seek, setPrefs, setSleep, setVolume, shrinks, sleepAfterTrack, toggle, toggleMute,
@@ -93,7 +93,7 @@ export function PlayerBar() {
     </button>
     <div class="controls">
       <span class="wide-only"><${ModeButton} s=${s} /></span>
-      <${IconButton} icon="prev" label="上一首" onClick=${prev} />
+      <span class="roomy"><${IconButton} icon="prev" label="上一首" onClick=${prev} /></span>
       <${IconButton} icon=${s.playing ? 'pause' : 'play'} label=${s.playing ? '暫停' : '播放'} onClick=${toggle} filled />
       <${IconButton} icon="next" label="下一首" onClick=${next} />
     </div>
@@ -102,8 +102,10 @@ export function PlayerBar() {
       <span class="bar-time wide-only"><${Elapsed} s=${s} total /></span>
       <span class="wide-only">${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}</span>
       <span class="wide-only"><${IconButton} icon="lyrics" label="歌詞" onClick=${() => openTab('lyrics')} /></span>
-      <${IconButton} icon="queue" label="播放佇列" onClick=${() => openTab('queue')} />
-      <${DevicesButton} />
+      ${/* On a phone the bar keeps room for the title: the queue, the devices and going back a song
+        are in now playing, a tap away (review 2.6). */ ''}
+      <span class="roomy"><${IconButton} icon="queue" label="播放佇列" onClick=${() => openTab('queue')} /></span>
+      <span class="roomy"><${DevicesButton} /></span>
       <span class="wide-only"><${Volume} s=${s} /></span>
     </div>
   </section>`;
@@ -181,7 +183,8 @@ function NowPlayingView() {
         <div class="np-title-row">
           <div class="grow">
             <div class="np-title" title=${item.title}>${item.title}</div>
-            <div class="sub">${item.artist || '未知歌手'}</div>
+            ${item.trackId ? html`<button class="sub np-artist" onClick=${(e) => goToArtist(item, e.currentTarget)} title="前往歌手">${item.artist || '未知歌手'}</button>`
+              : html`<div class="sub">${item.artist || '未知歌手'}</div>`}
             ${item.albumId ? html`<a class="sub link" href=${href('album/' + item.albumId)} onClick=${() => open(false)}>${item.album}</a>` : ''}
           </div>
           ${item.trackId && html`<${FavButton} trackId=${item.trackId} />`}

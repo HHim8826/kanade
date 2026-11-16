@@ -1,3 +1,4 @@
+import { useEffect } from '../vendor/hooks.module.js';
 import { clock, player } from './player.js';
 import { control, devices, positionOf, target } from './remote.js';
 import { createStore } from './store.js';
@@ -65,17 +66,31 @@ export function applySite({ name, icon }) {
 // this tab controls another device, the song is that device's, as the player bar shows it (review
 // #210).
 function title() {
-  const { name, info } = site.get();
+  const { name: siteTitle, info } = site.get();
+  const name = page ? `${page} · ${siteTitle}` : siteTitle;
   if (!info) return name;
   if (control.get().target) {
     const d = target();
     if (!d || (d.state !== 'playing' && d.state !== 'paused')) return name;
-    return line(name, d.state === 'playing', positionOf(d), d.duration_ms, d.title);
+    return line(siteTitle, d.state === 'playing', positionOf(d), d.duration_ms, d.title);
   }
   const s = player.get(), item = s.queue[s.index];
   if (!item) return name;
   const length = s.duration > 0 ? s.duration * 1000 : item.durationMs; // a queue restored is not loaded yet
-  return line(name, s.playing, clock.get().time * 1000, length, item.title);
+  return line(siteTitle, s.playing, clock.get().time * 1000, length, item.title);
+}
+
+// The page shown names the tab first (review 2.12): 「專輯名 · Kanade」. The app names each kind of
+// page as it is shown; a page with a name of its own (an album, an artist) says it once known.
+let page = '';
+export function setPageTitle(t) {
+  page = t || '';
+  showTitle();
+}
+export function usePageTitle(t) {
+  useEffect(() => {
+    if (t) setPageTitle(t);
+  }, [t]);
 }
 
 const line = (name, playing, at, length, song) =>

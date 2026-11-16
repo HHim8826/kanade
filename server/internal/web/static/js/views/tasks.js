@@ -156,7 +156,7 @@ export function Tasks() {
       ${more('imports')}
       ${!movesFirst && moveList}
     `}
-    ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(direct) => { setAdding(false); tasks.reload(); toast(direct ? '已加入，空間足夠時開始下載' : '已加入，正在取得檔案清單'); }} />`}
+    ${adding && html`<${AddDownload} onClose=${() => setAdding(false)} onAdded=${(direct) => { setAdding(false); tasks.reload(); toast(added(direct)); }} />`}
     ${selecting && html`<${SelectFiles} id=${selecting} onClose=${() => setSelecting(null)} onDone=${() => { setSelecting(null); tasks.reload(); }} />`}
   </section>`;
 }
@@ -219,6 +219,15 @@ const cancelPrompt = (d) => ({
   seeding: '停止做種？檔案已匯入，會在之後清除。',
   failed: '放棄這個下載？還沒匯入的檔案會被清除，已入庫的歌曲保留。',
 }[d.state] || '取消這個下載？');
+
+const added = (direct) => (direct ? '已加入，空間足夠時開始下載' : '已加入，正在取得檔案清單');
+
+// addDownload asks for a download from another page (the empty home page): what it starts is on the
+// tasks page, a tap away.
+export const addDownload = () => showDialog((close) => html`<${AddDownload} onClose=${close} onAdded=${(direct) => {
+  close();
+  toast(added(direct), 'info', { label: '查看任務', onClick: () => go('tasks') });
+}} />`);
 
 function AddDownload({ onClose, onAdded }) {
   const [uri, setUri] = useState('');

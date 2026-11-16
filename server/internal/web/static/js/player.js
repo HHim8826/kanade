@@ -5,7 +5,8 @@ import { createStore } from './store.js';
 import { toast } from './ui.js';
 import { uuid } from './uuid.js';
 
-// Queue item: { qid, assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs? };
+// Queue item: { qid, assetId, trackId, title, artist, album, albumId, coverId, durationMs, kind, asset, resumeMs?, added? }
+// (added: put in by hand, with "play next" or "add to queue");
 // qid tells apart the same song queued twice.
 const PREFS = 'kanade.player';
 
@@ -461,8 +462,26 @@ addEventListener('pagehide', () => report(false, true));
 // playQueue plays a list from index. With shuffle on, the chosen song plays first and the rest
 // follow in random order; turning shuffle off goes back to the list's own order. Shuffling the
 // whole library, the chosen song plays first and songs from the library follow (review #72).
+// playQueue plays items from index, in place of the queue. Songs put in the queue by hand and not
+// played yet would be lost: the toast can bring that queue back, where it was (review 2.10).
 export function playQueue(items, index = 0) {
   if (!items.length || routed('playQueue', { items, index })) return;
+  const s = player.get();
+  const was = s.queue.some((q, i) => i > s.index && q.added)
+    && { queue: s.queue, index: s.index, original: s.original, radio: s.radio, at: Math.round(now() * 1000) };
+  replaceQueue(items, index);
+  if (was) toast('已換成新的播放佇列，原本手動加入的歌不在了', 'info', { label: '復原', onClick: () => bringBack(was) });
+}
+
+function bringBack(was) {
+  if (routed('playQueue', { items: was.queue, index: was.index })) return;
+  gen++;
+  const queue = was.queue.map((q, i) => (i === was.index ? { ...q, resumeMs: was.at } : q));
+  player.set({ queue, index: was.index, original: was.original, radio: was.radio, radioError: null });
+  load(was.index);
+}
+
+function replaceQueue(items, index) {
   gen++;
   const list = tag(items);
   const s = player.get();
@@ -635,7 +654,7 @@ export function enqueue(items) {
   const s = player.get();
   if (!raw.length || routed('enqueue', { items: raw })) return;
   if (s.index < 0) return playQueue(raw);
-  const list = tag(raw);
+  const list = tag(raw.map((it) => ({ ...it, added: true })));
   const queue = [...s.queue];
   let at = queue.findIndex((q, i) => i > s.index && q.auto);
   if (at < 0) at = queue.length;
@@ -650,7 +669,7 @@ export function playNext(items) {
   const s = player.get();
   if (!raw.length || routed('playNext', { items: raw })) return;
   if (s.index < 0) return playQueue(raw);
-  const list = tag(raw);
+  const list = tag(raw.map((it) => ({ ...it, added: true })));
   const queue = [...s.queue];
   queue.splice(s.index + 1, 0, ...list);
   let original = s.original;

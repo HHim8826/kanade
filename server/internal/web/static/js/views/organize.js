@@ -768,6 +768,45 @@ export function editArtistAliases(artist) {
 
 // ---- files gone from where they were (P2-6, #99) ----
 
+// ---- what is left to sort out (review 2.3) ----
+// One page for it all, where the home page's "to sort out" card and the library lead: names that
+// look like several artists, songs that could go into albums by their folders or have no album or
+// artist, files gone missing, imports that failed, and the log of every change, to undo one.
+export function Organize() {
+  const rev = useLibRev();
+  const home = useLoad(() => get('/home'), [], rev, 'home');
+  const splits = useLoad(() => get('/artists/splits'), [], rev);
+  const folders = useLoad(() => get('/organize/folders'), [], rev);
+  useStore(places, (v) => v.stores.length);
+  const att = home.data && home.data.attention;
+  const proposals = splits.data ? splits.data.proposals.length : 0;
+  const groups = folders.data || [];
+  const songs = groups.reduce((n, x) => n + x.tracks.length, 0);
+  const row = (to, icon, title, sub, warn) => html`<a class="card summary-card" href=${href(to)}>
+    <${Icon} name=${icon} /><span class="grow track-text"><span class="title">${title}</span>${sub && html`<span class="sub">${sub}</span>`}</span>
+    ${warn ? html`<span class="pill warn">${warn}</span>` : html`<span class="sub">›</span>`}</a>`;
+  const nothing = att && !proposals && !songs && !att.without_album && !att.unknown_artist && !att.missing && !att.failed_imports;
+  return html`<section>
+    <h1 class="page-title">待整理</h1>
+    ${home.loading && !home.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${home.error} onRetry=${home.reload} />`}
+    ${nothing && html`<p class="hint">目前沒有需要整理的項目。</p>`}
+    ${proposals > 0 && row('splits', 'person', `${proposals} 個歌手名稱看起來是幾位歌手`, splits.data.proposals.slice(0, 3).map((x) => x.name).join('、'))}
+    ${songs > 0 && html`<div class="card summary-card">
+      <${Icon} name="album" />
+      <span class="grow track-text"><span class="title">${songs} 首可以依資料夾歸入專輯</span>
+        <span class="sub">${groups.slice(0, 3).map((x) => x.title).join('、')}${groups.length > 3 ? ` 等 ${groups.length} 張` : ''}</span></span>
+      <button class="btn tonal" onClick=${() => folderAlbums(groups)}>依資料夾整理…</button>
+    </div>`}
+    ${att && att.without_album > 0 && row('library/tracks?filter=no_album', 'note', '沒有專輯的歌曲', '加進專輯，或依資料夾整理', att.without_album)}
+    ${att && att.unknown_artist > 0 && row('library/tracks?filter=no_artist', 'person', '沒有歌手的歌曲', '在「編輯資訊」填上歌手', att.unknown_artist)}
+    ${att && att.missing > 0 && row('missing', 'note', driveOnly() ? 'Drive 中遺失的檔案' : '遺失的檔案', '暫時無法播放；檔案放回原位就會恢復', att.missing)}
+    ${att && att.failed_imports > 0 && row('tasks', 'tasks', '匯入失敗', '在任務頁重試或捨棄', att.failed_imports)}
+    <h2 class="section-title">其他</h2>
+    ${proposals === 0 && row('splits', 'person', '拆分歌手名稱', '把「A & B」這類合寫的名字拆成各自的歌手')}
+    ${row('edits', 'history', '修改紀錄', '曲庫的每一次修改，都可以在這裡撤回')}
+  </section>`;
+}
+
 export function Missing() {
   const list = useLoad(() => get('/library/missing'), []);
   useStore(places, (v) => v.stores.length);

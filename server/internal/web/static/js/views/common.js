@@ -165,8 +165,10 @@ export const DragHandle = ({ onStart, label = '拖曳排序' }) => html`<span cl
 // album when this list is one disc of it) that list plays instead, from the tapped song. menuExtra(item,
 // i) adds entries to a row's menu; onReorder(from, to) turns on drag handles.
 // With sel (useSelection), rows can be selected by selKey(item) (the song's ID unless given; the
-// entry's on an album page), and a click checks a row instead of playing it (review #83).
-export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onReorder, meta, sel, selKey = (it) => it.trackId }) {
+// entry's on an album page), and a click checks a row instead of playing it (review #83). A right
+// click opens a row's menu. hideArtist: the artist whose page this is, not said again on each row
+// it is the artist of (review 2.7).
+export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onReorder, meta, sel, selKey = (it) => it.trackId, hideArtist }) {
   const playingId = useStore(player, (s) => s.queue[s.index]?.assetId);
   const favTracks = useStore(favs, (s) => s.tracks);
   const key = (it, i) => it.key || it.assetId + '-' + i;
@@ -184,11 +186,12 @@ export function TrackList({ items, queue, showNumber, showAlbum, menuExtra, onRe
           onClick=${(e) => sel.click(e, keys, i)} />`}
         ${onReorder && !(sel && sel.on) && html`<${DragHandle} onStart=${(e) => start(e, i)} />`}
         <button class="track-main" onPointerDown=${onReorder && ((e) => press(e, i))} onClick=${(e) => play(e, it, i)}
+          onContextMenu=${(e) => trackMenu(e, it, menuExtra ? menuExtra(it, i) : [])}
           aria-pressed=${sel && sel.on ? sel.has(keys[i]) : undefined}>
           ${showNumber ? html`<span class="num">${it.number || ''}</span>` : html`<${Cover} id=${it.coverId} size=${96} className="thumb" />`}
           <span class="track-text">
             <span class="title">${it.title}</span>
-            <span class="sub">${it.tags && it.tags.map((t) => html`<span class="track-tag" title=${t.title}>${t.label}</span>`)}${[it.artist || '未知歌手', showAlbum && it.album].filter(Boolean).join(' · ')}</span>
+            <span class="sub">${it.tags && it.tags.map((t) => html`<span class="track-tag" title=${t.title}>${t.label}</span>`)}${[hideArtist && it.artist === hideArtist ? '' : it.artist || '未知歌手', showAlbum && it.album].filter(Boolean).join(' · ')}</span>
           </span>
           <span class="meta">${meta ? meta(it) : html`<span class="quality">${fmtQuality(it.asset)}</span><span>${fmtTime(it.durationMs)}</span>`}</span>
         </button>
