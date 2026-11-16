@@ -17,7 +17,7 @@ const clock = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', d
 
 export function Feeds({ tab = 'items', q = '' }) {
   const [rev, setRev] = useState(0);
-  const sources = useLoad(() => get('/rss/sources'), [], rev);
+  const sources = useLoad(() => get('/rss/sources'), [], rev, 'rss/sources');
   const reload = () => setRev((n) => n + 1);
   return html`<section>
     <div class="page-head">
@@ -54,7 +54,7 @@ function ItemList({ sources, initialQ, rev }) {
   }, [q]);
   const params = (extra = '') => `/rss/items?limit=50&q=${encodeURIComponent(term)}&source=${source}${only ? '&only=included' : ''}${extra}`;
   const key = [term, source, only, rev].join('|');
-  const first = useLoad(() => get(params()), [term, source, only], rev);
+  const first = useLoad(() => get(params()), [term, source, only], rev, params());
   const pages = more.key === key ? more.pages : [];
   const list = [...(first.data || []), ...pages.flat()];
   const loadMore = async () => {

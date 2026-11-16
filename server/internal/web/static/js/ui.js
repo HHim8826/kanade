@@ -177,9 +177,9 @@ export function fmtQuality(a) {
   return a.bitrate ? `${f} ${Math.round(a.bitrate / 1000)}k` : f;
 }
 
-// Spinner shows a wait; a late one only if the wait goes on, so a short one shows nothing.
-export function Spinner({ late }) {
-  return html`<div class=${'spinner' + (late ? ' late' : '')} role="status" aria-label="載入中"></div>`;
+// Spinner shows a wait, once it goes on (style.css).
+export function Spinner() {
+  return html`<div class="spinner" role="status" aria-label="載入中"></div>`;
 }
 
 // PageTitle is a page's title. A page under another names that one first, as a link back to it, on

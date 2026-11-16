@@ -143,7 +143,7 @@ export function Tasks() {
     <${ErrorBox} error=${tasks.error} onRetry=${tasks.reload} />
     ${tasks.data && tasks.data.disk && tasks.data.disk.low && html`<div class="error-box" role="alert"><span>
       磁碟空間不足（剩 ${fmtBytes(tasks.data.disk.free_bytes)}，需保留 ${fmtBytes(tasks.data.disk.reserve_bytes)}）：已清掉播放快取${tasks.data.disk.stopped ? '，並暫停下載、暫不接受新的下載與上傳' : ''}。空間恢復後會自動繼續，不會刪除還沒存好的檔案。</span></div>`}
-    ${!tasks.data && !tasks.error && html`<${Spinner} late />`}
+    ${!tasks.data && !tasks.error && html`<${Spinner} />`}
     ${t && html`
       ${clearable && html`<div class="task-tools"><button class="btn text" onClick=${clearAll}><${Icon} name="delete" />清除已結束的記錄</button></div>`}
       ${movesFirst && moveList}

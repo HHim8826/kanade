@@ -78,7 +78,7 @@ export function FavoritesTab({ data }) {
 
 export function Playlist({ id }) {
   const rev = useLibRev();
-  const pl = useLoad(() => get('/playlists/' + id), [id], rev);
+  const pl = useLoad(() => get('/playlists/' + id), [id], rev, 'playlist/' + id);
   const [order, setOrder] = useState(null); // optimistic item order while a reorder is saved
   const names = useRuleNames(pl.data && pl.data.rules);
   if (pl.loading && !pl.data) return html`<${Spinner} />`;
@@ -137,10 +137,12 @@ export function Playlist({ id }) {
     <header class="album-head">
       <${Cover} id=${p.cover_id} size=${600} alt=${p.name} className="big" />
       <div class="album-info">
-        <div class="overline">歌單</div>
-        <h1>${p.name}</h1>
-        ${p.description && html`<div class="sub">${p.description}</div>`}
-        <div class="sub">${p.tracks} 首 · ${fmtTime(p.duration_ms)}</div>
+        <div class="album-titles">
+          <div class="overline">歌單</div>
+          <h1>${p.name}</h1>
+          ${p.description && html`<div class="sub">${p.description}</div>`}
+          <div class="sub">${p.tracks} 首 · ${fmtTime(p.duration_ms)}</div>
+        </div>
         <div class="actions">
           <button class="btn filled" disabled=${!items.length} onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放</button>
           <button class="btn tonal" disabled=${!items.length} onClick=${() => playQueue(shuffled(items), 0)}><${Icon} name="shuffle" />隨機播放</button>
@@ -187,10 +189,12 @@ function SmartPlaylist({ p, names }) {
     <header class="album-head">
       <${Cover} id=${p.cover_id} size=${600} alt=${p.name} className="big" />
       <div class="album-info">
-        <div class="overline">智慧歌單</div>
-        <h1>${p.name}</h1>
-        <div class="sub">${describe(p.rules, names)}</div>
-        <div class="sub">${p.tracks} 首 · ${fmtTime(p.duration_ms)}${p.matches > p.tracks ? `（符合條件的有 ${p.matches} 首）` : ''}</div>
+        <div class="album-titles">
+          <div class="overline">智慧歌單</div>
+          <h1>${p.name}</h1>
+          <div class="sub">${describe(p.rules, names)}</div>
+          <div class="sub">${p.tracks} 首 · ${fmtTime(p.duration_ms)}${p.matches > p.tracks ? `（符合條件的有 ${p.matches} 首）` : ''}</div>
+        </div>
         <div class="actions">
           <${SmartActions} p=${p} items=${items} />
           <${IconButton} icon="more" label="更多" onClick=${(e) => openMenu(e, [
@@ -223,9 +227,9 @@ const clock = (ms) => new Date(ms).toLocaleTimeString('zh-TW', { hour: '2-digit'
 // HistoryTab is the history tab of "my" page (review #190).
 export function HistoryTab() {
   const rev = useLibRev();
-  const top = useLoad(() => get('/history/top?days=30'), [], rev);
+  const top = useLoad(() => get('/history/top?days=30'), [], rev, 'history:top');
   const [pages, setPages] = useState([]);
-  const first = useLoad(() => get('/history?limit=50'), [], rev);
+  const first = useLoad(() => get('/history?limit=50'), [], rev, 'history');
   const [more, setMore] = useState({ busy: false, done: false });
   const list = [...(first.data || []), ...pages.flat()];
 

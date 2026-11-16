@@ -22,8 +22,9 @@ const results = {
 
 const statuses = [['idle', '閒置'], ['online', '線上'], ['dnd', '請勿打擾']];
 
-export function DiscordSettings() {
-  const [info, setInfo] = useState(null);
+// DiscordSettings is the settings page's; first is the page's read of it, shown until this one's.
+export function DiscordSettings({ first }) {
+  const [info, setInfo] = useState(first || null);
   const [error, setError] = useState(null);
   // Changes are counted: a read begun before the latest change shows nothing of it (review #178).
   const changes = useRef(0);

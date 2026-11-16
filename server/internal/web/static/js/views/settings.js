@@ -834,14 +834,18 @@ function SettingsList() {
 function SettingsSection({ id, onLogout }) {
   const label = groups.find(([k]) => k === id)[1];
   usePageTitle(label);
+  // All is read at once, in one round: the Drive sync's state too, used when Drive is connected (a
+  // second round made the wait long enough for the spinner to flicker), and the linked accounts, so
+  // Discord's answer does not push Bangumi's down (review 3.2).
   const first = useLoad(async () => {
-    const [status, drive, passkeys, sessions, conf, named, storage] = await Promise.all([read('/status'), read('/drive'), read('/passkeys'),
-      read('/sessions'), read('/settings'), read('/site'), read('/storage')]);
-    const sync = drive.data && drive.data.status.connected ? await read('/drive/sync') : null;
-    return { status, drive, passkeys, sessions, conf, sync, named, storage };
-  }, []);
+    const [status, drive, passkeys, sessions, conf, named, storage, synced, discord, bangumi] = await Promise.all([read('/status'), read('/drive'),
+      read('/passkeys'), read('/sessions'), read('/settings'), read('/site'), read('/storage'), read('/drive/sync'),
+      ...(id === 'linked' ? [read('/discord'), read('/bangumi/account')] : [])]);
+    const sync = drive.data && drive.data.status.connected ? synced : null;
+    return { status, drive, passkeys, sessions, conf, sync, named, storage, discord, bangumi };
+  }, [id]);
   const head = html`<${PageTitle} up=${['settings', '設定']}>${label}<//>`;
-  if (!first.data) return html`<section>${head}<${Spinner} late /></section>`;
+  if (!first.data) return html`<section>${head}<${Spinner} /></section>`;
   return html`<section>${head}<${SettingsPage} first=${first.data} onLogout=${onLogout} section=${id} /></section>`;
 }
 
@@ -875,8 +879,8 @@ function SettingsPage({ first, onLogout, section }) {
       <${Appearance} />
       <${SiteSettings} first=${first.named} />`,
     linked: () => html`
-      <${DiscordSettings} />
-      <${BangumiAccount} />`,
+      <${DiscordSettings} first=${first.discord && first.discord.data} />
+      <${BangumiAccount} first=${first.bangumi && first.bangumi.data} />`,
     service: () => html`
       <${DownloadSettings} conf=${conf} />
       <h2 class="section-title">服務</h2>

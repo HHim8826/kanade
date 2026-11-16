@@ -130,11 +130,12 @@ const results = {
   failed: ['連結失敗：Bangumi 沒有回應，請稍後再試。', 'error'],
 };
 
-// BangumiAccount is the settings page's: the Bangumi application and the account linked.
-export function BangumiAccount() {
-  const [info, setInfo] = useState(null);
+// BangumiAccount is the settings page's: the Bangumi application and the account linked. first is the
+// page's read of it, shown until this one's.
+export function BangumiAccount({ first }) {
+  const [info, setInfo] = useState(first || null);
   const [error, setError] = useState(null);
-  const [id, setId] = useState('');
+  const [id, setId] = useState((first && first.app_id) || '');
   const [secret, setSecret] = useState('');
   const [busy, run] = useRunner();
   const load = () => get('/bangumi/account', { timeout: 10000 }).then((r) => {

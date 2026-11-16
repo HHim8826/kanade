@@ -189,7 +189,7 @@ async function credits(page, token) {
   ok(left.length === 1 && left[0] === 'Mika (CV: Aoi Hoshino)', 'left to confirm: ' + left.join(' | '));
   ok((await texts(page, '.seg button')).some((t) => t === '已確認（1）'), 'one confirmed');
   // Only one name left: nothing to divide at once.
-  ok(!(await texts(page, '.page-head button')).includes('全部照建議拆分'), 'no "divide all" for one name');
+  ok(!(await texts(page, 'main button')).includes('全部照建議拆分'), 'no "divide all" for one name');
   await page.evaluate(() => [...document.querySelectorAll('.split-item button')].find((b) => b.textContent.trim() === '拆分').click());
   await sleep(1200);
   ok((await texts(page, '.empty, .split-item .title')).some((t) => t.includes('沒有看起來是多位歌手的名稱')), 'nothing left to confirm');
@@ -488,6 +488,54 @@ async function steady(page, token) {
       if (w.y !== at0.y || w.x !== at0.x) off.push(`${r || 'home'} ${w.x},${w.y}`);
     }
     ok(off.length === 0, `every title at ${at0.x},${at0.y} (${width}px)` + (off.length ? ': ' + off.join('; ') : ''));
+  }
+
+  // Every page, the first time and again: nothing it shows moves when the rest comes in (the layout
+  // shifts the browser counts), and no spinner for a wait it would only flicker in (review 3.2).
+  const tracks = await api('GET', '/tracks?limit=50', undefined, token);
+  const albums = await api('GET', '/albums?limit=50', undefined, token);
+  const pl = await api('POST', '/playlists', { name: 'Steady', items: tracks.map((t) => ({ track_id: t.id })) }, token);
+  const cat = await api('POST', '/categories', { name: 'Steady' }, token);
+  await api('POST', '/albums/categorize', { albums: albums.map((a) => a.id), add: [cat.id] }, token);
+  const still = (route) => page.evaluate(async (h) => {
+    const moved = [];
+    const take = (list) => {
+      for (const e of list) {
+        if (e.hadRecentInput || e.value < 0.0005) continue;
+        moved.push(`${e.value.toFixed(3)} ` + e.sources.map((x) => `${x.node ? (x.node.className || x.node.tagName) : '?'} ${Math.round(x.previousRect.y)}→${Math.round(x.currentRect.y)}`).join(', '));
+      }
+    };
+    const po = new PerformanceObserver((l) => take(l.getEntries()));
+    po.observe({ type: 'layout-shift' });
+    let spun = false;
+    const t0 = performance.now();
+    location.hash = '#/' + h;
+    while (performance.now() - t0 < 1500) {
+      await new Promise((r) => requestAnimationFrame(r));
+      if (performance.now() - t0 < 350 && [...document.querySelectorAll('main .spinner')].some((x) => getComputedStyle(x).visibility !== 'hidden')) spun = true;
+    }
+    take(po.takeRecords());
+    po.disconnect();
+    return { moved, spun };
+  }, route);
+  const sweep = ['', 'library/albums', 'library/artists', 'library/tracks', 'search?q=Tide', 'album/' + albums[0].id, 'artist/' + mika.id,
+    'playlist/' + pl.id, 'category/' + cat.id, 'me/history', 'me/stats', 'organize', 'splits', 'same', 'missing', 'edits', 'tasks', 'feeds',
+    'settings?s=linked', 'settings?s=playback'];
+  for (const width of [1280, 400]) {
+    await page.setViewport({ width, height: 900 });
+    await at(page, 'settings'); // nothing kept: the first time
+    await slow(300);
+    const bad = [];
+    for (const r of sweep) {
+      for (const time of ['first', 'again']) {
+        const v = await still(r);
+        if (v.moved.length || v.spun) bad.push(`${r || 'home'} ${time}:${v.spun ? ' a spinner flickers' : ''} ${v.moved.join('; ')}`);
+        await page.evaluate(() => { location.hash = '#/settings'; });
+        await sleep(400);
+      }
+    }
+    await slow(0);
+    ok(bad.length === 0, `${sweep.length} pages hold still, the first time and again (${width}px)` + bad.map((x) => '\n       ' + x).join(''));
   }
   await page.setViewport({ width: 1280, height: 900 });
 }

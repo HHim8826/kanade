@@ -71,7 +71,8 @@ function NameCategory({ close, taken, category }) {
 export function CategoryPage({ id }) {
   const none = id === 'none';
   const rev = useLibRev();
-  const cats = useLoad(() => get('/categories'), [], rev);
+  // The categories are the library tab's answer, kept: from there the name is known at once.
+  const cats = useLoad(() => get('/categories'), [], rev, '/categories');
   const [q, setQ] = useState('');
   const [term, setTerm] = useState('');
   const [sort, setSort] = useState('');
@@ -80,7 +81,7 @@ export function CategoryPage({ id }) {
     return () => clearTimeout(t);
   }, [q]);
   const base = `/albums?limit=${PAGE}&category=${none ? 'none' : id}${term ? '&q=' + encodeURIComponent(term) : ''}${sort ? '&sort=' + sort : ''}`;
-  const data = useLoad(() => get(base), [base], rev);
+  const data = useLoad(() => get(base), [base], rev, base);
   const key = `${base}:${rev}`;
   const [more, setMore] = useState({ key: null, pages: [], done: false, busy: false });
   const own = more.key === key ? more : { key, pages: [], done: false, busy: false };
@@ -100,8 +101,9 @@ export function CategoryPage({ id }) {
   const sel = useSelection('category:' + id + '?' + term + sort);
   const c = !none && cats.data ? cats.data.categories.find((x) => String(x.id) === String(id)) : null;
   if (!none && cats.data && !c) return html`<${Empty} icon="folder">這個分類已經刪除了。<a href=${href('library/categories')}>回到分類</a><//>`;
-  // The head keeps its shape while the categories load or fail (reviews #101, #111).
-  const title = none ? '未分類' : c ? c.name : cats.error ? '分類' : '載入中…';
+  // The head keeps its shape while the categories load or fail (reviews #101, #111), with no word
+  // that is replaced a moment later (review 3.2).
+  const title = none ? '未分類' : c ? c.name : cats.error ? '分類' : '\u00a0';
   const count = none ? cats.data && cats.data.uncategorized : c && c.albums;
   const menu = (e) => openMenu(e, [
     { icon: 'edit', label: '改名…', onClick: () => showDialog((close) => html`<${NameCategory} close=${close} category=${c}

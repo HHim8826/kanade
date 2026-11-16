@@ -298,7 +298,7 @@ export function RemoteBar() {
       <${IconButton} icon="prev" label="上一首" onClick=${prev} />
       <span class="remote-play">
         <${IconButton} icon=${d.state === 'playing' ? 'pause' : 'play'} label=${d.state === 'playing' ? '暫停' : '播放'} onClick=${toggle} filled />
-        ${busy > 0 && html`<div class="spinner late" role="status" aria-label="等待回應"></div>`}
+        ${busy > 0 && html`<div class="spinner" role="status" aria-label="等待回應"></div>`}
       </span>
       <${IconButton} icon="next" label="下一首" onClick=${next} />
     </div>

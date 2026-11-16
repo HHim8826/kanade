@@ -65,7 +65,7 @@ function MovedBookmark({ b, close }) {
 
 // BookmarksTab lists every bookmark, the latest first: the bookmarks tab of "my" page (review #190).
 export function BookmarksTab() {
-  const data = useLoad(() => get('/bookmarks'), []);
+  const data = useLoad(() => get('/bookmarks'), [], undefined, 'bookmarks');
   return html`<p class="hint">在正在播放的畫面按「加書籤」記住一個位置；書籤存在伺服器，換裝置也看得到。</p>
     ${data.loading && !data.data && html`<${Spinner} />`}
     ${data.error && html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}

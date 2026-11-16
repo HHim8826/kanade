@@ -132,7 +132,8 @@ button { font: inherit; color: inherit; }
 /* The scroll bar's room is kept, so a page growing past the window (a list read in), or going to
    another page, does not move everything sideways. */
 .content { grid-area: main; overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; padding: 16px 16px 24px; }
-.page { max-width: 1200px; margin: 0 auto; }
+/* flow-root: a title's margin stays inside the page, which starts at the same place on every page. */
+.page { max-width: 1200px; margin: 0 auto; display: flow-root; }
 .nav {
   grid-area: nav; z-index: 20; height: calc(var(--nav-h) + var(--safe-b)); padding-bottom: var(--safe-b);
   display: flex; background: var(--surface-container); border-top: 1px solid var(--outline-variant);
@@ -224,11 +225,11 @@ button { font: inherit; color: inherit; }
 .album-info { flex: 1; min-width: 240px; }
 .album-info h1 { font-size: 26px; font-weight: 600; margin: 4px 0 8px; line-height: 1.25; }
 /* A phone sees the first songs with the album's head (review 2.5): the cover beside the title, where
-   it belongs and the buttons below them. */
+   it belongs and the buttons below them. A playlist's and a work's head are the same (review 3.2). */
 @media (max-width: 599px) {
   .album-head { display: grid; grid-template-columns: 120px minmax(0, 1fr); grid-template-areas: "cover titles" "chips chips" "actions actions";
     gap: 12px 16px; align-items: end; margin: 0 0 8px; }
-  .album-head .cover-open { grid-area: cover; }
+  .album-head .cover-open, .album-head > .cover { grid-area: cover; } /* an album's opens; a playlist's or a work's does not */
   .album-head .cover.big { width: 120px; border-radius: var(--radius-m); }
   .album-info { display: contents; }
   .album-titles { grid-area: titles; min-width: 0; }
@@ -584,9 +585,10 @@ kbd { display: inline-block; min-width: 1.9em; padding: 1px 7px; border: 1px sol
 .brand { display: flex; align-items: center; gap: 12px; color: var(--primary); margin-bottom: 24px; }
 .brand h1 { font-size: 24px; margin: 0; color: var(--on-surface); overflow-wrap: anywhere; }
 .brand-icon { width: 40px; height: 40px; border-radius: 10px; flex: none; }
-.spinner { width: 32px; height: 32px; margin: 32px auto; border-radius: 50%; border: 3px solid var(--surface-container-high); border-top-color: var(--primary); animation: spin .8s linear infinite; }
-/* A spinner for a wait that is usually too short to see: it shows only if the wait goes on. */
-.spinner.late { animation: spin .8s linear infinite, appear 0s .4s backwards; }
+/* A spinner shows only if the wait goes on: most answers come sooner, and a spinner seen for a moment
+   and gone is a flicker (review 3.2). */
+.spinner { width: 32px; height: 32px; margin: 32px auto; border-radius: 50%; border: 3px solid var(--surface-container-high); border-top-color: var(--primary);
+  animation: spin .8s linear infinite, appear 0s .4s backwards; }
 @keyframes appear { from { visibility: hidden; } }
 @keyframes spin { to { transform: rotate(360deg); } }
 .empty { text-align: center; color: var(--on-surface-variant); padding: 32px 16px; }

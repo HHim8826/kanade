@@ -90,16 +90,27 @@ export function StatsTab() {
   </div>`;
 }
 
-// Overview: today, this week, month and year.
+// useShown is a load that keeps showing its last answer while another (a kind, period or order
+// chosen) is read, dimmed (refreshing): the charts stay where they are instead of going and coming
+// back (review 3.2).
+function useShown(load) {
+  const last = useRef(null);
+  if (load.data) last.current = load.data;
+  else if (load.error) last.current = null;
+  return { ...load, data: load.data || last.current };
+}
+
+// Overview: today, this week, month and year. Each tile has its line under the time from the start,
+// so the answer does not push what is below down.
 function Overview({ q, rev }) {
-  const data = useLoad(() => get('/stats/summary?' + q), [q], rev);
+  const data = useShown(useLoad(() => get('/stats/summary?' + q), [q], rev, 'stats/summary?' + q));
   if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`;
   const s = data.data;
   const tiles = [['today', '今天'], ['week', '本週'], ['month', '本月'], ['year', '今年']];
   return html`<div class=${'stat-tiles' + (data.loading ? ' refreshing' : '')}>${tiles.map(([k, label]) => html`<div key=${k} class="stat-tile">
     <div class="label">${label}</div>
     <div class="value">${s ? fmtDur(s[k].ms) : '—'}</div>
-    ${s && html`<div class="sub">有效播放 ${s[k].plays} 次 · ${s[k].tracks} 首歌${k !== 'today' ? ` · ${s[k].active_days} 天有聽` : ''}</div>`}
+    <div class="sub">${s ? `有效播放 ${s[k].plays} 次 · ${s[k].tracks} 首歌${k !== 'today' ? ` · ${s[k].active_days} 天有聽` : ''}` : '\u00a0'}</div>
   </div>`)}</div>`;
 }
 
@@ -122,7 +133,7 @@ function Heatmap({ q, today, rev }) {
   const [tip, setTip] = useState(null);
   const [cell, setCell] = useState(12);
   const grid = useRef(null), area = useRef(null), tipBox = useRef(null);
-  const data = useLoad(() => get(`/stats/days?year=${year}&${q}`), [year, q], rev);
+  const data = useShown(useLoad(() => get(`/stats/days?year=${year}&${q}`), [year, q], rev, `stats/days?year=${year}&${q}`));
   const byDate = useMemo(() => Object.fromEntries((data.data ? data.data.days : []).map((d) => [d.date, d])), [data.data]);
   const level = useMemo(() => levels(data.data ? data.data.days : []), [data.data]);
   const first = `${year}-01-01`, last = `${year}-12-31`;
@@ -144,7 +155,9 @@ function Heatmap({ q, today, rev }) {
       setFocus(`${y}-${md === '02-29' && !leap ? '02-28' : md}`);
     }
   };
-  useEffect(() => { // the year fills the width there is, with square days of 12 to 24 px; a phone scrolls it (review #118)
+  // The year fills the width there is, with square days of 12 to 24 px; a phone scrolls it (review
+  // #118). Measured before the page is drawn, so the map does not grow under the eyes (review 3.2).
+  useLayoutEffect(() => {
     const el = grid.current;
     if (!el) return;
     const fit = () => {
@@ -202,7 +215,7 @@ function Heatmap({ q, today, rev }) {
       <span class="year">${year}</span>
       <${IconButton} icon="back" label="後一年" className="flip" disabled=${year >= thisYear} onClick=${() => toYear(year + 1)} />
     </div>
-    <p class="sub">${data.data ? `${year} 年共聽了 ${fmtDur(total)}，${data.data.days.filter((d) => d.ms >= 60_000).length} 天有聽。` : ''}
+    <p class="sub">${data.data ? `${year} 年共聽了 ${fmtDur(total)}，${data.data.days.filter((d) => d.ms >= 60_000).length} 天有聽。` : '\u00a0'}
       ${data.data && data.data.estimated_until ? `${data.data.estimated_until} 以前的時間是從舊的播放紀錄推算的（每次播放從最後回報往前算），跨午夜的部分可能歸錯日子。` : ''}</p>
     ${data.error && html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     <div class="heat-area" ref=${area}>
@@ -231,10 +244,10 @@ function Heatmap({ q, today, rev }) {
     </div>
     <div class="heat-legend sub" aria-hidden="true">少<span class="heat-cell l0"></span><span class="heat-cell l1"></span><span class="heat-cell l2"></span>
       <span class="heat-cell l3"></span><span class="heat-cell l4"></span>多<span class="grow"></span>點一天看當天聽了什麼</div>
-    ${data.data && html`<details class="table-view"><summary>以表格檢視</summary>
+    <details class="table-view"><summary>以表格檢視</summary>
       <table><thead><tr><th>日期</th><th>聆聽時間</th><th>有效播放</th><th>歌曲</th></tr></thead>
-        <tbody>${data.data.days.map((d) => html`<tr key=${d.date}><td>${d.date}</td><td>${fmtDur(d.ms)}</td><td>${d.plays}</td><td>${d.tracks}</td></tr>`)}</tbody></table>
-    </details>`}
+        <tbody>${(data.data ? data.data.days : []).map((d) => html`<tr key=${d.date}><td>${d.date}</td><td>${fmtDur(d.ms)}</td><td>${d.plays}</td><td>${d.tracks}</td></tr>`)}</tbody></table>
+    </details>
     ${picked && html`<${DayDetail} date=${picked} q=${q} rev=${rev} onClose=${() => setPicked('')} />`}
   </section>`;
 }
@@ -266,6 +279,11 @@ function Period({ q, today, rev }) {
     : { from: addDays(today, 1 - Number(preset)), to: today };
   const bad = range.from > range.to || (dayOf(range.to) - dayOf(range.from)) / 86400000 >= 400;
   const rq = `${q}&from=${range.from}&to=${range.to}`;
+  // The summary and the charts show together, once both are read, and the rankings under them only
+  // then: a part coming in later would push the others down (review 3.2).
+  const sum = useShown(useLoad(() => (bad ? Promise.resolve(null) : get('/stats/summary?' + rq)), [rq], rev, 'stats/summary?' + rq));
+  const trends = useShown(useLoad(() => (bad ? Promise.resolve(null) : get('/stats/trends?' + rq)), [rq], rev, 'stats/trends?' + rq));
+  const ready = (sum.data || sum.error) && (trends.data || trends.error);
   return html`<section class="stats-section">
     <div class="section-head"><h2 class="section-title grow">排行與趨勢</h2></div>
     <div class="filter-row" role="group" aria-label="期間">
@@ -277,14 +295,12 @@ function Period({ q, today, rev }) {
         <input type="date" value=${custom.to} max=${today} aria-label="結束日期" onChange=${(e) => setCustom({ ...custom, to: e.target.value })} /></span>`}
     </div>
     ${bad ? html`<p class="hint warn-text">期間要從開始到結束，最長 400 天。</p>` : html`
-      <${PeriodSummary} rq=${rq} rev=${rev} />
-      <${Trends} rq=${rq} rev=${rev} />
-      <${Rankings} rq=${rq} rev=${rev} />`}
+      ${ready ? html`<${PeriodSummary} data=${sum} /><${Trends} data=${trends} />` : html`<${Spinner} />`}
+      <${Rankings} rq=${rq} rev=${rev} hold=${!ready} />`}
   </section>`;
 }
 
-function PeriodSummary({ rq, rev }) {
-  const data = useLoad(() => get('/stats/summary?' + rq), [rq], rev);
+function PeriodSummary({ data }) {
   const s = data.data && data.data.range;
   if (!s) return null;
   return html`<p class="period-line"><b>${fmtDur(s.ms)}</b><span class="sub">有效播放 ${s.plays} 次 · ${s.tracks} 首歌 · ${s.albums} 張專輯 · ${s.active_days} 天有聽</span></p>`;
@@ -336,10 +352,8 @@ function Columns({ title, items, label = () => '', detail = () => '' }) {
   </figure>`;
 }
 
-function Trends({ rq, rev }) {
-  const data = useLoad(() => get('/stats/trends?' + rq), [rq], rev);
+function Trends({ data }) {
   if (data.error) return html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`;
-  if (!data.data) return html`<${Spinner} />`;
   const t = data.data;
   const n = t.days.length;
   const every = n <= 10 ? 1 : n <= 31 ? 7 : n <= 92 ? 14 : 30;
@@ -366,10 +380,12 @@ function Trends({ rq, rev }) {
 
 const groups = [['tracks', '歌曲'], ['artists', '歌手'], ['albums', '專輯']];
 
-function Rankings({ rq, rev }) {
+// Rankings reads along with the charts above it, and shows once they do (hold).
+function Rankings({ rq, rev, hold }) {
   const [group, setGroup] = useState('tracks');
   const [by, setBy] = useState('plays');
-  const data = useLoad(() => get(`/stats/top?${rq}&group=${group}&by=${by}&limit=50`), [rq, group, by], rev);
+  const data = useShown(useLoad(() => get(`/stats/top?${rq}&group=${group}&by=${by}&limit=50`), [rq, group, by], rev, `stats/top?${rq}&group=${group}&by=${by}`));
+  if (hold) return null;
   return html`<div class="rankings">
     <div class="filter-row">
       <h3 class="grow">排行</h3>

@@ -48,7 +48,7 @@ export function Login({ onLogin }) {
       setBusy(false);
     }
   };
-  if (passkeys === null) return html`<main class="login" aria-busy="true"><div class="spinner late"></div></main>`;
+  if (passkeys === null) return html`<main class="login" aria-busy="true"><div class="spinner"></div></main>`;
   return html`<main class="login">
     <form class="card pad login-card" onSubmit=${submit}>
       <div class="brand">${s.icon ? html`<img class="brand-icon" src=${iconURL(s.icon, 192)} alt="" />` : html`<${Icon} name="library" size=${40} />`}<h1>${s.name}</h1></div>

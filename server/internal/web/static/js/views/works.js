@@ -315,7 +315,7 @@ function fmtDay(ms) {
 // WorkPage is a work and what the library has of it.
 export function WorkPage({ id }) {
   const rev = useLibRev();
-  const data = useLoad(() => get('/works/' + id), [id], rev);
+  const data = useLoad(() => get('/works/' + id), [id], rev, 'work/' + id);
   const [full, setFull] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   if (data.loading && !data.data) return html`<${Spinner} />`;
@@ -345,11 +345,13 @@ export function WorkPage({ id }) {
     <header class="album-head work-head">
       <${WorkImage} id=${w.image ? w.id : 0} size=${600} alt=${w.name} className="big" />
       <div class="album-info">
-        <div class="overline"><a href=${href('library/works')}>作品</a>${workLine(w) ? ` · ${workLine(w)}` : ''}</div>
-        <h1>${w.name}</h1>
-        ${w.name_cn && html`<div class="sub">${w.name_cn}</div>`}
-        ${w.score > 0 && html`<div class="sub">Bangumi 評分 ${w.score.toFixed(1)}（${w.votes} 人）${w.rank ? ` · 排名第 ${w.rank}` : ''}</div>`}
-        <div class="sub">${[albums.length && `${albums.length} 張專輯`, songs.length && `${songs.length} 首標註用途的歌`].filter(Boolean).join(' · ') || '曲庫中已沒有它的專輯或歌曲'}</div>
+        <div class="album-titles">
+          <div class="overline"><a href=${href('library/works')}>作品</a>${workLine(w) ? ` · ${workLine(w)}` : ''}</div>
+          <h1>${w.name}</h1>
+          ${w.name_cn && html`<div class="sub">${w.name_cn}</div>`}
+          ${w.score > 0 && html`<div class="sub">Bangumi 評分 ${w.score.toFixed(1)}（${w.votes} 人）${w.rank ? ` · 排名第 ${w.rank}` : ''}</div>`}
+          <div class="sub">${[albums.length && `${albums.length} 張專輯`, songs.length && `${songs.length} 首標註用途的歌`].filter(Boolean).join(' · ') || '曲庫中已沒有它的專輯或歌曲'}</div>
+        </div>
         <div class="actions">
           ${items.length > 0 && html`<button class="btn filled" onClick=${() => playQueue(items, 0)}><${Icon} name="play" />播放歌曲</button>`}
           <a class="btn tonal" href=${url} target="_blank" rel="noopener noreferrer"><${Icon} name="openNew" />Bangumi</a>

@@ -242,6 +242,16 @@ export function Library({ tab = 'albums', filter = '', find = '' }) {
   const base = tabURL[tab] || `/${tab}?limit=${PAGE}${filter ? (tab === 'albums' ? '&place=' : '&filter=') + filter : ''}${
     order ? '&sort=' + order : ''}${q ? '&q=' + encodeURIComponent(q) : ''}`;
   const data = useLoad(() => get(base), [base], rev, base);
+  // The cards above a list (names to divide or of one artist; songs their folders could put in
+  // albums) are read with it, and the list waits for them: a card coming in later pushed it down
+  // (review 3.2). Their answers are the page to sort out's, kept for both.
+  const cardsAt = tab === 'artists' && !q ? 'artists' : tab === 'tracks' && filter === 'no_album' ? 'folders' : '';
+  const useCard = (at, path, keep) => useLoad(() => (cardsAt === at ? get(path) : Promise.resolve(null)), [cardsAt], rev, cardsAt === at ? keep : undefined);
+  const splits = useCard('artists', '/artists/splits', 'organize:splits');
+  const same = useCard('artists', '/artists/same', 'organize:same');
+  const folders = useCard('folders', '/organize/folders', 'organize:folders');
+  const cardsIn = cardsAt === 'artists' ? (splits.data || splits.error) && (same.data || same.error)
+    : cardsAt === 'folders' ? folders.data || folders.error : true;
   // Later pages, for this tab, filter and library version only (review #9).
   const key = `${base}:${rev}`;
   const [more, setMore] = useState(() => pagesKept.get(key) || { key: null, pages: [], done: false, busy: false });
@@ -297,20 +307,20 @@ export function Library({ tab = 'albums', filter = '', find = '' }) {
           ${placeFilters.map(([k, label]) => html`<option key=${k} value=${k}>${label}</option>`)}
           ${gone && html`<option value=${filter}>（已移除的位置）</option>`}</select></label>`}
     </div>`}
-    ${tab === 'tracks' && filter === 'no_album' && html`<${FolderCard} rev=${rev} />`}
+    ${cardsIn && cardsAt === 'folders' && html`<${FolderCard} groups=${folders.data} />`}
     ${gone ? html`<${Empty} icon="album">這個儲存位置已經移除了。<//>`
-      : data.loading && !data.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
+      : (data.loading && !data.data) || !cardsIn ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${list && tab === 'albums' && html`<${AlbumGrid} albums=${list} sel=${sel} empty=${q ? `沒有符合「${q}」的專輯。` : filter ? '這裡沒有專輯。' : undefined} />`}
-    ${tab === 'artists' && !q && html`<${SplitCard} rev=${rev} /><${SameCard} rev=${rev} />`}
+    ${cardsIn && cardsAt === 'artists' && html`<${SplitCard} data=${splits.data} /><${SameCard} data=${same.data} />`}
     ${list && tab === 'artists' && !list.length && q && html`<${Empty} icon="person">沒有符合「${q}」的歌手。<//>`}
-    ${list && tab === 'artists' && html`<ul class="list">
+    ${list && cardsIn && tab === 'artists' && html`<ul class="list">
       ${list.map((a) => html`<li key=${a.id}><a class="row" href=${href(`artist/${a.id}?name=${encodeURIComponent(a.name)}`)}>
         <span class="avatar"><${Icon} name="person" /></span><span class="grow">${a.name}${a.kind === 'character' && html`<span class="sub"> · 角色</span>`}</span><span class="sub">${a.tracks} 首</span></a></li>`)}
     </ul>`}
-    ${list && tab === 'tracks' && (list.length
+    ${list && cardsIn && tab === 'tracks' && (list.length
       ? html`<${TrackList} items=${list.map(fromTrack)} showAlbum sel=${sel} />`
       : html`<${Empty}>${q ? `沒有符合「${q}」的歌。` : filter === 'no_album' ? '每首歌都有專輯了。' : filter === 'no_artist' ? '每首歌都有歌手了。' : '還沒有歌曲。'}<//>`)}
-    ${list && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
+    ${list && cardsIn && !done && html`<${LoadMore} onMore=${loadMore} busy=${own.busy} />`}
     ${data.data && tab === 'categories' && html`<${CategoriesTab} data=${data.data} />`}
     ${data.data && tab === 'works' && html`<${WorksTab} data=${data.data} />`}
     ${selectable && html`<${SelectBar} sel=${sel} noun=${tab === 'albums' ? '張' : '首'} loaded=${keys} more=${!done}
@@ -321,9 +331,7 @@ export function Library({ tab = 'albums', filter = '', find = '' }) {
 }
 
 // FolderCard offers albums for songs whose folder names the album though their tags name none.
-function FolderCard({ rev }) {
-  const groups = useLoad(() => get('/organize/folders'), [], rev);
-  const g = groups.data;
+function FolderCard({ groups: g }) {
   if (!g || !g.length) return null;
   const songs = g.reduce((n, x) => n + x.tracks.length, 0);
   return html`<div class="card summary-card folder-card">
@@ -517,9 +525,8 @@ export function Artist({ id, name }) {
 }
 
 // SplitCard asks about the names that look like several artists, on the artists tab (D13).
-function SplitCard({ rev }) {
-  const splits = useLoad(() => get('/artists/splits'), [], rev);
-  const list = splits.data ? splits.data.proposals : [];
+function SplitCard({ data }) {
+  const list = data ? data.proposals : [];
   if (!list.length) return null;
   return html`<div class="card summary-card">
     <${Icon} name="person" />
@@ -530,9 +537,8 @@ function SplitCard({ rev }) {
 }
 
 // SameCard offers the artists that look like one under two names (D13).
-function SameCard({ rev }) {
-  const same = useLoad(() => get('/artists/same'), [], rev);
-  const list = same.data ? same.data.pairs : [];
+function SameCard({ data }) {
+  const list = data ? data.pairs : [];
   if (!list.length) return null;
   return html`<div class="card summary-card">
     <${Icon} name="merge" />
@@ -707,6 +713,7 @@ export function Search() {
       <${Group} title="專輯" items=${shown.albums}>${albumRows}<//>
       <${Group} title="作品" items=${shown.works || []}>${workRows}<//>
     </div>`}
-    ${term && html`<div class="actions"><a class="btn text" href=${href('feeds?q=' + encodeURIComponent(term))}><${Icon} name="download" />在 RSS 資源中找「${term}」</a></div>`}
+    ${/* Under the results, once they are in: before them it stood at the top and they pushed it down. */ ''}
+    ${term && (shown || error) && html`<div class="actions"><a class="btn text" href=${href('feeds?q=' + encodeURIComponent(term))}><${Icon} name="download" />在 RSS 資源中找「${term}」</a></div>`}
   </section>`;
 }

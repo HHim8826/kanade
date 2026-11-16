@@ -834,7 +834,7 @@ function MergeArtist({ artist, close }) {
 // SameArtists are the pairs of artists whose names look like one artist's, for the user to say.
 export function SameArtists() {
   const rev = useLibRev();
-  const data = useLoad(() => get('/artists/same'), [], rev);
+  const data = useLoad(() => get('/artists/same'), [], rev, 'organize:same');
   const [busy, run] = useRunner();
   const [count, setCount] = useState(SHOWN);
   const d = data.data;
@@ -895,7 +895,7 @@ export function Organize() {
   const nothing = att && !proposals && !pairs.length && !songs && !att.without_album && !att.unknown_artist && !att.missing && !att.failed_imports;
   return html`<section>
     <h1 class="page-title">待整理</h1>
-    ${!ready ? html`<${Spinner} late />` : failed && html`<${ErrorBox} error=${failed.error} onRetry=${failed.reload} />`}
+    ${!ready ? html`<${Spinner} />` : failed && html`<${ErrorBox} error=${failed.error} onRetry=${failed.reload} />`}
     ${ready && html`${nothing && html`<p class="hint">目前沒有需要整理的項目。</p>`}
     ${proposals > 0 && row('splits', 'person', `${proposals} 個歌手名稱看起來是幾位歌手`, splits.data.proposals.slice(0, 3).map((x) => x.name).join('、'))}
     ${pairs.length > 0 && row('same', 'merge', `${pairs.length} 組歌手看起來是同一位`, pairs.slice(0, 2).map((p) => `${p.a.name} ↔ ${p.b.name}`).join('、'))}
@@ -917,14 +917,14 @@ export function Organize() {
 }
 
 export function Missing() {
-  const list = useLoad(() => get('/library/missing'), []);
+  const list = useLoad(() => get('/library/missing'), [], undefined, 'missing');
   useStore(places, (v) => v.stores.length);
   return html`<section>
     <${PageTitle} up=${up}>${driveOnly() ? 'Drive 中遺失的檔案' : '遺失的檔案'}<//>
     <p class="hint">${driveOnly()
       ? '這些歌曲的音檔在 Google Drive 被刪除或移到垃圾桶，暫時無法播放；曲庫資料都還在。從 Drive 垃圾桶還原後，下一次同步（或設定頁的「完整對帳」）會自動恢復。'
       : '這些歌曲的音檔不在原本的位置（被刪除、移到垃圾桶或搬走），暫時無法播放；曲庫資料都還在。在 Google Drive 從垃圾桶還原後，下一次同步會自動恢復；在其他儲存位置把檔案放回原位後，下一次檢查或掃描會自動恢復。'}若是不要了，可以在歌曲的「編輯資訊」裡永久刪除。</p>
-    ${list.loading ? html`<${Spinner} />` : html`<${ErrorBox} error=${list.error} onRetry=${list.reload} />`}
+    ${list.loading && !list.data ? html`<${Spinner} />` : html`<${ErrorBox} error=${list.error} onRetry=${list.reload} />`}
     ${list.data && !list.data.length && html`<${Empty} icon="note">沒有遺失的檔案。<//>`}
     ${list.data && list.data.length > 0 && html`<ul class="list">${list.data.map((m) => html`<li key=${m.track_id}>
       <button class="row plain wide" onClick=${() => editTrack(m.track_id)}>
@@ -942,7 +942,7 @@ const when = (ms) => new Date(ms).toLocaleString('zh-TW', { month: 'numeric', da
 
 export function Edits() {
   const rev = useLibRev();
-  const first = useLoad(() => get('/edits?limit=50'), [], rev);
+  const first = useLoad(() => get('/edits?limit=50'), [], rev, 'edits');
   const [more, setMore] = useState({ key: null, pages: [], done: false });
   const [open, setOpen] = useState(null);
   const pages = more.key === rev ? more.pages : [];
@@ -1006,7 +1006,7 @@ const SHOWN = 30;
 // songs imported later too, and is one edit to undo.
 export function Splits() {
   const rev = useLibRev();
-  const data = useLoad(() => get('/artists/splits'), [], rev);
+  const data = useLoad(() => get('/artists/splits'), [], rev, 'organize:splits');
   const [tab, setTab] = useState('proposals');
   const [count, setCount] = useState(SHOWN);
   const [busy, run] = useRunner();
@@ -1019,14 +1019,14 @@ export function Splits() {
     onConfirm: () => decide(d.proposals.map((p) => ({ name: p.name, parts: p.parts })), `已拆分 ${d.proposals.length} 個名稱`),
   });
   return html`<section>
-    <div class="page-head">
-      <${PageTitle} up=${up}>拆分歌手名稱<//>
-      ${d && tab === 'proposals' && d.proposals.length > 1 && html`<button class="btn tonal" disabled=${busy} onClick=${all}>全部照建議拆分</button>`}
-    </div>
+    <${PageTitle} up=${up}>拆分歌手名稱<//>
     <p class="hint">標籤裡的歌手有時是幾位合寫在一起，例如「A & B」或「角色（CV：聲優）」。確認拆分後，每個名字各自成為一位歌手，有自己的頁面；之後匯入的歌曲也照這樣拆。歌曲標籤的文字不會改，可在修改紀錄撤回。</p>
-    ${d && html`<nav class="seg filter-seg" aria-label="名稱">${[['proposals', `待確認（${d.proposals.length}）`], ['decided', `已確認（${d.decided.length}）`]]
+    ${/* "Divide all" comes with the list, beside its tabs: in the title's row it came later and, on a
+      phone, pushed the page down (review 3.2). */ ''}
+    ${d && html`<div class="filter-row"><nav class="seg" aria-label="名稱">${[['proposals', `待確認（${d.proposals.length}）`], ['decided', `已確認（${d.decided.length}）`]]
       .map(([k, label]) => html`<button key=${k} class=${tab === k ? 'on' : ''} aria-pressed=${tab === k}
-        onClick=${() => { setTab(k); setCount(SHOWN); }}>${label}</button>`)}</nav>`}
+        onClick=${() => { setTab(k); setCount(SHOWN); }}>${label}</button>`)}</nav>
+      ${tab === 'proposals' && d.proposals.length > 1 && html`<button class="btn tonal" disabled=${busy} onClick=${all}>全部照建議拆分</button>`}</div>`}
     ${data.loading && !d ? html`<${Spinner} />` : html`<${ErrorBox} error=${data.error} onRetry=${data.reload} />`}
     ${d && !list.length && html`<${Empty} icon="person">${tab === 'proposals' ? '沒有看起來是多位歌手的名稱。' : '還沒有確認過任何名稱。'}<//>`}
     <ul class="split-list">${list.slice(0, count).map((s) => html`<${SplitItem} key=${s.name + rev} s=${s} decided=${tab === 'decided'} busy=${busy} decide=${decide} />`)}</ul>
