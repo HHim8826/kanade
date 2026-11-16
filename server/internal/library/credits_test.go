@@ -24,8 +24,12 @@ func TestSplit(t *testing.T) {
 		"ミク (CV: 藤田咲)":       "[{ミク 藤田咲}]",
 		"ミク（CV：藤田咲）、リン（CV：下田麻美）":     "[{ミク 藤田咲} {リン 下田麻美}]",
 		"放課後ティータイム [CV.豊崎愛生 & 日笠陽子]": "[{放課後ティータイム 豊崎愛生 & 日笠陽子}]", // inside brackets, not divided
-		"A & A": "[{A }]",
-		"":      "[]",
+		"A & A":            "[{A }]",
+		"A, B, etc.":       "[{A } {B }]", // a list's end is no one
+		"A、B、他":            "[{A } {B }]",
+		"NYO / Vocal:Kana": "[{NYO } {Kana }]",
+		"Etcetera & B":     "[{Etcetera } {B }]",
+		"":                 "[]",
 	}
 	for in, want := range cases {
 		got := Split(in)
@@ -193,5 +197,73 @@ func TestFillRoleNames(t *testing.T) {
 	}
 	if !s.RoleNamesFilled(ctx) {
 		t.Fatal("not noted")
+	}
+}
+
+// The word on a name goes with it when its artist is renamed, and back when the rename is undone;
+// a new name with a word of its own keeps that one. One who voices two characters of a song has the
+// song once, as both.
+func TestSplitsFollowRenames(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	const band = "Earth, Wind & Fire"
+	one, _ := s.Publish(ctx, verifiedAsset(t, s, "w1"), EntryInput{Title: "S", Artist: band, Album: "One"})
+	keep := []Part{}
+	if _, err := s.DecideSplits(ctx, []SplitDecision{{Name: band, Parts: &keep}}); err != nil {
+		t.Fatal(err)
+	}
+	decidedAs := func(want ...string) {
+		t.Helper()
+		proposals, decided, err := s.Splits(ctx)
+		var names []string
+		for _, d := range decided {
+			names = append(names, d.Name)
+		}
+		if err != nil || len(proposals) != 0 || fmt.Sprint(names) != fmt.Sprint(want) {
+			t.Fatalf("proposals %+v, decided %v, want %v: %v", proposals, names, want, err)
+		}
+	}
+	d, _ := s.Track(ctx, one.TrackID)
+	rename, err := s.RenameArtist(ctx, d.Credits[0].ArtistID, band+" (band)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	decidedAs(band + " (band)")
+	if _, conflicts, err := s.Undo(ctx, rename); err != nil || len(conflicts) != 0 {
+		t.Fatalf("undo: %+v %v", conflicts, err)
+	}
+	decidedAs(band)
+
+	two, _ := s.Publish(ctx, verifiedAsset(t, s, "w2"), EntryInput{Title: "T", Artist: "A & B", Album: "One"})
+	parts := []Part{{Name: "A"}, {Name: "B"}}
+	if _, err := s.DecideSplits(ctx, []SplitDecision{{Name: "A & B", Parts: &parts}}); err != nil {
+		t.Fatal(err)
+	}
+	d, _ = s.Track(ctx, one.TrackID)
+	if _, err := s.RenameArtist(ctx, d.Credits[0].ArtistID, "A & B"); err != nil {
+		t.Fatal(err)
+	}
+	decidedAs("A & B")
+	for _, id := range []int64{one.TrackID, two.TrackID} {
+		if d, _ := s.Track(ctx, id); len(d.Credits) != 2 || d.Credits[0].Name != "A" || d.Credits[1].Name != "B" {
+			t.Fatalf("track %d: %+v", id, d.Credits)
+		}
+	}
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM artist_splits WHERE name = ?`, band).Scan(&n)
+	if n != 1 {
+		t.Fatal("the old name's word went")
+	}
+
+	const twice = "C (CV: X) & D (CV: X)"
+	s.Publish(ctx, verifiedAsset(t, s, "w3"), EntryInput{Title: "U", Artist: twice, Album: "One"})
+	both := Split(twice)
+	if _, err := s.DecideSplits(ctx, []SplitDecision{{Name: twice, Parts: &both}}); err != nil {
+		t.Fatal(err)
+	}
+	res, _ := s.Search(ctx, "X", 10)
+	x, _ := s.ArtistDetail(ctx, res.Artists[0].ID)
+	if len(x.Roles) != 1 || len(x.Roles[0].Items) != 1 || x.Roles[0].Items[0].As != "C、D" || len(x.Characters) != 2 {
+		t.Fatalf("voice page %+v", x)
 	}
 }

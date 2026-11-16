@@ -31,6 +31,12 @@ type directEnv struct {
 
 func newDirectEnv(t *testing.T) (context.Context, *directEnv) {
 	t.Helper()
+	return newDirectEnvWith(t, nil)
+}
+
+// newDirectEnvWith is newDirectEnv with aria2 prepared by setup before it starts.
+func newDirectEnvWith(t *testing.T, setup func(context.Context, *Aria2)) (context.Context, *directEnv) {
+	t.Helper()
 	bin := aria2Path(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	tmp := t.TempDir()
@@ -47,6 +53,9 @@ func newDirectEnv(t *testing.T) (context.Context, *directEnv) {
 	aria, err := NewAria2(bin, filepath.Join(tmp, "aria2"), filepath.Join(tmp, "downloads"), log)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if setup != nil {
+		setup(ctx, aria)
 	}
 	svc := NewService(d, aria, imp, filepath.Join(tmp, "downloads"), 2<<30, 0, log)
 	go imp.Run(ctx)

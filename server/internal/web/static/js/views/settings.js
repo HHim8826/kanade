@@ -59,12 +59,18 @@ function Backups() {
   const where = useStore(places);
   useEffect(() => { if (!where.loaded) loadPlaces(); }, []);
   const managed = where.stores.filter((st) => st.mode === 'managed');
+  // While it is asked the choice is held; a refused one goes back to where copies still go (the
+  // render after shows the place as it is).
+  const [placing, setPlacing] = useState(false);
   const choose = async (place) => {
+    setPlacing(true);
     try {
       data.reload(await api('PUT', '/backup/place', { place }));
       toast('之後的備份會存到這裡；已有的備份留在原處');
     } catch (e) {
       toast(e.message, 'error');
+    } finally {
+      setPlacing(false);
     }
   };
   useEffect(() => { // a copy being made: follow it
@@ -97,7 +103,7 @@ function Backups() {
       <${ErrorBox} error=${data.error} onRetry=${data.reload} />
       <div class="sub">專輯分組、修改紀錄、歌單、收藏、書籤、聆聽記錄和各種授權都在資料庫裡，儲存位置上只有音檔。每天自動備份一份到${at}，保留最近 ${b ? b.keep : 14} 份，較舊的移到那裡的垃圾桶。備份含 Google 與其他位置的授權、金鑰和密碼雜湊：請存在只有自己能讀的地方。</div>
       ${b && (managed.length > 0 || !drive) && html`<label class="field">備份存到
-        <select value=${b.place} onChange=${(e) => choose(e.target.value)}>
+        <select value=${b.place} disabled=${placing} onChange=${(e) => choose(e.target.value)}>
           <option value="drive">Google Drive</option>
           ${managed.map((st) => html`<option value=${String(st.id)}>${st.name}</option>`)}
           ${!drive && !managed.some((st) => String(st.id) === b.place) && html`<option value=${b.place}>（已移除的位置）</option>`}

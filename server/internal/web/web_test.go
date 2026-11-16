@@ -49,6 +49,9 @@ func TestVersionedAssets(t *testing.T) {
 	if rec := get("/app/library/albums"); rec.Code != 200 || !strings.Contains(rec.Body.String(), m[1]) {
 		t.Fatalf("client route should get the shell: %d", rec.Code)
 	}
+	if rec := get("/app/version"); rec.Code != 200 || rec.Body.String() != m[1] || rec.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("version: %d %q %q", rec.Code, rec.Body, rec.Header().Get("Cache-Control"))
+	}
 }
 
 // A release that changes only a script gives the shell a new validator, so a client holding the

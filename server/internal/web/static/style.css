@@ -558,6 +558,11 @@ kbd { display: inline-block; min-width: 1.9em; padding: 1px 7px; border: 1px sol
 .toast-action { pointer-events: auto; flex: none; border: 0; background: none; color: var(--primary-container); font: inherit; font-weight: 600; cursor: pointer;
   padding: 6px 8px; margin: -6px -8px -6px 0; border-radius: var(--radius-s); }
 .toast.error { background: var(--error-container); color: var(--on-error-container); }
+/* A newer release than the page runs: offered at the top, over the page, until loaded or put off */
+.update-bar { position: fixed; z-index: 55; left: 50%; transform: translateX(-50%); top: calc(8px + env(safe-area-inset-top, 0px));
+  width: min(560px, calc(100% - 32px)); display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 12px 10px 16px;
+  border-radius: var(--radius-s); background: var(--primary-container); color: var(--on-primary-container); box-shadow: 0 4px 12px rgb(0 0 0 / .25); }
+.update-bar .btn.text { color: inherit; }
 @media (min-width: 840px) { .toasts { bottom: calc(var(--player-h) + 24px); } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 body.locked .content { overflow: hidden; }

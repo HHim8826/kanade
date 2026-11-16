@@ -121,6 +121,16 @@ type Aria2 struct {
 
 	mu     sync.Mutex
 	global map[string]string // options set by SetGlobal, over the defaults of writeConfig
+	proxy  []string          // the config's lines for UseProxy
+}
+
+// UseProxy has aria2 connect through the HTTP proxy at addr (netguard.Proxy) from its next start:
+// a direct download's file and its redirects, and a torrent's HTTP trackers and web seeds (review
+// T1). The password stays in the 0600 config, out of the process list.
+func (a *Aria2) UseProxy(addr, user, pass string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proxy = []string{"all-proxy=http://" + addr, "all-proxy-user=" + user, "all-proxy-passwd=" + pass}
 }
 
 // SetGlobal changes global options (speed limits, connections, seeding: review #75): at once
@@ -214,6 +224,9 @@ func (a *Aria2) writeConfig(port int) (string, error) {
 		"",
 	}, "\n")
 	a.mu.Lock()
+	if len(a.proxy) > 0 {
+		conf += strings.Join(a.proxy, "\n") + "\n"
+	}
 	if len(a.global) > 0 { // SetGlobal's options replace the defaults
 		var lines []string
 		for _, l := range strings.Split(conf, "\n") {

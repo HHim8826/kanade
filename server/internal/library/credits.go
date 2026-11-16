@@ -51,14 +51,19 @@ var (
 	featPart = regexp.MustCompile(`^(.+?)\s*[(（\[［]\s*(?i:feat\.?|ft\.?|featuring)\s+(.+?)\s*[)）\]］]$`)
 	// Between names, outside brackets.
 	between = regexp.MustCompile(`\s+(?i:feat\.?|ft\.?|featuring|with|vs\.?)\s+|\s+[x×&＆/／]\s+|[、，,;；／/×＆&]`)
+	// Not a name: what a list of names ends with ("A, B, etc.").
+	notName = regexp.MustCompile(`^(?i:etc\.?|et al\.?|and (?:more|others)|others|その他|ほか|他|等|など)$`)
+	// What a name is introduced as: "Vocal: Someone".
+	asVocal = regexp.MustCompile(`^(?i:vocals?|vo\.|ボーカル|歌|唄)\s*[:：]\s*(.+)$`)
 )
 
 var opens, closes = "(（[［「『【〈《", ")）]］」』】〉》"
 
 // Split proposes how a credited string divides into names: at the separators outside brackets
 // ("、", "/", " & ", " feat. ", " x " …), a featured name in brackets apart, and a character's voice
-// "(CV: …)" with it. A string it does not divide is one part. It is a proposal: "Earth, Wind & Fire"
-// divides here too, and the user says it does not.
+// "(CV: …)" with it; a list's "etc." is no one, and "Vocal: " not part of a name. A string it does
+// not divide is one part. It is a proposal: "Earth, Wind & Fire" divides here too, and the user
+// says it does not.
 func Split(s string) []Part {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -69,7 +74,10 @@ func Split(s string) []Part {
 	var add func(string)
 	add = func(name string) {
 		name = strings.TrimSpace(name)
-		if name == "" {
+		if m := asVocal.FindStringSubmatch(name); m != nil {
+			name = strings.TrimSpace(m[1])
+		}
+		if name == "" || notName.MatchString(name) {
 			return
 		}
 		if m := featPart.FindStringSubmatch(name); m != nil {
@@ -440,9 +448,21 @@ func (s *Store) FillRoleNames(ctx context.Context, names map[int64]RoleNames) er
 	return tx.Commit()
 }
 
-// renameInSplits renames an artist in the user's word on how names divide: as one of the names, and
-// as the voice of a character.
+// renameInSplits renames an artist in the user's word on how names divide: the word on the name
+// itself (kept whole, say), unless the new name has one of its own; and the name as one of the
+// names a string divides into, and as the voice of a character.
 func renameInSplits(e *editor, old, name string) error {
+	var own int64
+	err := e.tx.QueryRowContext(e.ctx, `SELECT id FROM artist_splits WHERE name = ?1 AND parts IS NOT NULL
+		AND NOT EXISTS (SELECT 1 FROM artist_splits WHERE name = ?2)`, old, name).Scan(&own)
+	switch {
+	case err == nil:
+		if err := e.set(Change{Target: "split", ID: own, Field: "name", Value: &name}); err != nil {
+			return err
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return err
+	}
 	rows, err := e.tx.QueryContext(e.ctx, `SELECT id, parts FROM artist_splits WHERE parts IS NOT NULL`)
 	if err != nil {
 		return err

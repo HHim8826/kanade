@@ -245,7 +245,7 @@ func (t *Tags) applyField(key, value string) {
 		setIfEmpty(&t.Lyrics)
 	case "COMPOSER":
 		add(&t.Composer)
-	case "LYRICIST", "WRITER":
+	case "LYRICIST": // not WRITER: words or music, it does not say
 		add(&t.Lyricist)
 	case "ARRANGER":
 		add(&t.Arranger)
@@ -263,7 +263,7 @@ func (info *Info) FillCredits() {
 	sort.Strings(keys) // the same each time
 	for _, k := range keys {
 		switch name := strings.ToUpper(legacyField(k)); name {
-		case "COMPOSER", "LYRICIST", "WRITER", "ARRANGER":
+		case "COMPOSER", "LYRICIST", "ARRANGER":
 			for _, v := range info.Raw[k] {
 				info.Tags.applyField(name, v)
 			}

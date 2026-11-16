@@ -236,10 +236,11 @@ func TestRedecodeWithChosenEncoding(t *testing.T) {
 	}
 }
 
-// Composers, lyricists and arrangers, from each format's fields, again from those read before (D13).
+// Composers, lyricists and arrangers, from each format's fields, again from those read before (D13);
+// a writer is not taken for either.
 func TestCreditFields(t *testing.T) {
 	info := &Info{Raw: map[string][]string{"TCOM": {"ryo"}, "TXXX:ARRANGER": {"kz"}, "\xa9wrt": {"ryo"},
-		"LYRICIST": {"A", "B"}, "WRITER": {"B"}, "TIT2": {"Song"}}}
+		"LYRICIST": {"A", "B"}, "WRITER": {"C"}, "TIT2": {"Song"}}}
 	info.FillCredits()
 	if info.Tags.Composer != "ryo" || info.Tags.Lyricist != "A、B" || info.Tags.Arranger != "kz" || info.Tags.Title != "" {
 		t.Fatalf("%+v", info.Tags)

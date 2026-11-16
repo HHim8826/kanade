@@ -6,8 +6,7 @@ import (
 	"testing"
 )
 
-// The planner's statistics are made for a table that has grown, at open and when asked again
-// (review T3).
+// The planner's statistics are made for a table that has grown (review T3).
 func TestOptimize(t *testing.T) {
 	ctx := context.Background()
 	p := filepath.Join(t.TempDir(), "db.sqlite")

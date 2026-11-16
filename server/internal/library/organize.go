@@ -58,8 +58,9 @@ var fields = map[string]map[string]string{
 	// by a user's change: its grouping, and the album a scope of it goes to ("source").
 	"download": {"grouping": "grouping"},
 	"scope":    {"source": ""},
-	"category": {"row": ""},        // a category made or deleted, with the albums it held
-	"split":    {"parts": "parts"}, // how a credited name divides (D13), as JSON
+	"category": {"row": ""}, // a category made or deleted, with the albums it held
+	// How a credited name divides (D13), as JSON; and the name, renamed with its artist.
+	"split": {"parts": "parts", "name": "name"},
 }
 
 // scopeSource is an album_scopes row as a "source" edit stores it: the scope and its album. What
@@ -273,6 +274,15 @@ func (e *editor) check(c Change) (*string, error) {
 			return nil, nil // nothing said
 		}
 		return checkParts(v)
+	case "name": // a split's: one word for each name
+		var other int64
+		err := e.tx.QueryRowContext(e.ctx, `SELECT id FROM artist_splits WHERE name = ? AND id != ?`, v, c.ID).Scan(&other)
+		if v == "" || err == nil {
+			return nil, invalid("a name that has no word on how it divides yet")
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return nil, err
+		}
 	case "aliases":
 		return Str(strings.Join(cleanAliases(strings.Split(v, "\n")), "\n")), nil
 	case "sections":

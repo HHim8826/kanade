@@ -49,33 +49,30 @@ func OpenVersion(ctx context.Context, path string, version int) (*sql.DB, error)
 		db.Close()
 		return nil, err
 	}
-	if err := Optimize(ctx, db); err != nil {
-		db.Close()
-		return nil, err
-	}
 	return db, nil
 }
 
 // Optimize brings the statistics the query planner goes by up to date (review T3): ANALYZE, within
-// a bounded time, of each table never analyzed or whose rows have grown or shrunk a lot since. At
-// open, and once a day while the service runs (Maintain).
+// a bounded time, of each table never analyzed or whose rows have grown or shrunk a lot since. When
+// the service starts and once a day after (Maintain).
 func Optimize(ctx context.Context, db *sql.DB) error {
 	_, err := db.ExecContext(ctx, "PRAGMA optimize=0x10002")
 	return err
 }
 
-// Maintain runs Optimize every period until ctx ends.
+// Maintain runs Optimize now and every period after, until ctx ends. A failure is told to warn
+// and tried again next time: statistics a day old serve, and the service goes on without.
 func Maintain(ctx context.Context, db *sql.DB, every time.Duration, warn func(error)) {
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
+		if err := Optimize(ctx, db); err != nil && ctx.Err() == nil {
+			warn(err)
+		}
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := Optimize(ctx, db); err != nil && ctx.Err() == nil {
-				warn(err)
-			}
 		}
 	}
 }

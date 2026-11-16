@@ -68,7 +68,7 @@ func (t *Tags) clearField(name string) {
 		t.Lyrics = ""
 	case "COMPOSER":
 		t.Composer = ""
-	case "LYRICIST", "WRITER":
+	case "LYRICIST":
 		t.Lyricist = ""
 	case "ARRANGER":
 		t.Arranger = ""

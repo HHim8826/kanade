@@ -254,6 +254,17 @@ func serve(ctx context.Context, cfg config.Config, args []string) error {
 	if cfg.Aria2Path == "" { // everything else works; downloads say the downloader is not running
 		log.Error("aria2c not found: downloads are off. Put aria2c next to kanade, set KANADE_ARIA2 or -aria2, " +
 			"install it in tools/aria2/ of the repository, or on PATH")
+	} else if envProxy() {
+		// aria2 goes through the proxy the environment names, as it did: Kanade checks each link
+		// before handing it over, but not where a redirect aria2 follows leads (review T1).
+		log.Warn("a proxy is set in the environment: where a download's redirects lead is not checked")
+	} else {
+		px, err := netguard.NewProxy(log) // aria2's connections are checked as Kanade's own (review T1)
+		if err != nil {
+			return err
+		}
+		go px.Serve(ctx)
+		aria.UseProxy(px.Addr(), px.User, px.Pass)
 	}
 	downloads := downloader.NewService(d, aria, imp, cfg.Path(config.DirDownloads), *stagingMiB<<20, *reserveGiB<<30, log)
 	ups := uploads.New(d, cfg.Path(config.DirStaging, "uploads"), *stagingMiB<<20)
@@ -619,4 +630,14 @@ func defaultAria2() string {
 func isExecutable(p string) bool {
 	st, err := os.Stat(p)
 	return err == nil && st.Mode().IsRegular() && st.Mode()&0o111 != 0
+}
+
+// envProxy says whether the environment names a proxy, which aria2 goes through on its own.
+func envProxy() bool {
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"} {
+		if os.Getenv(k) != "" {
+			return true
+		}
+	}
+	return false
 }

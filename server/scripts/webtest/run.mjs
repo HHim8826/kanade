@@ -1,6 +1,7 @@
 // The web client in a browser. Builds Kanade, makes a demo library of generated tones (FFmpeg),
 // starts the server on it, and checks the pages in Chrome: no script errors, no axe-core
-// violations in a light and a dark look, the keyboard, and the credits pages working end to end.
+// violations in a light and a dark look, the keyboard, the credits pages working end to end, and a
+// page left open offering a new release.
 //
 //   cd server/scripts/webtest && npm ci && node run.mjs
 //
@@ -218,6 +219,47 @@ async function shuffle(page, token) {
   ok(on === true, 'settings: shuffling skips instrumentals, on by default');
 }
 
+// A page left open offers a new release when it is looked at again, and only a new one; a backup
+// place the server refuses is not shown as chosen.
+async function leftOpen(page) {
+  const lookAgain = () => page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+  await at(page, 'library/albums');
+  await lookAgain();
+  await sleep(1000);
+  ok(!(await page.$('.update-bar')), 'the release the page runs is not offered');
+  await at(page, 'library/albums'); // a page loaded anew asks again at once
+  await page.evaluate(() => {
+    const real = window.fetch;
+    window.fetch = (u, o) => (String(u).endsWith('/app/version') ? Promise.resolve(new Response('v/000000000000')) : real(u, o));
+  });
+  await lookAgain();
+  await page.waitForSelector('.update-bar', { timeout: 5000 }).catch(() => {});
+  ok((await texts(page, '.update-bar span')).some((t) => t.includes('Kanade 已更新')), 'a new release is offered');
+  await page.evaluate(axeSrc);
+  const v = await page.evaluate(async () => (await axe.run('.update-bar', { runOnly: { type: 'tag', values: ['wcag2a', 'wcag2aa'] } })).violations.map((x) => x.id));
+  ok(v.length === 0, 'the offer passes axe-core ' + v.join(','));
+
+  await at(page, 'settings');
+  const backupTo = () => page.evaluate(() => {
+    const s = [...document.querySelectorAll('label.field')].find((l) => l.textContent.includes('備份存到'))?.querySelector('select');
+    return s ? { value: s.value, options: [...s.options].map((o) => o.value), disabled: s.disabled } : null;
+  });
+  const before = await backupTo();
+  ok(before && before.value === 'drive' && before.options.length === 2, 'backups to Drive, or the managed location: ' + JSON.stringify(before));
+  await page.evaluate((to) => {
+    const real = window.fetch;
+    window.fetch = (u, o) => (String(u).endsWith('/backup/place') ? Promise.resolve(new Response(JSON.stringify({ error: 'refused for the test' }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } })) : real(u, o));
+    const s = [...document.querySelectorAll('label.field')].find((l) => l.textContent.includes('備份存到')).querySelector('select');
+    s.value = to;
+    s.dispatchEvent(new Event('change', { bubbles: true }));
+  }, before.options[1]);
+  await sleep(800);
+  const after = await backupTo();
+  ok(after.value === 'drive' && !after.disabled, 'a refused place goes back to Drive: ' + JSON.stringify(after));
+  ok((await texts(page, '.toast')).some((t) => t.includes('refused for the test')), 'and says why');
+}
+
 // Keyboard and focus (review #265–#271).
 async function keyboard(page) {
   await look(page, 'violet', 'light');
@@ -303,6 +345,7 @@ try {
   browser = o.browser;
   await credits(o.page, token);
   await shuffle(o.page, token);
+  await leftOpen(o.page);
   await keyboard(o.page);
   await accessibility(o.page, token);
   const seen = [...new Set(errors)];

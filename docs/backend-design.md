@@ -50,7 +50,7 @@ DIR/
 | `identify` | MusicBrainz 查詢與差異比對（P2-2） |
 | `bangumi` | Bangumi（bgm.tv）作品與音樂條目查詢、帳號連結與收藏（#94） |
 | `rss` | RSS／Atom 解析、輪詢、規則、自動下載（P2-5） |
-| `netguard` | 外來網址（RSS、其中的連結、貼上的下載連結）不連到本機與區網：檢查解析出的每個位址並直接連那個位址（防 DNS rebinding）；區網位址可在下載設定開放，本機與 link-local 一律不行 |
+| `netguard` | 外來網址（RSS、其中的連結、貼上的下載連結）不連到本機與區網：檢查解析出的每個位址並直接連那個位址（防 DNS rebinding）；區網位址可在下載設定開放，本機與 link-local 一律不行。aria2 自己的連線（直接下載的檔案與轉址、種子的 HTTP tracker 與 web seed）經它在本機開的 HTTP proxy（只聽 loopback、要密碼），照樣檢查；環境變數設了 proxy 時 aria2 走那個，轉址不檢查 |
 | `stream` | D7 播放快取（硬性容量上限，放不下時直接轉送） |
 | `lite` | 省流模式：播放時把原檔轉成 Opus 128k 存起來，預載下一首時先轉好 |
 | `drivesync` | Drive 變更與完整對帳、基準對帳、收件匣排程（P2-6） |
@@ -71,7 +71,7 @@ DIR/
 | `uploads` | 客戶端分塊上傳（B4） |
 | `lrclib` | LRCLIB 線上歌詞：搜尋、排序、快取、忙碌時重試 |
 | `webauthn` | passkey 註冊與登入 |
-| `web` | 內嵌的網頁端（`static/`，Preact＋htm，不需建置），於 `/app/` 提供；首頁 HTML 與 manifest 依站名與圖示產生 |
+| `web` | 內嵌的網頁端（`static/`，Preact＋htm，不需建置），於 `/app/` 提供；首頁 HTML 與 manifest 依站名與圖示產生；`/app/version` 是現在的版本，開著的頁面回到前景時比對，不同就提示重新載入 |
 | `api` | HTTP 路由、驗證中介層、頁面 |
 
 ## 資料模型（計畫書 §4 三層）

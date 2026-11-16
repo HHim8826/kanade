@@ -333,7 +333,7 @@ func (s *Store) ArtistDetail(ctx context.Context, id int64) (*ArtistDetail, erro
 	}
 	songs := func(role string) ([]TrackItem, error) {
 		rows, err := s.db.QueryContext(ctx, `SELECT c.credited_as, `+strings.TrimPrefix(trackSQL, "SELECT ")+`
-			JOIN credits c ON c.track_id = t.id WHERE c.artist_id = ? AND c.role = ? ORDER BY t.title, t.id`, id, role)
+			JOIN credits c ON c.track_id = t.id WHERE c.artist_id = ? AND c.role = ? ORDER BY t.title, t.id, c.position`, id, role)
 		if err != nil {
 			return nil, err
 		}
@@ -344,6 +344,13 @@ func (s *Store) ArtistDetail(ctx context.Context, id int64) (*ArtistDetail, erro
 			if err := rows.Scan(append([]any{&t.As, &t.ID, &t.Title, &t.Artist, &t.Album, &t.AlbumID, &t.CoverID, &t.Kind, &t.Variant},
 				t.Asset.dest()...)...); err != nil {
 				return nil, err
+			}
+			// One voicing two characters of a song: the song once, as both.
+			if n := len(out); n > 0 && out[n-1].ID == t.ID {
+				if t.As != "" {
+					out[n-1].As += "、" + t.As
+				}
+				continue
 			}
 			out = append(out, t)
 		}

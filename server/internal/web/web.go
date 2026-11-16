@@ -73,6 +73,9 @@ func handlerFor(static fs.FS, site Site) http.Handler {
 		case p == "manifest.webmanifest":
 			serve(w, r, made(manifest(site, version), "application/manifest+json"), false)
 			return
+		case p == "version": // a page left open asks which release it would load now (update.js)
+			serve(w, r, made([]byte(version), "text/plain; charset=utf-8"), false)
+			return
 		case strings.HasPrefix(p, "site/"):
 			siteIcon(w, r, site, strings.TrimPrefix(p, "site/"))
 			return

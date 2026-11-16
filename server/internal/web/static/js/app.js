@@ -10,6 +10,7 @@ import './shortcuts.js';
 import { loadPlaces } from './places.js';
 import { site } from './site.js';
 import { useStore } from './store.js';
+import { UpdateBar, watchUpdates } from './update.js';
 import { href, useRoute } from './router.js';
 import { Boundary, DialogHost, Icon, MenuHost, Spinner, Toasts, html } from './ui.js';
 import { Playlist } from './views/collections.js';
@@ -90,7 +91,7 @@ function App() {
     };
   }, [auth]);
   if (auth === 'checking') return html`<main class="login"><${Spinner} /></main>`;
-  if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} />`;
+  if (auth === 'out') return html`<${Login} onLogin=${() => setAuth('in')} /><${Toasts} /><${UpdateBar} />`;
   const section = route.parts[0] || '';
   const active = (key) => key === section || (key === 'library' && ['album', 'artist', 'edits', 'splits', 'category', 'work'].includes(section))
     || (key === 'me' && section === 'playlist') || (key === 'tasks' && ['upload', 'import', 'feeds'].includes(section));
@@ -108,7 +109,9 @@ function App() {
     <${RemoteNowPlaying} />
     <${MenuHost} />
     <${DialogHost} />
-    <${Toasts} />`;
+    <${Toasts} />
+    <${UpdateBar} />`;
 }
 
+watchUpdates(); // a page left open offers the release the server is on now
 render(html`<${App} />`, document.getElementById('app'));
