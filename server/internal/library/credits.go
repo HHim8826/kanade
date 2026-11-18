@@ -245,24 +245,78 @@ func knownAs(ctx context.Context, tx *sql.Tx, id int64, kind string) error {
 }
 
 // creditTracksNamed works the credits out again for every track the user's word on name may
-// change, after it changed: those with the name in a role, whole or within, those credited to the
-// artist of that name, and those with a string the user divided into names that include it.
+// change, after it changed: those with the name, or a name the user said is it (one after another:
+// A is B and B is name, #275), in a role, whole or within, those credited to the artist of such a
+// name, and those with a string the user divided into names that include one.
 func creditTracksNamed(ctx context.Context, tx *sql.Tx, name string) error {
-	quoted, _ := json.Marshal(name)
-	ids, err := idsTx(ctx, tx, `SELECT id FROM tracks WHERE instr(artist, ?1) OR instr(composer, ?1) OR instr(lyricist, ?1) OR instr(arranger, ?1)
-		OR id IN (SELECT c.track_id FROM credits c JOIN artists ar ON ar.id = c.artist_id WHERE ar.name = ?1)
-		OR artist IN (SELECT name FROM artist_splits WHERE instr(parts, ?2)) OR composer IN (SELECT name FROM artist_splits WHERE instr(parts, ?2))
-		OR lyricist IN (SELECT name FROM artist_splits WHERE instr(parts, ?2)) OR arranger IN (SELECT name FROM artist_splits WHERE instr(parts, ?2))`,
-		name, string(quoted))
+	names, err := namesThrough(ctx, tx, name)
 	if err != nil {
 		return err
 	}
-	for _, id := range ids {
+	seen := map[int64]bool{}
+	var all []int64
+	for _, n := range names {
+		quoted, _ := json.Marshal(n)
+		ids, err := idsTx(ctx, tx, `SELECT id FROM tracks WHERE instr(artist, ?1) OR instr(composer, ?1) OR instr(lyricist, ?1) OR instr(arranger, ?1)
+			OR id IN (SELECT c.track_id FROM credits c JOIN artists ar ON ar.id = c.artist_id WHERE ar.name = ?1)
+			OR artist IN (SELECT name FROM artist_splits WHERE instr(parts, ?2)) OR composer IN (SELECT name FROM artist_splits WHERE instr(parts, ?2))
+			OR lyricist IN (SELECT name FROM artist_splits WHERE instr(parts, ?2)) OR arranger IN (SELECT name FROM artist_splits WHERE instr(parts, ?2))`,
+			n, string(quoted))
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if !seen[id] {
+				seen[id] = true
+				all = append(all, id)
+			}
+		}
+	}
+	for _, id := range all {
 		if err := credit(ctx, tx, id); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// namesThrough is name and every name the user said is it, directly or through others (A is B and
+// B is name): the names whose artist (sameAs) the word on name decides.
+func namesThrough(ctx context.Context, tx *sql.Tx, name string) ([]string, error) {
+	out := []string{name}
+	seen := map[string]bool{name: true}
+	for i := 0; i < len(out); i++ {
+		quoted, _ := json.Marshal(out[i])
+		rows, err := tx.QueryContext(ctx, `SELECT name, parts FROM artist_splits WHERE instr(parts, ?)`, string(quoted))
+		if err != nil {
+			return nil, err
+		}
+		var next []string
+		for rows.Next() {
+			var n string
+			var v sql.NullString
+			if err := rows.Scan(&n, &v); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			var parts []Part
+			if !v.Valid || json.Unmarshal([]byte(v.String), &parts) != nil || len(parts) != 1 || parts[0].CV != "" || parts[0].Name != out[i] {
+				continue
+			}
+			next = append(next, n)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for _, n := range next {
+			if !seen[n] {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out, nil
 }
 
 // checkParts validates parts as a user gives them, and puts them in stored form: JSON, [] for a

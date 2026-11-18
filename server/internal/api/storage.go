@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/HHim8826/kanade/server/internal/backup"
 	"github.com/HHim8826/kanade/server/internal/importer"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/mover"
@@ -29,6 +30,7 @@ type storeInfo struct {
 	Location string           `json:"location"`            // where it is, for people
 	SignedIn bool             `json:"signed_in"`           // a OneDrive's sign-in is kept (true for others)
 	MovingIn int              `json:"moving_in,omitempty"` // moves not over whose files go there: it stays
+	Backups  bool             `json:"backups,omitempty"`   // the database's copies go there: it stays (#276)
 }
 
 // location says where a store is: its folder, bucket or OneDrive folder.
@@ -64,7 +66,11 @@ func (s *Server) storeInfo(ctx context.Context, st storage.Store) (storeInfo, er
 		return storeInfo{}, err
 	}
 	moving, err := mover.Heading(ctx, s.db, strconv.FormatInt(st.ID, 10))
-	return storeInfo{Store: st, Use: use, Location: location(st), SignedIn: st.SignedIn(), Running: running, MovingIn: moving}, err
+	if err != nil {
+		return storeInfo{}, err
+	}
+	backups, err := backup.PlaceIs(ctx, s.db, st.ID)
+	return storeInfo{Store: st, Use: use, Location: location(st), SignedIn: st.SignedIn(), Running: running, MovingIn: moving, Backups: backups}, err
 }
 
 func (s *Server) storageInfo(w http.ResponseWriter, r *http.Request) {
@@ -117,7 +123,7 @@ func (s *Server) storeError(w http.ResponseWriter, r *http.Request, err error) {
 	case errors.Is(err, storage.ErrNoStore):
 		writeError(w, http.StatusNotFound, err)
 	case errors.Is(err, storage.ErrReadOnly), errors.Is(err, library.ErrStoreInUse), errors.Is(err, importer.ErrScanning),
-		errors.Is(err, storesync.ErrRunning), errors.Is(err, mover.ErrDestination):
+		errors.Is(err, storesync.ErrRunning), errors.Is(err, mover.ErrDestination), errors.Is(err, backup.ErrPlaceInUse):
 		writeError(w, http.StatusConflict, err)
 	case errors.Is(err, storage.ErrOffline), errors.Is(err, storage.ErrAuth):
 		writeError(w, http.StatusServiceUnavailable, err)
@@ -228,7 +234,7 @@ func (s *Server) changeStore(w http.ResponseWriter, r *http.Request) {
 
 // removeStore removes a store. A source's songs leave the library with it (its files stay where
 // they are); a managed store must hold none of the library's files (moving them elsewhere is a
-// feature of its own), nor be where a move takes them.
+// feature of its own), nor be where a move takes them, nor where the database's copies go (#276).
 func (s *Server) removeStore(w http.ResponseWriter, r *http.Request) {
 	st, ok := s.store(w, r)
 	if !ok {
@@ -260,6 +266,11 @@ func (s *Server) removeStore(w http.ResponseWriter, r *http.Request) {
 				return err
 			} else if n > 0 {
 				return mover.ErrDestination
+			}
+			if on, err := backup.PlaceIs(ctx, tx, st.ID); err != nil {
+				return err
+			} else if on {
+				return backup.ErrPlaceInUse
 			}
 			if err := s.files.RemoveTx(ctx, tx, st.ID); err != nil {
 				return err

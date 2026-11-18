@@ -341,6 +341,14 @@ func TestOneDriveManaged(t *testing.T) {
 	if strings.Join(keys, ",") != "library/Band/Album/02.flac,library/Band/Album/03.flac,library/Re：Zero/Album？/01 ＂One＂ (2).flac" {
 		t.Fatalf("walked %v", keys)
 	}
+	// One folder's files, by the same keys (#279).
+	listed, err := b.(Lister).List(ctx, "library/Band/Album")
+	if err != nil || len(listed) != 2 || listed[0].Path != "library/Band/Album/02.flac" || g.Get(listed[0].Key) == nil {
+		t.Fatalf("listed %+v %v", listed, err)
+	}
+	if listed, err := b.(Lister).List(ctx, "library/Band"); err != nil || len(listed) != 0 {
+		t.Fatalf("a folder of folders: %+v %v", listed, err)
+	}
 }
 
 // Microsoft's national clouds: a store of China's (21Vianet) signs in there; one not known is

@@ -393,6 +393,38 @@ func (l *Local) Walk(ctx context.Context, fn func(Object) error) error {
 	return err
 }
 
+// List is the files in dir, not below it.
+func (l *Local) List(ctx context.Context, dir string) ([]Object, error) {
+	if err := checkKey(dir); err != nil {
+		return nil, err
+	}
+	if err := l.available(); err != nil {
+		return nil, err
+	}
+	r, err := os.OpenRoot(l.cfg.Root)
+	if err != nil {
+		return nil, l.missing(err)
+	}
+	defer r.Close()
+	entries, err := fs.ReadDir(r.FS(), dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var out []Object
+	for _, e := range entries {
+		if !e.Type().IsRegular() {
+			continue
+		}
+		if info, err := e.Info(); err == nil {
+			out = append(out, localObject(dir+"/"+e.Name(), info))
+		}
+	}
+	return out, nil
+}
+
 // PartialError is a walk that could not read some folders (paths below the root); the rest was
 // walked.
 type PartialError struct{ Unreadable []string }

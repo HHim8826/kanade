@@ -172,7 +172,10 @@ func (s *Store) SameArtists(ctx context.Context) ([]SameArtist, int, error) {
 		if n, m := out[i].A.Tracks+out[i].B.Tracks, out[j].A.Tracks+out[j].B.Tracks; n != m {
 			return n > m
 		}
-		return out[i].A.Name+"\x00"+out[i].B.Name < out[j].A.Name+"\x00"+out[j].B.Name
+		if out[i].A.Name != out[j].A.Name { // compared as they are: joined, they took most of the time (#282)
+			return out[i].A.Name < out[j].A.Name
+		}
+		return out[i].B.Name < out[j].B.Name
 	})
 	return out, left, nil
 }

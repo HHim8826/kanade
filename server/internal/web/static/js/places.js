@@ -12,7 +12,7 @@ export function loadPlaces() {
 
 // keepPlaces keeps an answer of GET /storage read elsewhere (the settings page's first reads).
 export function keepPlaces(v) {
-  places.set({ loaded: true, stores: v.stores, default: v.default, drive: v.drive || {} });
+  places.set({ loaded: true, stores: v.stores, default: v.default, drive: v.drive || {}, answer: v });
   return v;
 }
 

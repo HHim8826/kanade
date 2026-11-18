@@ -437,6 +437,19 @@ func (s *S3) Walk(ctx context.Context, fn func(Object) error) error {
 	})
 }
 
+// List is the files in dir, not below it.
+func (s *S3) List(ctx context.Context, dir string) ([]Object, error) {
+	var out []Object
+	err := s.list(ctx, s.full(dir+"/"), func(name string, size int64, etag string) error {
+		key, ok := s.rel(name)
+		if rest, in := strings.CutPrefix(key, dir+"/"); ok && in && rest != "" && !strings.Contains(rest, "/") {
+			out = append(out, Object{Key: key, Path: key, Size: size, Version: etag})
+		}
+		return nil
+	})
+	return out, err
+}
+
 // Check reads the bucket (and, for a managed store, its mark: written when it is not there), and
 // now and then sums what it holds and clears out the old trash and given-up uploads.
 func (s *S3) Check(ctx context.Context) (Usage, error) {
@@ -779,13 +792,27 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// Trash moves key to .kanade-trash/<date>/ in the bucket (a copy, then the delete).
+// Trash moves key to .kanade-trash/<date>/ in the bucket (a copy, then the delete). Each file
+// trashed keeps a copy of its own: one trashed there the same day stays, and the later one goes
+// beside it, named by its content, so trying again after the copy goes to the same copy (#277).
 func (s *S3) Trash(ctx context.Context, key string) error {
 	if s.mode != Managed {
 		return ErrReadOnly
 	}
 	src := s.full(key)
+	o, _, err := s.head(ctx, src)
+	if err != nil {
+		return err
+	}
 	dst := s.full(trashDir + "/" + s.now().UTC().Format("20060102") + "/" + key)
+	there, _, err := s.head(ctx, dst)
+	switch {
+	case errors.Is(err, ErrNotFound):
+	case err != nil:
+		return err
+	case o.Version == "" || there.Version != o.Version || there.Size != o.Size:
+		dst += "." + contentTag(o.Version)
+	}
 	resp, err := s.do(ctx, s3Request{method: http.MethodPut, name: dst,
 		header: http.Header{"X-Amz-Copy-Source": {"/" + s3Encode(s.cfg.Bucket, false) + "/" + s3Encode(src, true)}}})
 	if err != nil {
@@ -804,6 +831,23 @@ func (s *S3) Trash(ctx context.Context, key string) error {
 	resp.Body.Close()
 	s.stale()
 	return nil
+}
+
+// contentTag names a trashed copy by its content (the ETag), or by chance when there is none.
+func contentTag(etag string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(etag) {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'f' {
+			b.WriteRune(r)
+		}
+		if b.Len() == 12 {
+			return b.String()
+		}
+	}
+	if b.Len() >= 8 {
+		return b.String()
+	}
+	return randomID()[:12]
 }
 
 // sweep deletes the trash older than 30 days and multipart uploads left for a week.

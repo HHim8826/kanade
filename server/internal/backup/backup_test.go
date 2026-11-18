@@ -299,3 +299,64 @@ func TestCopiesInAStorageLocation(t *testing.T) {
 		t.Fatalf("back to Drive: %v, %d files", err, len(fd.files))
 	}
 }
+
+// After the database is restored from an older copy, the copies written down are those made before
+// it; the ones in the backups folder are what is rotated: the 14 latest stay, other files there
+// stay, and what is kept is said as it is (#279).
+func TestRotateWhatTheFolderHolds(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := setup(t)
+	set := &storage.Set{DB: s.DB, DataDir: t.TempDir()}
+	s.Places = set
+	root := t.TempDir()
+	cfg, _ := json.Marshal(map[string]string{"root": root})
+	nas, err := set.Add(ctx, storage.NewStore{Kind: storage.KindLocal, Name: "NAS", Mode: storage.Managed, Config: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	place := fmt.Sprint(nas.ID)
+	if err := s.SetPlace(ctx, place); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(filepath.Join(root, Folder), 0o700)
+	var before []stored
+	for i := range 16 {
+		name := fmt.Sprintf("kanade-db-202501%02d-000000.sqlite", i+1)
+		os.WriteFile(filepath.Join(root, Folder, name), []byte("old"), 0o600)
+		if i < 3 { // the restored database knows of the first three only
+			before = append(before, stored{Place: place, Ref: storage.Ref(storage.KindLocal, nas.ID, Folder+"/"+name), Name: name})
+		}
+	}
+	for _, other := range []string{"notes.txt", "kanade-db-manual.sqlite"} {
+		os.WriteFile(filepath.Join(root, Folder, other), []byte("mine"), 0o600)
+	}
+	if err := s.saveCopies(ctx, before); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Now(ctx); err != nil {
+		t.Fatal(err)
+	}
+	st := s.State(ctx)
+	if st.Error != "" || st.Kept != 14 {
+		t.Fatalf("state %+v", st)
+	}
+	entries, _ := os.ReadDir(filepath.Join(root, Folder))
+	var copies []string
+	others := 0
+	for _, e := range entries {
+		if copyName.MatchString(e.Name()) {
+			copies = append(copies, e.Name())
+		} else {
+			others++
+		}
+	}
+	if len(copies) != 14 || others != 2 || copies[0] != "kanade-db-20250104-000000.sqlite" {
+		t.Fatalf("%d copies from %v, %d other files", len(copies), copies[:1], others)
+	}
+	if list, _ := s.copies(ctx); len(list) != 14 {
+		t.Fatalf("%d copies written down", len(list))
+	}
+	if trashed, _ := os.ReadDir(filepath.Join(root, ".kanade-trash")); len(trashed) != 1 {
+		t.Fatalf("trash: %v", trashed)
+	}
+}

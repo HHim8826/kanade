@@ -358,3 +358,46 @@ func TestListeningFollowsMergeChains(t *testing.T) {
 		}
 	}
 }
+
+// A song credited to two names the user then says are one artist counts once for that artist:
+// each listen once, the time once (#278).
+func TestRankingCountsAnArtistOncePerSong(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	pub := func(sha, title, artist string) PublishResult {
+		r, err := s.Publish(ctx, verifiedAsset(t, s, sha), EntryInput{Title: title, Artist: artist, Album: title})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
+	}
+	one := pub("r1", "One", "Aoi Hoshino")
+	two := pub("r2", "Two", "Hoshino Aoi")
+	duet := pub("r3", "Duet", "Aoi Hoshino & Hoshino Aoi")
+	parts := Split("Aoi Hoshino & Hoshino Aoi")
+	if _, err := s.DecideSplits(ctx, []SplitDecision{{Name: "Aoi Hoshino & Hoshino Aoi", Parts: &parts}}); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	(&statsFixture{t: t, s: s}).play(duet.TrackID, 0, at, 32_000, true)
+	from, to := at.Add(-time.Hour).UnixMilli(), at.Add(time.Hour).UnixMilli()
+	artistOf := func(track int64) int64 {
+		d, _ := s.Track(ctx, track)
+		return d.Credits[0].ArtistID
+	}
+	if _, err := s.MergeArtists(ctx, artistOf(two.TrackID), artistOf(one.TrackID)); err != nil {
+		t.Fatal(err)
+	}
+	for _, by := range []string{"plays", "time"} {
+		top, err := s.ListeningTop(ctx, from, to, "", "artists", by, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(top) != 1 || top[0].Name != "Aoi Hoshino" || top[0].Plays != 1 || top[0].MS != 32_000 || top[0].Tracks != 1 {
+			t.Fatalf("by %s: %+v", by, top)
+		}
+	}
+	if top, _ := s.ListeningTop(ctx, from, to, "", "tracks", "plays", 10); len(top) != 1 || top[0].Plays != 1 || top[0].MS != 32_000 {
+		t.Fatalf("songs: %+v", top)
+	}
+}

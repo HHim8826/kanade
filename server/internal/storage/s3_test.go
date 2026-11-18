@@ -146,6 +146,12 @@ func TestS3Managed(t *testing.T) {
 	if strings.Join(keys, ",") != "library/Artist/Album/01 Song (2).flac,library/Artist/Album/01 Song.flac,library/Artist/Album/02 Long.flac,library/Artist/Album/03.flac" {
 		t.Fatalf("walked %v", keys)
 	}
+	if listed, err := b.(Lister).List(ctx, "library/Artist/Album"); err != nil || len(listed) != 4 || listed[1].Key != "library/Artist/Album/01 Song.flac" {
+		t.Fatalf("listed %+v %v", listed, err)
+	}
+	if listed, err := b.(Lister).List(ctx, "library/Artist"); err != nil || len(listed) != 0 {
+		t.Fatalf("a folder of folders: %+v %v", listed, err)
+	}
 	if err := s.Trash(ctx, ref); err != nil {
 		t.Fatal(err)
 	}
@@ -155,6 +161,33 @@ func TestS3Managed(t *testing.T) {
 	}
 	if err := s.Trash(ctx, ref); err != nil {
 		t.Fatalf("trashed again: %v", err)
+	}
+	// Another file at that name, trashed the same day: the first copy stays, the second goes beside
+	// it; the delete failing after the copy, trying again copies to the same place (#277).
+	trashed := "kanade/.kanade-trash/" + today + "/library/Artist/Album/01 Song.flac"
+	first := string(fake.Object(trashed).Data)
+	fake.Put("kanade/library/Artist/Album/01 Song.flac", []byte("another song"))
+	fake.Fail = func(r *http.Request) int {
+		if r.Method == http.MethodDelete {
+			return http.StatusForbidden
+		}
+		return 0
+	}
+	if err := s.Trash(ctx, ref); err == nil {
+		t.Fatal("the delete refused, yet trashed")
+	}
+	fake.Fail = nil
+	if err := s.Trash(ctx, ref); err != nil {
+		t.Fatal(err)
+	}
+	var copies []string
+	for _, n := range fake.Names() {
+		if strings.HasPrefix(n, trashed) {
+			copies = append(copies, n+"="+string(fake.Object(n).Data))
+		}
+	}
+	if len(copies) != 2 || copies[0] != trashed+"="+first || !strings.HasSuffix(copies[1], "=another song") || fake.Object("kanade/library/Artist/Album/01 Song.flac") != nil {
+		t.Fatalf("trashed twice the same day: %v", copies)
 	}
 	if _, err := s.Open(ctx, ref, 0, -1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("reading a file not there: %v", err)

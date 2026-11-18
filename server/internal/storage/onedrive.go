@@ -673,6 +673,25 @@ func (o *OneDrive) Walk(ctx context.Context, fn func(Object) error) error {
 	return nil
 }
 
+// List is the files in dir, not below it (the folder made if it is not there).
+func (o *OneDrive) List(ctx context.Context, dir string) ([]Object, error) {
+	if err := o.ready(); err != nil {
+		return nil, err
+	}
+	id, err := o.dir(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	var out []Object
+	err = o.children(ctx, id, func(it odItem) error {
+		if it.Deleted == nil && it.File != nil {
+			out = append(out, it.object(dir+"/"+it.Name))
+		}
+		return nil
+	})
+	return out, err
+}
+
 // Check reads the folder (and the drive's room, now and then).
 func (o *OneDrive) Check(ctx context.Context) (Usage, error) {
 	if err := o.ready(); err != nil {

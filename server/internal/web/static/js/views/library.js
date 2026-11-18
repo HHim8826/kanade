@@ -244,11 +244,12 @@ export function Library({ tab = 'albums', filter = '', find = '' }) {
   const data = useLoad(() => get(base), [base], rev, base);
   // The cards above a list (names to divide or of one artist; songs their folders could put in
   // albums) are read with it, and the list waits for them: a card coming in later pushed it down
-  // (review 3.2). Their answers are the page to sort out's, kept for both.
+  // (review 3.2). They read how many and the first few only, not every pair a large library's names
+  // make (#282). Their answers are the page to sort out's, kept for both.
   const cardsAt = tab === 'artists' && !q ? 'artists' : tab === 'tracks' && filter === 'no_album' ? 'folders' : '';
   const useCard = (at, path, keep) => useLoad(() => (cardsAt === at ? get(path) : Promise.resolve(null)), [cardsAt], rev, cardsAt === at ? keep : undefined);
-  const splits = useCard('artists', '/artists/splits', 'organize:splits');
-  const same = useCard('artists', '/artists/same', 'organize:same');
+  const splits = useCard('artists', '/artists/splits?limit=3', 'organize:splits:sum');
+  const same = useCard('artists', '/artists/same?limit=2', 'organize:same:sum');
   const folders = useCard('folders', '/organize/folders', 'organize:folders');
   const cardsIn = cardsAt === 'artists' ? (splits.data || splits.error) && (same.data || same.error)
     : cardsAt === 'folders' ? folders.data || folders.error : true;
@@ -530,8 +531,8 @@ function SplitCard({ data }) {
   if (!list.length) return null;
   return html`<div class="card summary-card">
     <${Icon} name="person" />
-    <span class="grow track-text"><span class="title">${list.length} 個歌手名稱看起來是幾位歌手</span>
-      <span class="sub">${list.slice(0, 3).map((x) => x.name).join('、')}${list.length > 3 ? ' 等' : ''}</span></span>
+    <span class="grow track-text"><span class="title">${data.total} 個歌手名稱看起來是幾位歌手</span>
+      <span class="sub">${list.slice(0, 3).map((x) => x.name).join('、')}${data.total > 3 ? ' 等' : ''}</span></span>
     <a class="btn tonal" href=${href('splits')}>逐一確認…</a>
   </div>`;
 }
@@ -542,8 +543,8 @@ function SameCard({ data }) {
   if (!list.length) return null;
   return html`<div class="card summary-card">
     <${Icon} name="merge" />
-    <span class="grow track-text"><span class="title">${list.length} 組歌手看起來是同一位</span>
-      <span class="sub">${list.slice(0, 2).map((p) => `${p.a.name} ↔ ${p.b.name}`).join('、')}${list.length > 2 ? ' 等' : ''}</span></span>
+    <span class="grow track-text"><span class="title">${data.total} 組歌手看起來是同一位</span>
+      <span class="sub">${list.slice(0, 2).map((p) => `${p.a.name} ↔ ${p.b.name}`).join('、')}${data.total > 2 ? ' 等' : ''}</span></span>
     <a class="btn tonal" href=${href('same')}>逐一確認…</a>
   </div>`;
 }

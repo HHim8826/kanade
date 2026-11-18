@@ -172,3 +172,67 @@ func TestListOrders(t *testing.T) {
 		t.Errorf("artists found: %+v", list)
 	}
 }
+
+// Undoing the last of a chain of merges (A is B, B is C, C is D) gives every song before it back to
+// C, the first one too, and songs imported later go where those already in are (#275).
+func TestUndoLastOfMergeChain(t *testing.T) {
+	ctx := context.Background()
+	s := newStore(t)
+	names := []string{"Kaoru Ito", "Kaoru Itou", "Itou Kaoru", "いとうかおる"}
+	var tracks []int64
+	for i, n := range names {
+		r, err := s.Publish(ctx, verifiedAsset(t, s, fmt.Sprint("k", i)), EntryInput{Title: fmt.Sprint("Song ", i), Artist: n, Album: fmt.Sprint("Album ", i)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		tracks = append(tracks, r.TrackID)
+	}
+	artist := func(track int64) (int64, string) {
+		d, _ := s.Track(ctx, track)
+		for _, c := range d.Credits {
+			if c.Role == RoleArtist {
+				return c.ArtistID, c.Name
+			}
+		}
+		return 0, ""
+	}
+	var last int64
+	for i := 0; i < 3; i++ {
+		drop, _ := artist(tracks[i])
+		keep, _ := artist(tracks[i+1])
+		g, err := s.MergeArtists(ctx, drop, keep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		last = g
+	}
+	for i, id := range tracks {
+		if _, got := artist(id); got != names[3] {
+			t.Fatalf("merged, song %d: %s", i, got)
+		}
+	}
+	if _, conflicts, err := s.Undo(ctx, last); err != nil || len(conflicts) != 0 {
+		t.Fatalf("undo: %+v %v", conflicts, err)
+	}
+	want := []string{names[2], names[2], names[2], names[3]}
+	for i, id := range tracks {
+		if _, got := artist(id); got != want[i] {
+			t.Errorf("undone, song %d: %s, want %s", i, got, want[i])
+		}
+		if d, _ := s.Track(ctx, id); d.Artist != names[i] {
+			t.Errorf("song %d's tag: %q", i, d.Artist)
+		}
+	}
+	later, _ := s.Publish(ctx, verifiedAsset(t, s, "k9"), EntryInput{Title: "Later", Artist: names[0], Album: "Later"})
+	if _, got := artist(later.TrackID); got != names[2] {
+		t.Errorf("a song imported later: %s", got)
+	}
+	list, _ := s.ArtistsBy(ctx, 50, 0, "", "")
+	counts := map[string]int{}
+	for _, a := range list {
+		counts[a.Name] = a.Tracks
+	}
+	if counts[names[2]] != 4 || counts[names[3]] != 1 || len(counts) != 2 {
+		t.Errorf("artists listed: %v", counts)
+	}
+}

@@ -67,6 +67,7 @@ function Backups() {
     try {
       data.reload(await api('PUT', '/backup/place', { place }));
       toast('之後的備份會存到這裡；已有的備份留在原處');
+      loadPlaces(); // the location left can be removed now, the one chosen not (#276)
     } catch (e) {
       toast(e.message, 'error');
     } finally {

@@ -118,6 +118,12 @@ type Writer interface {
 	Trash(ctx context.Context, key string) error
 }
 
+// Lister is a store that lists the files in one of its folders.
+type Lister interface {
+	// List is the files in dir (a path below the root), not below it; a folder not there has none.
+	List(ctx context.Context, dir string) ([]Object, error)
+}
+
 var (
 	// ErrOffline is a store that cannot be reached now: a folder not mounted, a network down. Its
 	// files are not marked missing for it.

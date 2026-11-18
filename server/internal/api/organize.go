@@ -349,7 +349,26 @@ func (s *Server) artistSplits(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"proposals": proposals, "decided": decided})
+	// ?limit=n: how many there are and the first n, for a card that says so (#282).
+	if n, ok := listLimit(r); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"proposals": proposals[:min(n, len(proposals))], "total": len(proposals)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"proposals": proposals, "decided": decided, "total": len(proposals)})
+}
+
+// listLimit is a list's ?limit=, when given: a card shows how many and the first few, a page a
+// page at a time; a library's names can make tens of thousands of pairs (#282).
+func listLimit(r *http.Request) (int, bool) {
+	v := r.URL.Query().Get("limit")
+	if v == "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 // decideSplits stores how names divide ({items: [{name, parts}]}, parts [] for one artist and null
@@ -372,13 +391,29 @@ func (s *Server) decideSplits(w http.ResponseWriter, r *http.Request) {
 
 // sameArtists are the pairs of artists that look like one ({pairs, left}: left, the pairs the user
 // said are two).
+// sameArtists is the pairs of artists that look like one (?artist=id: those with that artist),
+// how many there are, and how many the user said are two; ?limit=n the first n (#282).
 func (s *Server) sameArtists(w http.ResponseWriter, r *http.Request) {
 	pairs, left, err := s.lib.SameArtists(r.Context())
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"pairs": pairs, "left": left})
+	if v := r.URL.Query().Get("artist"); v != "" {
+		id, _ := strconv.ParseInt(v, 10, 64)
+		mine := []library.SameArtist{}
+		for _, p := range pairs {
+			if p.A.ID == id || p.B.ID == id {
+				mine = append(mine, p)
+			}
+		}
+		pairs = mine
+	}
+	total := len(pairs)
+	if n, ok := listLimit(r); ok {
+		pairs = pairs[:min(n, total)]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pairs": pairs, "total": total, "left": left})
 }
 
 // notSame keeps a pair of names ({a, b}) from being proposed as one artist again; DELETE proposes

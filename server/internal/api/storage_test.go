@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/HHim8826/kanade/server/internal/backup"
 	"github.com/HHim8826/kanade/server/internal/config"
 	"github.com/HHim8826/kanade/server/internal/library"
 	"github.com/HHim8826/kanade/server/internal/storage"
@@ -397,5 +398,53 @@ func TestDeleteDoesNotWaitForASlowTrash(t *testing.T) {
 		if name == "library/A/01.flac" {
 			t.Fatalf("still in place: %v", fake.Names())
 		}
+	}
+}
+
+// The location the database's copies go to is said to be so, and stays until they go elsewhere;
+// then it is removed and the copies there stay (#276).
+func TestRemovingTheBackupPlace(t *testing.T) {
+	var svc *backup.Service
+	s, h := newTestServer(t, func(d *Deps) {
+		log := slog.New(slog.NewTextHandler(io.Discard, nil))
+		set := &storage.Set{DB: d.DB, Log: log, DataDir: d.Config.DataDir}
+		d.Files = set
+		d.Importer.Stores = set
+		svc = &backup.Service{DB: d.DB, Places: set, Dir: t.TempDir(), Keep: 14, Every: 24 * time.Hour, Log: log}
+		d.Backup = svc
+	})
+	token := loginToken(t, s, h)
+	ctx := context.Background()
+	root := t.TempDir()
+	cfg, _ := json.Marshal(map[string]string{"root": root})
+	if rec := do(t, h, "POST", "/api/v1/storage", token, map[string]any{"kind": "local", "name": "Backups", "mode": "managed", "config": json.RawMessage(cfg)}); rec.Code != http.StatusCreated {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do(t, h, "PUT", "/api/v1/backup/place", token, map[string]any{"place": 1}); rec.Code != http.StatusOK {
+		t.Fatalf("place: %d %s", rec.Code, rec.Body)
+	}
+	if err := svc.Now(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if v := decode[storageView](t, do(t, h, "GET", "/api/v1/storage", token, nil).Body); len(v.Stores) != 1 || !v.Stores[0].Backups {
+		t.Fatalf("storage %+v", v)
+	}
+	if rec := do(t, h, "DELETE", "/api/v1/storage/1", token, nil); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "backups") {
+		t.Fatalf("removing the backups' place: %d %s", rec.Code, rec.Body)
+	}
+	if st := svc.State(ctx); st.Place != "1" {
+		t.Fatalf("backups go to %q", st.Place)
+	}
+	if rec := do(t, h, "PUT", "/api/v1/backup/place", token, map[string]any{"place": "drive"}); rec.Code != http.StatusOK {
+		t.Fatalf("back to Drive: %d %s", rec.Code, rec.Body)
+	}
+	if v := decode[storageView](t, do(t, h, "GET", "/api/v1/storage", token, nil).Body); v.Stores[0].Backups {
+		t.Fatalf("still the backups' place: %+v", v)
+	}
+	if rec := do(t, h, "DELETE", "/api/v1/storage/1", token, nil); rec.Code != http.StatusOK {
+		t.Fatalf("removed: %d %s", rec.Code, rec.Body)
+	}
+	if names, _ := os.ReadDir(filepath.Join(root, backup.Folder)); len(names) != 1 {
+		t.Fatalf("the copies there: %v", names)
 	}
 }

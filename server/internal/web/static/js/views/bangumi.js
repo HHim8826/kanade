@@ -45,6 +45,7 @@ function CollectionDialog({ album, onSaved, close }) {
   const [data, setData] = useState(null);
   const [error, setError] = useState(null);
   const [form, setForm] = useState(null);
+  const [opened, setOpened] = useState(null); // the form as it came, to tell it changed (#281)
   const [busy, run] = useRunner();
   useEffect(() => {
     let alive = true;
@@ -52,7 +53,9 @@ function CollectionDialog({ album, onSaved, close }) {
       if (!alive) return;
       setData(d);
       const c = d.collection;
-      setForm({ type: c ? c.type : 2, rate: c ? c.rate : 0, tags: c ? c.tags.join(' ') : '', comment: c ? c.comment || '' : '', private: c ? c.private : false });
+      const f = { type: c ? c.type : 2, rate: c ? c.rate : 0, tags: c ? c.tags.join(' ') : '', comment: c ? c.comment || '' : '', private: c ? c.private : false };
+      setForm(f);
+      setOpened(JSON.stringify(f));
     }, (e) => alive && setError(e));
     return () => { alive = false; };
   }, [album.id]);
@@ -84,7 +87,7 @@ function CollectionDialog({ album, onSaved, close }) {
     close();
   });
   const sub = album.subject;
-  return html`<${Dialog} title="修改收藏" onClose=${close} actions=${data && data.linked ? html`
+  return html`<${Dialog} title="修改收藏" dirty=${!!form && JSON.stringify(form) !== opened} onClose=${close} actions=${data && data.linked ? html`
       <button class="btn text" onClick=${close}>取消</button>
       <button class="btn filled" disabled=${busy || !form} onClick=${save}>${busy ? '儲存中…' : '儲存到 Bangumi'}</button>` : html`<button class="btn text" onClick=${close}>關閉</button>`}>
     <div class="collection-head">

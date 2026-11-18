@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,6 +65,19 @@ type stored struct {
 
 // ErrNoPlace is a place for copies that is not one: not there, or not a managed location.
 var ErrNoPlace = errors.New("copies can go to Google Drive or a managed storage location")
+
+// ErrPlaceInUse is the storage location the copies go to: it stays until they go elsewhere (#276).
+var ErrPlaceInUse = errors.New("the database backups go to this storage location: choose another place for them first")
+
+// PlaceIs says whether the copies go to the storage location id, read in q (the transaction that
+// removes it).
+func PlaceIs(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, id int64) (bool, error) {
+	var n int
+	err := q.QueryRowContext(ctx, `SELECT count(*) FROM settings WHERE key = ? AND value = ?`, placeKey, strconv.FormatInt(id, 10)).Scan(&n)
+	return n > 0, err
+}
 
 // firstRun is when Run first looks, once the server has settled (a variable for the tests).
 var firstRun = 5 * time.Minute
@@ -250,15 +264,17 @@ func (s *Service) copy(ctx context.Context) (name string, kept int, err error) {
 		if err != nil {
 			return "", -1, err
 		}
+		var made stored
 		put = func(path, name, sum string, size int64) error {
 			ref, err := dest.Put(ctx, storage.PutFile{Path: path, Dir: Folder, Name: name, MIME: "application/vnd.sqlite3",
 				Size: size, SHA256: sum, Sessions: &memSessions{}})
 			if err != nil {
 				return err
 			}
-			return s.keepCopy(ctx, stored{Place: place, Ref: ref, Name: name})
+			made = stored{Place: place, Ref: ref, Name: name}
+			return s.keepCopy(ctx, made)
 		}
-		rotate = func() (int, error) { return s.rotateKept(ctx, place) }
+		rotate = func() (int, error) { return s.rotateKept(ctx, place, dest, made) }
 	}
 	var size int64
 	if err := s.DB.QueryRowContext(ctx, `SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()`).Scan(&size); err != nil {
@@ -379,9 +395,20 @@ func (s *Service) keepCopy(ctx context.Context, c stored) error {
 	return s.saveCopies(ctx, append(list, c))
 }
 
+// lister is a place that says which files are in one of its folders (storage.Set's).
+type lister interface {
+	Files(ctx context.Context, dir string) ([]storage.Listed, error)
+}
+
+// copyName is a copy's name, as made: other files in the folder are not copies.
+var copyName = regexp.MustCompile(`^kanade-db-\d{8}-\d{6}( \(\d+\))?\.sqlite$`)
+
 // rotateKept moves the copies in place beyond the Keep latest to its trash, and says how many are
-// kept. Copies elsewhere (a place used before) stay, as written down.
-func (s *Service) rotateKept(ctx context.Context, place string) (int, error) {
+// kept. The copies there are those found in its backups folder, when it can say: a database restored
+// from a copy wrote down only the copies made before it (#279); the one just made (made) is among
+// them even if the folder does not show it yet. Other files there stay, and copies elsewhere (a
+// place used before) stay, as written down.
+func (s *Service) rotateKept(ctx context.Context, place string, dest storage.Dest, made stored) (int, error) {
 	list, err := s.copies(ctx)
 	if err != nil {
 		return -1, err
@@ -392,6 +419,24 @@ func (s *Service) rotateKept(ctx context.Context, place string) (int, error) {
 			here = append(here, c)
 		} else {
 			others = append(others, c)
+		}
+	}
+	if l, ok := dest.(lister); ok {
+		found, err := l.Files(ctx, Folder)
+		if err != nil {
+			s.Log.Warn("database backup: reading the backups folder", "err", err) // the copies written down, then
+		} else {
+			here = here[:0]
+			listed := false
+			for _, f := range found {
+				if copyName.MatchString(f.Name) {
+					here = append(here, stored{Place: place, Ref: f.Ref, Name: f.Name})
+					listed = listed || f.Ref == made.Ref
+				}
+			}
+			if !listed && made.Ref != "" {
+				here = append(here, made)
+			}
 		}
 	}
 	sort.Slice(here, func(i, j int) bool { return here[i].Name > here[j].Name }) // the names sort by time

@@ -192,11 +192,14 @@ func (s *Store) ListeningTop(ctx context.Context, from, to int64, kind, group, b
 	switch group {
 	case "artists":
 		// An artist is the one the song is linked to, so the ranking opens its page (review #108); a
-		// song with an artist but no link to one ranks under the name, with no page (ID 0).
+		// song with an artist but no link to one ranks under the name, with no page (ID 0). A song
+		// credited to one artist twice (two names the user said are one) counts once (#278).
 		args = append(append(append([]any{}, period...), period...), limit)
 		q = `SELECT id, name, '', 0, ms, plays, n FROM (
 			SELECT ar.id AS id, ar.name AS name, sum(l.ms) AS ms, sum(l.counted) AS plays, count(DISTINCT l.track_id) AS n
-				FROM listening l JOIN credits ta ON ta.track_id = l.track_id AND ta.role = 'artist' JOIN artists ar ON ar.id = ta.artist_id
+				FROM listening l JOIN credits ta ON ta.track_id = l.track_id AND ta.role = 'artist'
+					AND ta.position = (SELECT min(o.position) FROM credits o WHERE o.track_id = ta.track_id AND o.role = 'artist' AND o.artist_id = ta.artist_id)
+				JOIN artists ar ON ar.id = ta.artist_id
 				WHERE l.bucket >= ? AND l.bucket < ?` + cond + ` GROUP BY ar.id
 			UNION ALL
 			SELECT 0, t.artist, sum(l.ms), sum(l.counted), count(DISTINCT l.track_id) FROM listening l JOIN tracks t ON t.id = l.track_id

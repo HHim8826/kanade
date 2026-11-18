@@ -325,6 +325,28 @@ async function flows(page, token) {
   await page.keyboard.press('Escape');
   await sleep(400);
   ok(!(await page.$('.dialog')), 'Esc closes it');
+  // Rules changed with a smart playlist's own buttons, nothing typed: it stays too (#281).
+  const newSmart = async () => {
+    await page.evaluate(() => [...document.querySelectorAll('main button')].find((b) => b.textContent.includes('新增智慧歌單')).click());
+    await page.waitForSelector('.dialog .rule-match');
+  };
+  await newSmart();
+  await page.mouse.click(5, 5);
+  await sleep(400);
+  ok(!(await page.$('.dialog')), 'a smart playlist left as it opened closes when tapped around');
+  await newSmart();
+  await page.evaluate(() => [...document.querySelectorAll('.dialog button')].find((b) => b.textContent.includes('新增條件')).click());
+  await sleep(100);
+  await page.evaluate(() => [...document.querySelectorAll('.dialog .rule-match button')].find((b) => b.textContent.includes('任一條件')).click());
+  await sleep(200);
+  await page.mouse.click(5, 5);
+  await sleep(400);
+  await page.evaluate(() => history.back());
+  await sleep(500);
+  ok(await page.$('.dialog') && (await page.$$('.dialog .rules li')).length === 2 && (await texts(page, '.dialog .rule-match .on')).join() === '任一條件',
+    'its rules changed with buttons only, it stays when tapped around or gone back from');
+  await page.keyboard.press('Escape');
+  await sleep(400);
 
   await at(page, 'import/' + demoBatch);
   const said = await texts(page, '.summary-line');
@@ -430,6 +452,30 @@ async function second(page, token) {
   ok((await api('GET', '/tracks/' + stair.id, undefined, token)).artist === 'イトウナオ', 'the song says what it said');
   ok((await api('GET', '/search?q=' + encodeURIComponent('イトウ'), undefined, token)).artists.map((a) => a.name).join() === 'Nao Ito', 'and either name finds the artist');
   ok((await texts(page, '.toast')).some((t) => t.includes('已合併')), 'the merge can be undone from its note');
+
+  // Finding the other name: the answer to a search typed before, coming in late, is not shown nor
+  // offered to merge (#280).
+  await at(page, `artist/${nao.id}`);
+  await page.evaluate(() => document.querySelector('main [aria-label="更多"]').click());
+  await sleep(300);
+  await page.evaluate(() => [...document.querySelectorAll('.menu [role=menuitem]')].find((b) => b.textContent.includes('和其他歌手合併')).click());
+  await page.waitForSelector('.dialog input[type=search]');
+  await page.evaluate(() => {
+    const f = window.fetch;
+    window.fetch = (u, o) => (String(u).includes('q=Aoi') ? new Promise((r) => setTimeout(r, 1500)).then(() => f(u, o)) : f(u, o));
+    window.fetchAsWas = () => { window.fetch = f; };
+  });
+  await page.type('.dialog input[type=search]', 'Aoi Hoshino');
+  await sleep(500);
+  await page.click('.dialog input[type=search]', { clickCount: 3 });
+  await page.type('.dialog input[type=search]', 'Nobody Here');
+  await page.waitForFunction(() => document.querySelector('.dialog').textContent.includes('找不到這個名字'), { timeout: 5000 });
+  await sleep(1800);
+  const offered = await texts(page, '.dialog .list .title');
+  ok(!offered.length && (await texts(page, '.dialog .hint')).some((t) => t.includes('找不到這個名字')), 'a late answer to an earlier search is not shown: ' + offered.join());
+  await page.evaluate(() => window.fetchAsWas());
+  await page.keyboard.press('Escape');
+  await sleep(300);
 }
 
 // Pages that do not jump: every title where the others are, a page under another naming it on the

@@ -497,13 +497,14 @@ export function DialogHost() {
 // back gesture made by mistake: what was entered is not lost. It closes with its own buttons, Esc,
 // or the toast's "discard". A click that began in the dialog (selecting text, say) and ended
 // outside it is no tap outside. Esc that ends a word being composed (Chinese, Japanese) is the
-// input method's.
-export function Dialog({ title, onClose, children, actions, wide }) {
+// input method's. What is chosen with buttons of the dialog's own sends no input or change: such a
+// dialog says it is changed (dirty, #281).
+export function Dialog({ title, onClose, children, actions, wide, dirty }) {
   const box = useRef(null);
   const touched = useRef(false), downOutside = useRef(false), told = useRef(0);
   const [nudged, setNudged] = useState(0);
   const hold = () => {
-    if (!touched.current) return false;
+    if (!touched.current && !dirty) return false;
     setNudged((n) => n + 1);
     if (Date.now() - told.current > 8000) { // one toast up at a time
       told.current = Date.now();

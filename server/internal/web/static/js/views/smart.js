@@ -1,4 +1,4 @@
-import { useEffect, useState } from '../../vendor/hooks.module.js';
+import { useEffect, useRef, useState } from '../../vendor/hooks.module.js';
 import { api, get, post } from '../api.js';
 import { playQueue, playSmart } from '../player.js';
 import { go } from '../router.js';
@@ -57,6 +57,9 @@ export function SmartEditor({ playlist, close }) {
   const cats = useLoad(() => get('/categories'), []);
   const rules = { ...r, conditions: r.conditions.map(({ field, op, ids, value, n }) => ({ field, op, ids: ids || [], value, n: Number(n) || 0 })) };
   const key = JSON.stringify(rules);
+  // Changed from what it opened with, buttons and all: a tap outside or a back gesture keeps it (#281).
+  const opened = useRef(key + '\n' + name).current;
+  const dirty = key + '\n' + name !== opened;
   const [preview, setPreview] = useState({ key: null });
   const incomplete = r.conditions.some((c) => ((c.field === 'category' || c.field === 'album') && !c.ids.length) || (nameFields[c.field] && !c.value.trim()));
   useEffect(() => { // only the preview of the rules shown now lands, not a late one (review #107)
@@ -81,7 +84,7 @@ export function SmartEditor({ playlist, close }) {
     go('playlist/' + id);
   });
   const p = preview.key === key ? preview.p : null;
-  return html`<${Dialog} title=${playlist ? '編輯智慧歌單' : '新增智慧歌單'} wide onClose=${close} actions=${html`
+  return html`<${Dialog} title=${playlist ? '編輯智慧歌單' : '新增智慧歌單'} wide dirty=${dirty} onClose=${close} actions=${html`
       <button class="btn text" onClick=${close}>取消</button>
       <button class="btn filled" disabled=${busy || !name.trim() || incomplete || (preview.key === key && preview.error)} onClick=${submit}>儲存</button>`}>
     <${Field} label="名稱" value=${name} onInput=${setName} placeholder="例如：ARIA 裡 30 天沒聽的歌" autofocus />

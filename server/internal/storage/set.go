@@ -486,6 +486,29 @@ func (d storeDest) Put(ctx context.Context, f PutFile) (string, error) {
 	return Ref(d.st.Kind, d.st.ID, key), nil
 }
 
+// Listed is a file found in a folder of a place: its reference and its name.
+type Listed struct {
+	Ref  string
+	Name string
+}
+
+// Files is the files in dir of the store, not below it.
+func (d storeDest) Files(ctx context.Context, dir string) ([]Listed, error) {
+	l, ok := d.w.(Lister)
+	if !ok {
+		return nil, errors.ErrUnsupported
+	}
+	objs, err := l.List(ctx, dir)
+	if err != nil {
+		return nil, named(d.st, err)
+	}
+	out := make([]Listed, 0, len(objs))
+	for _, o := range objs {
+		out = append(out, Listed{Ref: Ref(d.st.Kind, d.st.ID, o.Key), Name: path.Base(o.Path)})
+	}
+	return out, nil
+}
+
 // ---- letting go ----
 
 // Trash moves a file the library let go of to its place's trash: Drive's, or a managed store's. A
