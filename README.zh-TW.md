@@ -1,5 +1,10 @@
 [English](README.md) | **繁體中文**
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/cover-dark.webp">
+  <img src="docs/images/cover.webp" width="960" alt="Kanade：私人、自架的音樂庫：下載、整理、存進自己的雲端，隨處播放。">
+</picture>
+
 # Kanade（奏）
 
 私人、自架的音樂庫：透過 BitTorrent 找到資源、選好檔案、下載、整理，存進你自己的 Google Drive（或伺服器上的資料夾或 NAS、Cloudflare R2 bucket、OneDrive），再從電腦或手機的瀏覽器播放（Android App 之後才做）。介面是繁體中文。
@@ -9,12 +14,13 @@
 ## 功能
 
 - **取得音樂**：透過 aria2 下載磁力連結、`.torrent` 檔與 RSS 訂閱（可設規則、自動下載），也可以直接下載音檔或 zip 的 HTTP/HTTPS 連結。RSS 與貼上的連結不會連到伺服器本身或它所在的區網（區網裡的 NAS 可以在下載設定開放）。種子的檔案由你挑選；下載比伺服器的暫存空間大時分批進行，每批匯入並清掉後才下載下一批。做種依分享率或時間停止。
-- **匯入與整理**：讀取標籤（並判斷文字編碼），依 CUE 切割整軌映像、把其他無損格式轉成 FLAC（FFmpeg），CUE 與 log 檔跟著專輯保存，專輯附的掃描圖（封面、內頁、光碟、側標，TIFF、BMP 也可以）在專輯頁以圖庫瀏覽，標籤沒寫專輯時以資料夾為一張專輯；整份下載也可以變成一張專輯，每個資料夾一個分區。另外有 MusicBrainz 查詢、貼上 VGMdb 頁面讀取資料、單張或多張專輯一起編輯、分類、關聯專輯所屬的作品（動畫、遊戲、書籍，以 [Bangumi](https://bgm.tv) 的資料為準，並標註每首歌的用途：片頭曲、片尾曲、插曲…；多選的專輯可以一次關聯）、專輯自己的 Bangumi 條目（連結 Bangumi 帳號後，可以在專輯頁管理你的收藏：狀態、評分、標籤、吐槽），以及每一筆修改都能撤回的修改紀錄。每首歌照標籤記下歌手、作曲、作詞、編曲；一個名稱其實是幾位歌手時（「A & B」、「角色（CV：聲優）」），你確認怎麼拆之後，每個名字有自己的頁面，角色和聲優互相連結。
+- **匯入與整理**：讀取標籤（並判斷文字編碼），依 CUE 切割整軌映像、把其他無損格式轉成 FLAC（FFmpeg），CUE 與 log 檔跟著專輯保存，專輯附的掃描圖（封面、內頁、光碟、側標，TIFF、BMP 也可以）在專輯頁以圖庫瀏覽，標籤沒寫專輯時以資料夾為一張專輯；整份下載也可以變成一張專輯，每個資料夾一個分區。另外有 MusicBrainz 查詢、貼上 VGMdb 頁面讀取資料、單張或多張專輯一起編輯、分類、關聯專輯所屬的作品（動畫、遊戲、書籍，以 [Bangumi](https://bgm.tv) 的資料為準，並標註每首歌的用途：片頭曲、片尾曲、插曲…；多選的專輯可以一次關聯）、專輯自己的 Bangumi 條目（連結 Bangumi 帳號後，可以在專輯頁管理你的收藏：狀態、評分、標籤、吐槽），以及每一筆修改都能撤回的修改紀錄。每首歌照標籤記下歌手、作曲、作詞、編曲；一個名稱其實是幾位歌手時（「A & B」、「角色（CV：聲優）」），你確認怎麼拆之後，每個名字有自己的頁面，角色和聲優互相連結。同一位歌手在有些歌寫羅馬字、有些寫日文時，可以合併成一位，另一個名字成為別名：讀音相同的名字（假名和羅馬字、兩種姓名順序、大小寫與全形半形）會被提出，歌曲標籤不會被改動。「待整理」頁集中需要你看一下的項目：要拆分或合併的歌手名稱、沒有專輯或歌手的歌曲、遺失的檔案、匯入失敗。
 - **儲存**：每個檔案都存進你自己的 Google Drive，上傳後以 SHA-256 核對；丟進 Drive 收件匣資料夾的檔案會自動匯入。新匯入的音樂也可以改存到伺服器上的資料夾（或掛載在上面的 NAS）、Cloudflare R2 或其他 S3 相容的 bucket，或 OneDrive；已經放在資料夾、bucket 或 OneDrive 裡的收藏，也可以原位、只讀匯入，之後的新檔案會自動匯入。每個檔案都會和儲存服務提供的資訊核對，但 SHA-256 一律由 Kanade 自己計算。伺服器只保留播放快取，小 VPS 就夠用。
 - **播放**：播放佇列、隨機、重複、全曲庫隨機或自動接續播放（預設略過伴奏、卡拉 OK 與 TV size 版本）、無縫播放（現場錄音、組曲這類連續的專輯，歌與歌之間不會斷）、廣播劇從上次停下的地方繼續、同步歌詞（來自檔案、LRC，或從 LRCLIB 找）、書籤、睡眠定時、鎖定畫面控制、省流模式（以 Opus 128k 串流，流量約為 FLAC 的六分之一）、你的裝置（在手機接續電腦正在播的歌，連同佇列與位置，或把一台裝置當成另一台的遙控器），以及把正在聽的歌顯示成你的 Discord 狀態（「正在聽 Kanade」）：連結 Discord 帳號後由伺服器回報，電腦和手機都不用另外安裝程式。
 - **收藏**：我的最愛、歌單、依規則挑歌的智慧歌單（分類、歌手、作曲、播放次數、上次播放…）。這些都在「我的」頁，和書籤、播放記錄、聆聽統計與 Bangumi 收藏放在一起；曲庫只放音樂本身。
+- **尋找**：搜尋把最符合的結果放在最上面，歌曲、歌手、專輯、作品分組列出，在任何頁面按 `/` 或 Ctrl+K 就能搜尋，並記住最近的搜尋；曲庫的專輯、歌曲、歌手可以就地排序和篩選。
 - **我的聆聽**：每天實際聽了多久的年度熱圖、任意期間的排行與趨勢，可匯出 CSV 或 JSON。
-- **你的網站**：用密碼或 passkey 登入；站名和圖示可以自訂（分頁、安裝的 App、登入頁和 Discord 狀態都跟著改），分頁標題也可以顯示正在播的歌和進度。單一個 Go 執行檔，以 1.5 GB 記憶體的 VPS 為準設計。
+- **你的網站**：用密碼或 passkey 登入；三種配色，淺色、深色或跟隨系統；站名和圖示可以自訂（分頁、安裝的 App、登入頁和 Discord 狀態都跟著改），分頁標題也可以顯示正在播的歌和進度。單一個 Go 執行檔，以 1.5 GB 記憶體的 VPS 為準設計。
 
 | | |
 |---|---|
@@ -54,22 +60,22 @@ curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh
 | `kanade-manager autostart [on\|off]` | 是否開機啟動（依機器使用 systemd、OpenRC、SysV 或 cron）；不加參數時顯示目前設定並詢問。 |
 | `kanade-manager password` | 重設密碼（隨機或自訂），該帳號的所有登入都會結束。 |
 | `kanade-manager config` | 修改公開網址、監聽位址，以及前面的代理（Cloudflare，或同一台機器上的 Nginx、Caddy）：只相信這裡指定的代理所轉送的用戶端位址，登入節流依這個位址計算。 |
-| `kanade-manager backup` / `restore` | 備份放在 `data/backups/`；還原前會先備份目前的資料庫。伺服器每天也會把資料庫複製到 Google Drive 的 `Kanade/backups`，或在設定裡選的儲存位置的 `backups` 資料夾（保留最近 14 份）；要還原其中一份，下載到 `data/backups/` 再執行 `restore`。更新前自動做的備份保留最近 5 份。 |
+| `kanade-manager backup` / `restore` | 備份放在 `data/backups/`；還原前會先備份目前的資料庫。伺服器每天也會把資料庫複製到 Google Drive 的 `Kanade/backups`，或在「設定 → 音樂存放 → 資料庫備份」選的儲存位置的 `backups` 資料夾。保留最近 14 份，以那個資料夾裡實際有的備份為準（資料夾裡的其他檔案不動），所以還原舊的資料庫後，之後做的備份也照樣輪替；備份存到某個儲存位置時，不能移除那個位置。要還原其中一份，下載到 `data/backups/` 再執行 `restore`。更新前自動做的備份保留最近 5 份。 |
 | `kanade-manager tools` | 之後再安裝 aria2 與 FFmpeg（安裝時跳過，或系統套件裡沒有時）。 |
 
 不詢問的安裝（自動化用）：`sudo env KANADE_YES=1 KANADE_PUBLIC_URL=https://music.example.com KANADE_TRUSTED_PROXY=cloudflare bash kanade.sh install`；其他設定（例如 `KANADE_INIT=systemd|openrc|sysv|none`）列在 `scripts/kanade.sh` 的開頭。
 
-**連線 Google Drive。** Kanade 用你自己在 Google Cloud 建立的 OAuth 用戶端存取 Drive；設定頁會一步步帶你建立，並顯示要登記的重新導向 URI。Google 只會把瀏覽器導回 https 網域（或 localhost）：網站在有 https 的網域後面（Cloudflare Tunnel、Caddy、Nginx）時會自動回到 Kanade；用 IP 位址連線時，Kanade 會登記 `http://localhost/oauth/google/callback`，你再把瀏覽器最後停住的網址貼回來。passkey 一定要 https，用純 http 時密碼也是明文傳送。
+**連線 Google Drive。** Kanade 用你自己在 Google Cloud 建立的 OAuth 用戶端存取 Drive；「設定 → 音樂存放」會一步步帶你建立，並顯示要登記的重新導向 URI。Google 只會把瀏覽器導回 https 網域（或 localhost）：網站在有 https 的網域後面（Cloudflare Tunnel、Caddy、Nginx）時會自動回到 Kanade；用 IP 位址連線時，Kanade 會登記 `http://localhost/oauth/google/callback`，你再把瀏覽器最後停住的網址貼回來。passkey 一定要 https，用純 http 時密碼也是明文傳送。
 
 **登入。** 同一個位址 15 分鐘內最多輸錯 5 次密碼（IPv6 整個 /64 算一個位址），所有位址合計最多 30 次。達到合計上限表示有人在猜密碼：在上限解除前，只有曾經在這裡登入過的瀏覽器能用密碼登入；passkey 照常可用，已登入的頁面也仍可改密碼或新增 passkey。位址依 `kanade-manager config` 設定的代理判斷。
 
-**Discord 狀態。** 在 [Discord Developer Portal](https://discord.com/developers/applications) 建立應用程式，名稱填 Kanade（狀態會顯示「正在聽 Kanade」），為它開啟 Discord Social SDK（填 Getting Started 表單即可，不用下載任何東西），並在 OAuth2 → Redirects 加入 `https://<你的網址>/oauth/discord/callback`。把它的 Client ID 與 Client Secret 填到 Kanade 的設定頁，再連結你的 Discord 帳號。播放時伺服器會更新你的狀態：歌名，以及你選擇顯示的歌手、專輯、進度和專輯封面。封面是專輯綁定的 Bangumi 條目圖片；選擇的話，也可以用 Kanade 自己的封面，透過一個專為 Discord 產生的公開網址提供。暫停最多顯示 10 分鐘，沒有播放時 Kanade 不會連上 Discord。Discord 只為 Social SDK 公開說明這個狀態權限，所以這個做法之後可能因 Discord 改動而失效。
+**Discord 狀態。** 在 [Discord Developer Portal](https://discord.com/developers/applications) 建立應用程式，名稱填 Kanade（狀態會顯示「正在聽 Kanade」），為它開啟 Discord Social SDK（填 Getting Started 表單即可，不用下載任何東西），並在 OAuth2 → Redirects 加入 `https://<你的網址>/oauth/discord/callback`。把它的 Client ID 與 Client Secret 填到 Kanade 的「設定 → 連結的帳號」，再連結你的 Discord 帳號。播放時伺服器會更新你的狀態：歌名，以及你選擇顯示的歌手、專輯、進度和專輯封面。封面是專輯綁定的 Bangumi 條目圖片；選擇的話，也可以用 Kanade 自己的封面，透過一個專為 Discord 產生的公開網址提供。暫停最多顯示 10 分鐘，沒有播放時 Kanade 不會連上 Discord。Discord 只為 Social SDK 公開說明這個狀態權限，所以這個做法之後可能因 Discord 改動而失效。
 
-**Bangumi。** 在 [bgm.tv/dev/app](https://bgm.tv/dev/app) 建立應用程式，回調地址填 `https://<你的網址>/oauth/bangumi/callback`，把 App ID 與 App Secret 填到設定頁，再連結你的 Bangumi 帳號。只有在專輯的收藏對話框按下儲存，或綁定條目時勾選「綁定時加入我的 Bangumi 收藏」，Kanade 才會改動你的 Bangumi 收藏；播放和瀏覽都不會。
+**Bangumi。** 在 [bgm.tv/dev/app](https://bgm.tv/dev/app) 建立應用程式，回調地址填 `https://<你的網址>/oauth/bangumi/callback`，把 App ID 與 App Secret 填到「設定 → 連結的帳號」，再連結你的 Bangumi 帳號。只有在專輯的收藏對話框按下儲存，或綁定條目時勾選「綁定時加入我的 Bangumi 收藏」，Kanade 才會改動你的 Bangumi 收藏；播放和瀏覽都不會。
 
 每個服務的回調網址都不同（`/oauth/google/…`、`/oauth/discord/…`、`/oauth/bangumi/…`、`/oauth/onedrive/…`），設定頁會分別顯示，可以直接複製。
 
-**儲存位置。** 在「設定 → 儲存位置」新增：可以當「存放位置」（選為新匯入的位置後，新匯入的音樂存在這裡），也可以當「只讀來源」（原位匯入已經在那裡的收藏：Kanade 絕不寫入、移動或刪除裡面的任何檔案，在 Kanade 刪除歌曲時原檔也留在原處）。每種服務都由 Kanade 自己連線，不需要另外安裝任何東西。
+**儲存位置。** 在「設定 → 音樂存放 → 儲存位置」新增：可以當「存放位置」（選為新匯入的位置後，新匯入的音樂存在這裡），也可以當「只讀來源」（原位匯入已經在那裡的收藏：Kanade 絕不寫入、移動或刪除裡面的任何檔案，在 Kanade 刪除歌曲時原檔也留在原處）。每種服務都由 Kanade 自己連線，不需要另外安裝任何東西。
 
 - **資料夾或 NAS**：填伺服器上的路徑。`kanade` 帳號要能寫入（存放位置：`sudo chown -R kanade: /mnt/nas/kanade`，SMB／NFS 則用掛載的 `uid=` 選項）或讀取（只讀來源）。systemd 服務只把 `/usr`、`/boot`、`/etc` 設成唯讀，`/mnt`、`/srv`、`/media` 都可以用。存放位置裡會有一個 `.kanade-store` 檔：NAS 沒掛載時不會把檔案寫到底下的本機磁碟；只讀來源突然看起來空了時，會當成沒掛載，而不是檔案都被刪除。要讓 Kanade 開機時等 NAS 掛載好，執行 `sudo systemctl edit kanade`，加上 `[Unit]` 與 `RequiresMountsFor=/mnt/nas`。
 - **Cloudflare R2（或其他 S3 相容服務）**：在 Cloudflare 的 R2 →「管理 API 權杖」建立權杖，存放位置選「物件讀取和寫入」、只讀來源選「物件唯讀」，並限定這個 bucket；把 Access Key ID、Secret Access Key、bucket 的 S3 API 端點（`https://<帳戶 ID>.r2.cloudflarestorage.com`）、bucket 名稱和裡面的資料夾填到 Kanade。Bucket 保持私有：由伺服器簽章讀取，播放時以 Range 讀取。大檔案分段上傳，中斷後可以續傳；刪除的檔案移到 bucket 裡的 `.kanade-trash/`，保留 30 天。金鑰之後可以用「更新金鑰」更換，新的金鑰會先試過能用才換上。
@@ -77,7 +83,7 @@ curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh
 
 只讀來源可以指定一個分類：之後從它匯入的專輯自動放進這個分類。曲庫的「專輯」頁有儲存位置時，可以依來源篩選（全部、Google Drive 或某個位置），篩選後全選就能一次整理已經匯入的專輯。
 
-要換位置時可以搬移檔案：在存放位置（或 Google Drive）那一行按「搬移到…」把裡面曲庫的所有檔案搬到另一個位置，或在專輯選單、選取多張專輯時選「搬移檔案」只搬那些專輯。每個檔案複製到新位置並核對 SHA-256 之後，曲庫才改從新位置讀取，原本的檔案 15 分鐘後移到它所在位置的垃圾桶；進度在「任務」頁，目的地暫時連不上或空間不夠時會自動再試。只讀來源裡的檔案不會搬。曲庫還有檔案在某個存放位置時不能移除它，先把檔案搬走；有搬移正把檔案搬進來時也不能移除。
+要換位置時可以搬移檔案：在存放位置（或 Google Drive）那一行按「搬移到…」把裡面曲庫的所有檔案搬到另一個位置，或在專輯選單、選取多張專輯時選「搬移檔案」只搬那些專輯。每個檔案複製到新位置並核對 SHA-256 之後，曲庫才改從新位置讀取，原本的檔案 15 分鐘後移到它所在位置的垃圾桶；進度在「任務」頁，目的地暫時連不上或空間不夠時會自動再試。只讀來源裡的檔案不會搬。曲庫還有檔案在某個存放位置時不能移除它，先把檔案搬走；有搬移正把檔案搬進來、或資料庫備份存在那裡時也不能移除。
 
 ## 目錄
 
@@ -86,10 +92,11 @@ curl -fsSL https://github.com/HHim8826/kanade/releases/latest/download/kanade.sh
 | `server/` | Go 服務（`kanade`）：API、匯入、儲存（Drive、資料夾、S3／R2、OneDrive）、aria2 下載、串流快取、聆聽統計、內嵌的網頁端 |
 | `server/internal/web/static/` | 瀏覽器端（Preact + htm，不需要建置），網址在 `/app/` |
 | `server/scripts/upload-folder.py` | 命令列上傳工具，也是用戶端上傳方式的參考 |
+| `server/scripts/webtest/` | 瀏覽器測試：用 FFmpeg 產生示範曲庫、啟動 Kanade，在 Chrome 檢查各頁面（淺色與深色的 axe-core 無障礙檢查、鍵盤與焦點、主要操作流程，以及頁面出現後沒有內容被推動） |
 | `scripts/kanade.sh` | 安裝與管理腳本（`kanade-manager`） |
-| `.github/workflows/ci.yml` | 推送到 main 與 pull request 的 CI：gofmt、vet、開 race detector 的測試（含 aria2 與 FFmpeg）、網頁端檢查（`server/scripts/check-web.mjs`）、shellcheck 與 actionlint |
+| `.github/workflows/ci.yml` | 推送到 main 與 pull request 的 CI：gofmt、vet、開 race detector 的測試（含 aria2 與 FFmpeg）、網頁端檢查（`server/scripts/check-web.mjs`）、瀏覽器測試、shellcheck 與 actionlint |
 | `.github/workflows/release.yml` | 每個版本標籤先跑 CI，再建置並發佈 release |
-| `docs/` | 計畫、決策（D1–D13，優先於計畫）、含 API 的現行後端設計、記錄每一版做了什麼與怎麼驗證的變更紀錄、P0 驗證結果、曲庫調查；`docs/images/` 是上面的截圖 |
+| `docs/` | 計畫、決策（D1–D13，優先於計畫）、含 API 的現行後端設計、記錄每一版做了什麼與怎麼驗證的變更紀錄、P0 驗證結果、曲庫調查；`docs/images/` 是上面的封面與截圖 |
 
 ## 建置與執行
 
